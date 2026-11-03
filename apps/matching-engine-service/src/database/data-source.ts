@@ -5,8 +5,9 @@ import { User } from '../auth/entities/user.entity';
 import { Order } from '../orders/entities/order.entity';
 import { TradeRecord } from '../orders/entities/trade-record.entity';
 import { InstrumentState } from '../orders/entities/instrument-state.entity';
+import { OutboxMessage } from '../outbox/outbox-message.entity';
 
-export const entities = [User, Order, TradeRecord, InstrumentState];
+export const entities = [User, Order, TradeRecord, InstrumentState, OutboxMessage];
 
 export function buildDataSourceOptions(): DataSourceOptions {
   return {
