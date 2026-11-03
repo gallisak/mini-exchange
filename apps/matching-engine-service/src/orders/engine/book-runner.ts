@@ -10,6 +10,8 @@ import { RedisService } from '../../redis/redis.service';
 import { EngineState, applyCommands, isValidSubmit } from './apply-commands';
 import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
 import { FencedOutError } from './fenced-out.error';
+import { OutboxMessage } from '../../outbox/outbox-message.entity';
+import { tradeExecutedMessage } from '../../outbox/trade-event';
 
 export interface BookRunnerOptions {
   dataSource: DataSource;
@@ -200,6 +202,7 @@ export class BookRunner {
       }
       if (result.trades.length > 0) {
         await manager.insert(TradeRecord, result.trades);
+        await manager.insert(OutboxMessage, result.trades.map(tradeExecutedMessage));
       }
     });
 
