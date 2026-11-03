@@ -49,13 +49,7 @@ export class OrdersService {
     // подій Node.js (наприклад, паралельному виклику submitOrder для
     // того самого інструмента).
     await this.orders.save(
-      this.orders.create({
-        ...incoming,
-        remainingQuantity: result.restingOrder
-          ? result.restingOrder.remainingQuantity
-          : '0',
-        status: result.restingOrder ? result.restingOrder.status : 'filled',
-      }),
+      [result.incomingOrder, ...result.touchedOrders].map((order) => this.orders.create(order)),
     );
 
     // Застосовуємо результат зіставлення (обчислений зі знімку книги,
