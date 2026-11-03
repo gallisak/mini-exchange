@@ -1,41 +1,45 @@
-import { Injectable, OnModuleDestroy } from '@nestjs/common';
-import Redis from 'ioredis';
+import { Injectable } from '@nestjs/common';
+import { RedisService } from '../redis/redis.service';
 
-/**
- * Розподілене блокування "власник інструмента" на базі Redis.
- *
- * NOTE (стартовий код): це навмисно спрощена реалізація — придатна для
- * старту проєкту, але має відомі обмеження щодо стійкості до збоїв
- * (див. ТЗ, розділ 3.2 і 4.2 — очікується коректна стратегія TTL/renewal
- * і graceful failover). Використовується лише в
- * `InstrumentOwnershipService`, який ще не підключено до `OrdersService`.
- */
+const ACQUIRE = `
+if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2]) then
+  return redis.call('INCR', KEYS[2])
+end
+return 0
+`;
+
+const RENEW = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('PEXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+`;
+
+const RELEASE = `
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+`;
+
 @Injectable()
-export class RedisLockService implements OnModuleDestroy {
-  private client: Redis;
+export class RedisLockService {
+  constructor(private readonly redis: RedisService) {}
 
-  constructor() {
-    this.client = new Redis({
-      host: process.env.REDIS_HOST ?? 'localhost',
-      port: Number(process.env.REDIS_PORT ?? 6379),
-    });
+  async acquire(key: string, ownerId: string, ttlMs: number): Promise<bigint | null> {
+    const token = (await this.redis.client.eval(ACQUIRE, 2, key, fenceKey(key), ownerId, ttlMs)) as number;
+    return token > 0 ? BigInt(token) : null;
   }
 
-  async acquire(key: string, ownerId: string): Promise<boolean> {
-    // SET key ownerId NX — блокування без TTL: якщо процес, що тримає
-    // лок, аварійно завершиться, ключ лишиться в Redis назавжди.
-    const result = await this.client.set(key, ownerId, 'NX');
-    return result === 'OK';
+  async renew(key: string, ownerId: string, ttlMs: number): Promise<boolean> {
+    return (await this.redis.client.eval(RENEW, 1, key, ownerId, ttlMs)) === 1;
   }
 
-  async release(key: string, ownerId: string): Promise<void> {
-    const current = await this.client.get(key);
-    if (current === ownerId) {
-      await this.client.del(key);
-    }
+  async release(key: string, ownerId: string): Promise<boolean> {
+    return (await this.redis.client.eval(RELEASE, 1, key, ownerId)) === 1;
   }
+}
 
-  async onModuleDestroy() {
-    await this.client.quit();
-  }
+function fenceKey(key: string): string {
+  return `${key}:fence`;
 }

@@ -11,10 +11,13 @@ export function instrumentLockKey(instrument: string): string {
 export class InstrumentOwnershipService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(InstrumentOwnershipService.name);
   private readonly ownerId = process.env.INSTANCE_ID ?? 'engine';
+  private readonly ttlMs = Number(process.env.LOCK_TTL_MS ?? 5000);
+  private readonly renewIntervalMs = Number(process.env.LOCK_RENEW_INTERVAL_MS ?? 1500);
   private readonly acquireIntervalMs = Number(process.env.LOCK_ACQUIRE_INTERVAL_MS ?? 1000);
   private readonly owned = new Set<string>();
-  private timer?: NodeJS.Timeout;
-  private ticking = false;
+  private acquireTimer?: NodeJS.Timeout;
+  private renewTimer?: NodeJS.Timeout;
+  private busy = false;
   private stopped = false;
 
   constructor(
@@ -27,14 +30,17 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    await this.tick();
-    this.timer = setInterval(() => void this.tick(), this.acquireIntervalMs);
+    await this.acquireFree();
+    this.acquireTimer = setInterval(() => void this.exclusive(() => this.acquireFree()), this.acquireIntervalMs);
+    this.renewTimer = setInterval(() => void this.exclusive(() => this.renewOwned()), this.renewIntervalMs);
   }
 
   async onModuleDestroy(): Promise<void> {
     this.stopped = true;
-    clearInterval(this.timer);
-    for (const instrument of this.owned) {
+    clearInterval(this.acquireTimer);
+    clearInterval(this.renewTimer);
+    for (const instrument of [...this.owned]) {
+      this.owned.delete(instrument);
       await this.engine.stopInstrument(instrument);
       await this.lock
         .release(instrumentLockKey(instrument), this.ownerId)
@@ -42,26 +48,48 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
           this.logger.error(`Could not release ${instrument}: ${error.message}`),
         );
     }
-    this.owned.clear();
   }
 
-  private async tick(): Promise<void> {
-    if (this.ticking || this.stopped) return;
-    this.ticking = true;
+  private async exclusive(task: () => Promise<void>): Promise<void> {
+    if (this.busy || this.stopped) return;
+    this.busy = true;
     try {
-      for (const instrument of INSTRUMENTS) {
-        if (this.stopped) return;
-        if (this.owned.has(instrument)) continue;
-        if (await this.lock.acquire(instrumentLockKey(instrument), this.ownerId)) {
-          this.owned.add(instrument);
-          await this.engine.startInstrument(instrument);
-          this.logger.log(`${this.ownerId} owns ${instrument}`);
-        }
-      }
+      await task();
     } catch (error) {
       this.logger.error(`Ownership check failed: ${(error as Error).message}`);
     } finally {
-      this.ticking = false;
+      this.busy = false;
     }
+  }
+
+  private async acquireFree(): Promise<void> {
+    for (const instrument of INSTRUMENTS) {
+      if (this.stopped || this.owned.has(instrument)) continue;
+      const token = await this.lock.acquire(instrumentLockKey(instrument), this.ownerId, this.ttlMs);
+      if (token === null) continue;
+      this.owned.add(instrument);
+      try {
+        await this.engine.startInstrument(instrument);
+        this.logger.log(`${this.ownerId} owns ${instrument} with token ${token}`);
+      } catch (error) {
+        this.owned.delete(instrument);
+        await this.lock.release(instrumentLockKey(instrument), this.ownerId);
+        throw error;
+      }
+    }
+  }
+
+  private async renewOwned(): Promise<void> {
+    for (const instrument of [...this.owned]) {
+      if (this.stopped) return;
+      const renewed = await this.lock.renew(instrumentLockKey(instrument), this.ownerId, this.ttlMs);
+      if (!renewed) await this.demote(instrument);
+    }
+  }
+
+  private async demote(instrument: string): Promise<void> {
+    this.owned.delete(instrument);
+    await this.engine.stopInstrument(instrument);
+    this.logger.warn(`${this.ownerId} lost ownership of ${instrument}`);
   }
 }
