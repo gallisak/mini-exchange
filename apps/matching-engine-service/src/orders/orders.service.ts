@@ -72,7 +72,7 @@ export class OrdersService {
     return result.trades.map(toPublicTrade);
   }
 
-  async cancelOrder(orderId: string, instrument: string, ownerId: string): Promise<void> {
+  async cancelOrder(orderId: string, ownerId: string): Promise<void> {
     const order = await this.orders.findOne({ where: { id: orderId, ownerId } });
     if (!order) {
       throw new NotFoundException('Заявку не знайдено');
@@ -80,7 +80,7 @@ export class OrdersService {
     order.status = 'cancelled';
     order.remainingQuantity = '0';
     await this.orders.save(order);
-    this.orderBook.removeOrder(instrument, orderId);
+    this.orderBook.removeOrder(order.instrument, orderId);
   }
 
   async listOwn(ownerId: string): Promise<Order[]> {
