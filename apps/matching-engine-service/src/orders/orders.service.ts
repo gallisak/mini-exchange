@@ -1,24 +1,39 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  ConflictException,
+  Injectable,
+  NotFoundException,
+  UnprocessableEntityException,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { randomUUID } from 'crypto';
 import { Order } from './entities/order.entity';
 import { OrderBookService } from './order-book.service';
 import { SubmitOrderDto } from './dto/submit-order.dto';
-import { matchOrder } from './matcher';
-import { PublicTrade, Trade } from './order-book.types';
+import { CommandStreamService } from './engine/command-stream.service';
+import { RedisService } from '../redis/redis.service';
 import { PRICE_SCALE, QUANTITY_SCALE, normalizeDecimal } from '../common/decimal';
+import { uuidV5 } from '../common/uuid';
 
-function toPublicTrade(trade: Trade): PublicTrade {
-  return {
-    id: trade.id,
-    instrument: trade.instrument,
-    buyOrderId: trade.buyOrderId,
-    sellOrderId: trade.sellOrderId,
-    price: trade.price,
-    quantity: trade.quantity,
-    executedAt: trade.executedAt,
-  };
+const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
+const IDEMPOTENCY_MISMATCH = 'Idempotency-Key was already used for a different order';
+
+function fingerprintOf(order: Order): string {
+  return [
+    order.instrument,
+    order.side,
+    normalizeDecimal(order.price, PRICE_SCALE),
+    normalizeDecimal(order.quantity, QUANTITY_SCALE),
+  ].join('|');
+}
+
+export interface OrderAccepted {
+  orderId: string;
+  status: 'accepted';
+}
+
+export interface CancelAccepted {
+  orderId: string;
+  status: 'cancel_requested';
 }
 
 @Injectable()
@@ -26,65 +41,64 @@ export class OrdersService {
   constructor(
     @InjectRepository(Order) private readonly orders: Repository<Order>,
     private readonly orderBook: OrderBookService,
+    private readonly commands: CommandStreamService,
+    private readonly redis: RedisService,
   ) {}
 
-  async submitOrder(dto: SubmitOrderDto, ownerId: string): Promise<PublicTrade[]> {
-    const incoming: Order = {
-      id: randomUUID(),
-      ownerId,
-      instrument: dto.instrument,
-      side: dto.side,
-      price: normalizeDecimal(dto.price, PRICE_SCALE),
-      quantity: normalizeDecimal(dto.quantity, QUANTITY_SCALE),
-      remainingQuantity: normalizeDecimal(dto.quantity, QUANTITY_SCALE),
-      status: 'open',
-      createdAt: new Date(),
-    };
+  async submitOrder(
+    dto: SubmitOrderDto,
+    ownerId: string,
+    idempotencyKey: string,
+  ): Promise<OrderAccepted> {
+    const price = normalizeDecimal(dto.price, PRICE_SCALE);
+    const quantity = normalizeDecimal(dto.quantity, QUANTITY_SCALE);
+    const fingerprint = [dto.instrument, dto.side, price, quantity].join('|');
+    const orderId = uuidV5(`${ownerId}:${dto.instrument}:${idempotencyKey}`);
 
-    const book = this.orderBook.snapshot(dto.instrument);
-    const result = matchOrder(book, incoming);
-
-    // Персистенція заявки в БД перед оновленням книги. Це асинхронна
-    // операція — під час await виконання переходить іншим таскам у черзі
-    // подій Node.js (наприклад, паралельному виклику submitOrder для
-    // того самого інструмента).
-    await this.orders.save(
-      this.orders.create({
-        ...incoming,
-        remainingQuantity: result.restingOrder
-          ? result.restingOrder.remainingQuantity
-          : '0',
-        status: result.restingOrder ? result.restingOrder.status : 'filled',
-      }),
+    const stored = await this.orders.findOne({ where: { id: orderId } });
+    if (stored && fingerprintOf(stored) !== fingerprint) {
+      throw new UnprocessableEntityException(IDEMPOTENCY_MISMATCH);
+    }
+    const recordKey = `orders:idempotency:${ownerId}:${idempotencyKey}`;
+    const claimed = await this.redis.client.set(
+      recordKey,
+      fingerprint,
+      'EX',
+      IDEMPOTENCY_TTL_SECONDS,
+      'NX',
     );
+    if (claimed !== 'OK') {
+      const previous = await this.redis.client.get(recordKey);
+      if (previous !== null && previous !== fingerprint) {
+        throw new UnprocessableEntityException(IDEMPOTENCY_MISMATCH);
+      }
+    }
 
-    // Застосовуємо результат зіставлення (обчислений зі знімку книги,
-    // знятого до await вище) до поточного стану книги інструмента.
-    this.orderBook.replace(dto.instrument, {
-      bids: result.updatedBids,
-      asks: result.updatedAsks,
+    await this.commands.append(dto.instrument, {
+      type: 'submit',
+      orderId,
+      ownerId,
+      side: dto.side,
+      price,
+      quantity,
     });
-
-    // TODO: опублікувати result.trades у чергу подій для settlement-service
-    // (наприклад, Redis Streams / Kafka, партиційовано за instrument).
-    // Поки що угоди лише повертаються викликачу й нікуди не публікуються.
-
-    return result.trades.map(toPublicTrade);
+    return { orderId, status: 'accepted' };
   }
 
-  async cancelOrder(orderId: string, instrument: string): Promise<void> {
-    const order = await this.orders.findOne({ where: { id: orderId } });
+  async cancelOrder(orderId: string, ownerId: string): Promise<CancelAccepted> {
+    const order = await this.orders.findOne({ where: { id: orderId, ownerId } });
     if (!order) {
-      throw new NotFoundException('Заявку не знайдено');
+      throw new NotFoundException('Order not found');
     }
-    order.status = 'cancelled';
-    order.remainingQuantity = '0';
-    await this.orders.save(order);
-    this.orderBook.removeOrder(instrument, orderId);
+    if (order.status === 'filled' || order.status === 'cancelled') {
+      throw new ConflictException(`Order is already ${order.status}`);
+    }
+    await this.commands.append(order.instrument, { type: 'cancel', orderId, ownerId });
+    return { orderId, status: 'cancel_requested' };
   }
 
   async listOwn(ownerId: string): Promise<Order[]> {
-    return this.orders.find({ where: { ownerId } });
+    return this.orders.find({ where: { ownerId }, order: { createdAt: 'DESC' } });
   }
 
   getDepth(instrument: string) {

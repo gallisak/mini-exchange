@@ -15,7 +15,10 @@ export default function OrdersPage() {
     try {
       const res = await fetch('/api/orders', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          'Idempotency-Key': crypto.randomUUID(),
+        },
         body: JSON.stringify({
           instrument,
           side,
@@ -24,8 +27,8 @@ export default function OrdersPage() {
         }),
       });
       if (!res.ok) throw new Error('Не вдалося подати заявку');
-      const trades = await res.json();
-      setResult(`Заявку прийнято. Угод: ${trades.length}`);
+      const { orderId } = await res.json();
+      setResult(`Заявку прийнято: ${orderId}`);
     } catch (err) {
       setResult((err as Error).message);
     }

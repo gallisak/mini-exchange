@@ -3,8 +3,10 @@ import { join } from 'path';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import { User } from '../auth/entities/user.entity';
 import { Order } from '../orders/entities/order.entity';
+import { TradeRecord } from '../orders/entities/trade-record.entity';
+import { InstrumentState } from '../orders/entities/instrument-state.entity';
 
-export const entities = [User, Order];
+export const entities = [User, Order, TradeRecord, InstrumentState];
 
 export function buildDataSourceOptions(): DataSourceOptions {
   return {

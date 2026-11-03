@@ -2,30 +2,78 @@ import { Repository } from 'typeorm';
 import { OrdersService } from '../src/orders/orders.service';
 import { OrderBookService } from '../src/orders/order-book.service';
 import { Order } from '../src/orders/entities/order.entity';
+import { CommandStreamService } from '../src/orders/engine/command-stream.service';
+import { OrderCommand } from '../src/orders/engine/order-command';
+import { RedisService } from '../src/redis/redis.service';
 
-function inMemoryRepository() {
-  return {
-    create: (order: Order) => order,
-    save: async (order: Order) => order,
-  } as unknown as Repository<Order>;
+function serviceWithRecordedCommands() {
+  const appended: { instrument: string; command: OrderCommand }[] = [];
+  const commands = {
+    append: async (instrument: string, command: OrderCommand) => {
+      appended.push({ instrument, command });
+      return `${appended.length}-0`;
+    },
+  } as unknown as CommandStreamService;
+  const records = new Map<string, string>();
+  const redis = {
+    client: {
+      set: async (key: string, value: string) => {
+        if (records.has(key)) return null;
+        records.set(key, value);
+        return 'OK';
+      },
+      get: async (key: string) => records.get(key) ?? null,
+    },
+  } as unknown as RedisService;
+  const service = new OrdersService(
+    { findOne: async () => null } as unknown as Repository<Order>,
+    new OrderBookService(),
+    commands,
+    redis,
+  );
+  return { service, appended };
 }
 
+const order = { instrument: 'ABC', side: 'buy' as const, price: '100.5', quantity: '2' };
+
 describe('submit order response', () => {
-  it('does not reveal who the counterparty is', async () => {
-    const service = new OrdersService(inMemoryRepository(), new OrderBookService());
-    await service.submitOrder(
-      { instrument: 'ABC', side: 'sell', price: '100.00', quantity: '1' },
-      'seller-id',
-    );
+  it('returns only the order id and status, never trades or counterparties', async () => {
+    const { service } = serviceWithRecordedCommands();
 
-    const trades = await service.submitOrder(
-      { instrument: 'ABC', side: 'buy', price: '100.00', quantity: '1' },
-      'buyer-id',
-    );
+    const response = await service.submitOrder(order, 'buyer-id', 'key-1');
 
-    expect(trades).toHaveLength(1);
-    expect(trades[0]).not.toHaveProperty('buyerId');
-    expect(trades[0]).not.toHaveProperty('sellerId');
-    expect(JSON.stringify(trades)).not.toContain('seller-id');
+    expect(Object.keys(response).sort()).toEqual(['orderId', 'status']);
+    expect(response.status).toBe('accepted');
+  });
+
+  it('queues the command with normalised price and quantity', async () => {
+    const { service, appended } = serviceWithRecordedCommands();
+
+    const { orderId } = await service.submitOrder(order, 'buyer-id', 'key-1');
+
+    expect(appended).toEqual([
+      {
+        instrument: 'ABC',
+        command: {
+          type: 'submit',
+          orderId,
+          ownerId: 'buyer-id',
+          side: 'buy',
+          price: '100.50',
+          quantity: '2.00000000',
+        },
+      },
+    ]);
+  });
+
+  it('gives a retry with the same key the same order id, scoped to the user', async () => {
+    const { service } = serviceWithRecordedCommands();
+
+    const first = await service.submitOrder(order, 'user-a', 'key-1');
+    const retry = await service.submitOrder(order, 'user-a', 'key-1');
+    const otherUser = await service.submitOrder(order, 'user-b', 'key-1');
+
+    expect(retry.orderId).toBe(first.orderId);
+    expect(otherUser.orderId).not.toBe(first.orderId);
   });
 });

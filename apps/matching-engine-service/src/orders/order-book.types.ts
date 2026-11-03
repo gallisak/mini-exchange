@@ -12,8 +12,6 @@ export interface Trade {
   executedAt: Date;
 }
 
-export type PublicTrade = Omit<Trade, 'buyerId' | 'sellerId'>;
-
 export interface BookSnapshot {
   bids: Order[]; // сортовані: ціна спадає, за рівної ціни — час зростає
   asks: Order[]; // сортовані: ціна зростає, за рівної ціни — час зростає

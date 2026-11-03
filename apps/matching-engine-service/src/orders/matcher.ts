@@ -108,7 +108,7 @@ function insertByPriceTimePriority(list: Order[], order: Order): Order[] {
   return sortByPriceTimePriority([...list, order], order.side);
 }
 
-function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
+export function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
   const result = [...list];
   result.sort((a, b) => {
     const priceDiff =
@@ -116,6 +116,7 @@ function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
         ? compareUnits(toUnits(b.price, PRICE_SCALE), toUnits(a.price, PRICE_SCALE)) // bids: спадання ціни
         : compareUnits(toUnits(a.price, PRICE_SCALE), toUnits(b.price, PRICE_SCALE)); // asks: зростання ціни
     if (priceDiff !== 0) return priceDiff;
+    if (a.seq != null && b.seq != null) return compareUnits(BigInt(a.seq), BigInt(b.seq));
     return a.createdAt.getTime() - b.createdAt.getTime();
   });
   return result;

@@ -25,6 +25,49 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  matching-engine-integration:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: apps/matching-engine-service
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: exchange
+          POSTGRES_PASSWORD: exchange
+          POSTGRES_DB: exchange
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U exchange"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+    env:
+      DATABASE_HOST: localhost
+      DATABASE_PORT: 5432
+      REDIS_HOST: localhost
+      REDIS_PORT: 6379
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: apps/matching-engine-service/package-lock.json
+      - run: npm ci
+      - run: npm run test:int
+
   settlement-service:
     runs-on: ubuntu-latest
     defaults:

@@ -3,7 +3,10 @@ import {
   Controller,
   Delete,
   Get,
+  HttpCode,
+  HttpStatus,
   Param,
+  ParseUUIDPipe,
   Post,
   Query,
   Request,
@@ -13,6 +16,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
 import { SubmitOrderDto } from './dto/submit-order.dto';
 import { InstrumentQueryDto } from './dto/instrument-query.dto';
+import { IdempotencyKey } from './idempotency-key.decorator';
 
 interface AuthenticatedRequest {
   user: { userId: string; email: string };
@@ -24,8 +28,13 @@ export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
   @Post()
-  submit(@Body() dto: SubmitOrderDto, @Request() req: AuthenticatedRequest) {
-    return this.orders.submitOrder(dto, req.user.userId);
+  @HttpCode(HttpStatus.ACCEPTED)
+  submit(
+    @Body() dto: SubmitOrderDto,
+    @IdempotencyKey() idempotencyKey: string,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.orders.submitOrder(dto, req.user.userId, idempotencyKey);
   }
 
   @Get()
@@ -39,7 +48,8 @@ export class OrdersController {
   }
 
   @Delete(':id')
-  cancel(@Param('id') id: string, @Query() query: InstrumentQueryDto) {
-    return this.orders.cancelOrder(id, query.instrument);
+  @HttpCode(HttpStatus.ACCEPTED)
+  cancel(@Param('id', ParseUUIDPipe) id: string, @Request() req: AuthenticatedRequest) {
+    return this.orders.cancelOrder(id, req.user.userId);
   }
 }
