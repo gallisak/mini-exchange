@@ -10,7 +10,10 @@
     "lint": "eslint \"{src,test}/**/*.ts\" --fix",
     "lint:ci": "eslint \"{src,test}/**/*.ts\"",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test": "jest"
+    "test": "jest",
+    "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
+    "migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
+    "migration:run:prod": "typeorm migration:run -d dist/database/data-source.js"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",
