@@ -12,6 +12,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
 import { SubmitOrderDto } from './dto/submit-order.dto';
+import { InstrumentQueryDto } from './dto/instrument-query.dto';
 
 interface AuthenticatedRequest {
   user: { userId: string; email: string };
@@ -33,12 +34,12 @@ export class OrdersController {
   }
 
   @Get('book')
-  getDepth(@Query('instrument') instrument: string) {
-    return this.orders.getDepth(instrument);
+  getDepth(@Query() query: InstrumentQueryDto) {
+    return this.orders.getDepth(query.instrument);
   }
 
   @Delete(':id')
-  cancel(@Param('id') id: string, @Query('instrument') instrument: string) {
-    return this.orders.cancelOrder(id, instrument);
+  cancel(@Param('id') id: string, @Query() query: InstrumentQueryDto) {
+    return this.orders.cancelOrder(id, query.instrument);
   }
 }

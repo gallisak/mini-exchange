@@ -19,8 +19,8 @@ export default function OrdersPage() {
         body: JSON.stringify({
           instrument,
           side,
-          price: Number(price),
-          quantity: Number(quantity),
+          price: price.trim(),
+          quantity: quantity.trim(),
         }),
       });
       if (!res.ok) throw new Error('Не вдалося подати заявку');

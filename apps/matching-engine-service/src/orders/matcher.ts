@@ -1,6 +1,16 @@
 import { randomUUID } from 'crypto';
 import { Order } from './entities/order.entity';
-import { BookSnapshot, MatchResult, Trade } from './order-book.types';
+import { BookSnapshot, MatchContext, MatchResult, Trade } from './order-book.types';
+import { PRICE_SCALE, QUANTITY_SCALE, fromUnits, toUnits } from '../common/decimal';
+
+const defaultContext: MatchContext = {
+  nextTradeId: () => randomUUID(),
+  now: () => new Date(),
+};
+
+function compareUnits(a: bigint, b: bigint): number {
+  return a === b ? 0 : a < b ? -1 : 1;
+}
 
 /**
  * Чиста функція зіставлення заявки з наявною книгою (price-time priority).
@@ -8,8 +18,13 @@ import { BookSnapshot, MatchResult, Trade } from './order-book.types';
  * повертає результат. Побічні ефекти (запис у реальну книгу, персистенція)
  * — відповідальність викликача.
  */
-export function matchOrder(book: BookSnapshot, incoming: Order): MatchResult {
+export function matchOrder(
+  book: BookSnapshot,
+  incoming: Order,
+  context: MatchContext = defaultContext,
+): MatchResult {
   const trades: Trade[] = [];
+  const touchedOrders: Order[] = [];
   const rawOpposite = incoming.side === 'buy' ? [...book.asks] : [...book.bids];
   const oppositeSide: Order['side'] = incoming.side === 'buy' ? 'sell' : 'buy';
   // Явно впорядковуємо протилежну сторону за price-time priority перед
@@ -18,40 +33,45 @@ export function matchOrder(book: BookSnapshot, incoming: Order): MatchResult {
   const opposite = sortByPriceTimePriority(rawOpposite, oppositeSide);
   const remainingOpposite: Order[] = [];
 
-  let remainingQty = Number(incoming.remainingQuantity);
+  const incomingPrice = toUnits(incoming.price, PRICE_SCALE);
+  let remainingQty = toUnits(incoming.remainingQuantity, QUANTITY_SCALE);
 
   for (const resting of opposite) {
+    const restingPrice = toUnits(resting.price, PRICE_SCALE);
     const priceCrosses =
-      incoming.side === 'buy'
-        ? Number(incoming.price) >= Number(resting.price)
-        : Number(incoming.price) <= Number(resting.price);
+      incoming.side === 'buy' ? incomingPrice >= restingPrice : incomingPrice <= restingPrice;
 
     // Self-trade prevention: заявки одного власника не зіставляються.
     const sameOwner = resting.ownerId === incoming.ownerId;
 
-    if (remainingQty > 0 && priceCrosses && !sameOwner) {
-      const tradeQty = Math.min(remainingQty, Number(resting.remainingQuantity));
+    if (remainingQty > 0n && priceCrosses && !sameOwner) {
+      const restingQty = toUnits(resting.remainingQuantity, QUANTITY_SCALE);
+      const tradeQty = remainingQty < restingQty ? remainingQty : restingQty;
+      const buyer = incoming.side === 'buy' ? incoming : resting;
+      const seller = incoming.side === 'buy' ? resting : incoming;
       trades.push({
-        id: randomUUID(),
+        id: context.nextTradeId(),
         instrument: incoming.instrument,
-        buyOrderId: incoming.side === 'buy' ? incoming.id : resting.id,
-        sellOrderId: incoming.side === 'buy' ? resting.id : incoming.id,
-        price: resting.price, // виконання за ціною заявки, що вже стояла в книзі
-        quantity: tradeQty.toFixed(8),
-        executedAt: new Date(),
+        buyOrderId: buyer.id,
+        sellOrderId: seller.id,
+        buyerId: buyer.ownerId,
+        sellerId: seller.ownerId,
+        price: fromUnits(restingPrice, PRICE_SCALE), // виконання за ціною заявки, що вже стояла в книзі
+        quantity: fromUnits(tradeQty, QUANTITY_SCALE),
+        executedAt: context.now(),
       });
 
-      remainingQty = Number((remainingQty - tradeQty).toFixed(8));
-      const restingRemainder = Number(
-        (Number(resting.remainingQuantity) - tradeQty).toFixed(8),
-      );
+      remainingQty -= tradeQty;
+      const restingRemainder = restingQty - tradeQty;
+      const touched: Order = {
+        ...resting,
+        remainingQuantity: fromUnits(restingRemainder, QUANTITY_SCALE),
+        status: restingRemainder > 0n ? 'partially_filled' : 'filled',
+      };
+      touchedOrders.push(touched);
 
-      if (restingRemainder > 0) {
-        remainingOpposite.push({
-          ...resting,
-          remainingQuantity: restingRemainder.toFixed(8),
-          status: 'partially_filled',
-        });
+      if (restingRemainder > 0n) {
+        remainingOpposite.push(touched);
       }
       // якщо restingRemainder === 0 — заявка повністю виконана, у книгу не повертається
     } else {
@@ -59,14 +79,17 @@ export function matchOrder(book: BookSnapshot, incoming: Order): MatchResult {
     }
   }
 
-  const restingOrder: Order | null =
-    remainingQty > 0
-      ? {
-          ...incoming,
-          remainingQuantity: remainingQty.toFixed(8),
-          status: remainingQty < Number(incoming.quantity) ? 'partially_filled' : 'open',
-        }
-      : null;
+  const incomingOrder: Order = {
+    ...incoming,
+    remainingQuantity: fromUnits(remainingQty, QUANTITY_SCALE),
+    status:
+      remainingQty === 0n
+        ? 'filled'
+        : remainingQty < toUnits(incoming.quantity, QUANTITY_SCALE)
+          ? 'partially_filled'
+          : 'open',
+  };
+  const restingOrder: Order | null = remainingQty > 0n ? incomingOrder : null;
 
   const same = incoming.side === 'buy' ? book.bids : book.asks;
   const updatedSame = restingOrder ? insertByPriceTimePriority(same, restingOrder) : same;
@@ -74,6 +97,8 @@ export function matchOrder(book: BookSnapshot, incoming: Order): MatchResult {
   return {
     trades,
     restingOrder,
+    incomingOrder,
+    touchedOrders,
     updatedBids: incoming.side === 'buy' ? updatedSame : remainingOpposite,
     updatedAsks: incoming.side === 'buy' ? remainingOpposite : updatedSame,
   };
@@ -88,8 +113,8 @@ function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
   result.sort((a, b) => {
     const priceDiff =
       side === 'buy'
-        ? Number(b.price) - Number(a.price) // bids: спадання ціни
-        : Number(a.price) - Number(b.price); // asks: зростання ціни
+        ? compareUnits(toUnits(b.price, PRICE_SCALE), toUnits(a.price, PRICE_SCALE)) // bids: спадання ціни
+        : compareUnits(toUnits(a.price, PRICE_SCALE), toUnits(b.price, PRICE_SCALE)); // asks: зростання ціни
     if (priceDiff !== 0) return priceDiff;
     return a.createdAt.getTime() - b.createdAt.getTime();
   });
