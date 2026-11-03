@@ -10,11 +10,13 @@ import { InstrumentState } from './entities/instrument-state.entity';
 import { RedisLockService } from '../locks/redis-lock.service';
 import { CommandStreamService } from './engine/command-stream.service';
 import { MatchingEngineService } from './engine/matching-engine.service';
+import { InstrumentOwnershipService } from './engine/instrument-ownership.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Order, TradeRecord, InstrumentState])],
   controllers: [OrdersController],
   providers: [
+    InstrumentOwnershipService,
     OrdersService,
     OrderBookService,
     OrdersGateway,
