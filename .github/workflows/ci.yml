@@ -19,9 +19,11 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: apps/matching-engine-service/package-lock.json
-      - run: npm install
-      - run: npm run lint
+      - run: npm ci
+      - run: npm run lint:ci
+      - run: npm run typecheck
       - run: npm test
+      - run: npm run build
 
   settlement-service:
     runs-on: ubuntu-latest
@@ -35,8 +37,10 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: apps/settlement-service/package-lock.json
-      - run: npm install
-      - run: npm run lint
+      - run: npm ci
+      - run: npm run lint:ci
+      - run: npm run typecheck
+      - run: npm run build
 
   frontend:
     runs-on: ubuntu-latest
@@ -50,5 +54,7 @@ jobs:
           node-version: 20
           cache: npm
           cache-dependency-path: apps/frontend/package-lock.json
-      - run: npm install
+      - run: npm ci
       - run: npm run lint
+      - run: npm run typecheck
+      - run: npm run build
