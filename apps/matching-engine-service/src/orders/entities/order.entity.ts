@@ -1,9 +1,13 @@
-import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
+import { Column, Entity, Index, PrimaryGeneratedColumn } from 'typeorm';
 
 export type OrderSide = 'buy' | 'sell';
 export type OrderStatus = 'open' | 'partially_filled' | 'filled' | 'cancelled';
 
 @Entity('orders')
+@Index('IDX_orders_owner_created', ['ownerId', 'createdAt'])
+@Index('IDX_orders_open_by_instrument', ['instrument', 'seq'], {
+  where: `"status" IN ('open', 'partially_filled')`,
+})
 export class Order {
   @PrimaryGeneratedColumn('uuid')
   id: string;
@@ -31,4 +35,7 @@ export class Order {
 
   @Column({ type: 'timestamptz' })
   createdAt: Date;
+
+  @Column('bigint', { nullable: true })
+  seq?: string | null;
 }
