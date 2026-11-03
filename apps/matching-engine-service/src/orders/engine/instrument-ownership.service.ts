@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
+import { randomUUID } from 'crypto';
 import { INSTRUMENTS } from '../../common/instruments';
 import { RedisLockService } from '../../locks/redis-lock.service';
 import { MatchingEngineService } from './matching-engine.service';
@@ -10,7 +11,7 @@ export function instrumentLockKey(instrument: string): string {
 @Injectable()
 export class InstrumentOwnershipService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(InstrumentOwnershipService.name);
-  private readonly ownerId = process.env.INSTANCE_ID ?? 'engine';
+  private readonly ownerId = `${process.env.INSTANCE_ID ?? 'engine'}:${randomUUID()}`;
   private readonly ttlMs = Number(process.env.LOCK_TTL_MS ?? 5000);
   private readonly renewIntervalMs = Number(process.env.LOCK_RENEW_INTERVAL_MS ?? 1500);
   private readonly acquireIntervalMs = Number(process.env.LOCK_ACQUIRE_INTERVAL_MS ?? 1000);
