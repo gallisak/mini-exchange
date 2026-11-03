@@ -3,6 +3,13 @@ import { DataSource } from 'typeorm';
 import { RedisService } from '../../redis/redis.service';
 import { OrderBookService } from '../order-book.service';
 import { BookRunner } from './book-runner';
+import { FencedOutError } from './fenced-out.error';
+
+export interface InstrumentLease {
+  fence: bigint;
+  isValid: () => boolean;
+  onFenced: (error: FencedOutError) => void;
+}
 
 @Injectable()
 export class MatchingEngineService implements OnModuleDestroy {
@@ -18,7 +25,7 @@ export class MatchingEngineService implements OnModuleDestroy {
     return this.runners.has(instrument);
   }
 
-  async startInstrument(instrument: string): Promise<void> {
+  async startInstrument(instrument: string, lease: InstrumentLease): Promise<void> {
     if (this.runners.has(instrument)) return;
     const runner = new BookRunner(instrument, {
       dataSource: this.dataSource,
@@ -27,6 +34,13 @@ export class MatchingEngineService implements OnModuleDestroy {
       batchSize: 100,
       blockMs: 1000,
       retryDelayMs: 1000,
+      fence: lease.fence,
+      leaseValid: lease.isValid,
+      onFenced: (error) => {
+        if (this.runners.get(instrument) === runner) this.runners.delete(instrument);
+        void runner.stop();
+        lease.onFenced(error);
+      },
     });
     await runner.start();
     this.runners.set(instrument, runner);

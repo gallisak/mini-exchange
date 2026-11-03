@@ -22,6 +22,13 @@ end
 return 0
 `;
 
+const RAISE_FENCE = `
+if tonumber(redis.call('GET', KEYS[1]) or '0') < tonumber(ARGV[1]) then
+  redis.call('SET', KEYS[1], ARGV[1])
+end
+return redis.call('GET', KEYS[1])
+`;
+
 @Injectable()
 export class RedisLockService {
   constructor(private readonly redis: RedisService) {}
@@ -37,6 +44,10 @@ export class RedisLockService {
 
   async release(key: string, ownerId: string): Promise<boolean> {
     return (await this.redis.client.eval(RELEASE, 1, key, ownerId)) === 1;
+  }
+
+  async raiseFence(key: string, atLeast: bigint): Promise<void> {
+    await this.redis.client.eval(RAISE_FENCE, 1, fenceKey(key), atLeast.toString());
   }
 }
 
