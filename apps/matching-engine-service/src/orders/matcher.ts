@@ -1,6 +1,11 @@
 import { randomUUID } from 'crypto';
 import { Order } from './entities/order.entity';
 import { BookSnapshot, MatchResult, Trade } from './order-book.types';
+import { PRICE_SCALE, QUANTITY_SCALE, fromUnits, toUnits } from '../common/decimal';
+
+function compareUnits(a: bigint, b: bigint): number {
+  return a === b ? 0 : a < b ? -1 : 1;
+}
 
 /**
  * Чиста функція зіставлення заявки з наявною книгою (price-time priority).
@@ -18,38 +23,37 @@ export function matchOrder(book: BookSnapshot, incoming: Order): MatchResult {
   const opposite = sortByPriceTimePriority(rawOpposite, oppositeSide);
   const remainingOpposite: Order[] = [];
 
-  let remainingQty = Number(incoming.remainingQuantity);
+  const incomingPrice = toUnits(incoming.price, PRICE_SCALE);
+  let remainingQty = toUnits(incoming.remainingQuantity, QUANTITY_SCALE);
 
   for (const resting of opposite) {
+    const restingPrice = toUnits(resting.price, PRICE_SCALE);
     const priceCrosses =
-      incoming.side === 'buy'
-        ? Number(incoming.price) >= Number(resting.price)
-        : Number(incoming.price) <= Number(resting.price);
+      incoming.side === 'buy' ? incomingPrice >= restingPrice : incomingPrice <= restingPrice;
 
     // Self-trade prevention: заявки одного власника не зіставляються.
     const sameOwner = resting.ownerId === incoming.ownerId;
 
-    if (remainingQty > 0 && priceCrosses && !sameOwner) {
-      const tradeQty = Math.min(remainingQty, Number(resting.remainingQuantity));
+    if (remainingQty > 0n && priceCrosses && !sameOwner) {
+      const restingQty = toUnits(resting.remainingQuantity, QUANTITY_SCALE);
+      const tradeQty = remainingQty < restingQty ? remainingQty : restingQty;
       trades.push({
         id: randomUUID(),
         instrument: incoming.instrument,
         buyOrderId: incoming.side === 'buy' ? incoming.id : resting.id,
         sellOrderId: incoming.side === 'buy' ? resting.id : incoming.id,
-        price: resting.price, // виконання за ціною заявки, що вже стояла в книзі
-        quantity: tradeQty.toFixed(8),
+        price: fromUnits(restingPrice, PRICE_SCALE), // виконання за ціною заявки, що вже стояла в книзі
+        quantity: fromUnits(tradeQty, QUANTITY_SCALE),
         executedAt: new Date(),
       });
 
-      remainingQty = Number((remainingQty - tradeQty).toFixed(8));
-      const restingRemainder = Number(
-        (Number(resting.remainingQuantity) - tradeQty).toFixed(8),
-      );
+      remainingQty -= tradeQty;
+      const restingRemainder = restingQty - tradeQty;
 
-      if (restingRemainder > 0) {
+      if (restingRemainder > 0n) {
         remainingOpposite.push({
           ...resting,
-          remainingQuantity: restingRemainder.toFixed(8),
+          remainingQuantity: fromUnits(restingRemainder, QUANTITY_SCALE),
           status: 'partially_filled',
         });
       }
@@ -60,11 +64,12 @@ export function matchOrder(book: BookSnapshot, incoming: Order): MatchResult {
   }
 
   const restingOrder: Order | null =
-    remainingQty > 0
+    remainingQty > 0n
       ? {
           ...incoming,
-          remainingQuantity: remainingQty.toFixed(8),
-          status: remainingQty < Number(incoming.quantity) ? 'partially_filled' : 'open',
+          remainingQuantity: fromUnits(remainingQty, QUANTITY_SCALE),
+          status:
+            remainingQty < toUnits(incoming.quantity, QUANTITY_SCALE) ? 'partially_filled' : 'open',
         }
       : null;
 
@@ -88,8 +93,8 @@ function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
   result.sort((a, b) => {
     const priceDiff =
       side === 'buy'
-        ? Number(b.price) - Number(a.price) // bids: спадання ціни
-        : Number(a.price) - Number(b.price); // asks: зростання ціни
+        ? compareUnits(toUnits(b.price, PRICE_SCALE), toUnits(a.price, PRICE_SCALE)) // bids: спадання ціни
+        : compareUnits(toUnits(a.price, PRICE_SCALE), toUnits(b.price, PRICE_SCALE)); // asks: зростання ціни
     if (priceDiff !== 0) return priceDiff;
     return a.createdAt.getTime() - b.createdAt.getTime();
   });
