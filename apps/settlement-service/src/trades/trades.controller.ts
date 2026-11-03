@@ -1,6 +1,7 @@
-import { Body, Controller, Post } from '@nestjs/common';
+import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
 import { TradesService } from './trades.service';
 import { SettleTradeDto } from './dto/settle-trade.dto';
+import { InternalKeyGuard } from '../auth/internal-key.guard';
 
 @Controller('trades')
 export class TradesController {
@@ -9,6 +10,8 @@ export class TradesController {
   // TODO: замінити на консюмер черги подій (партиційованої за instrument),
   // а не прямий HTTP-виклик. Ендпоінт лишається зручним для тестування.
   @Post('settle')
+  @HttpCode(200)
+  @UseGuards(InternalKeyGuard)
   settle(@Body() dto: SettleTradeDto) {
     return this.trades.settle(dto);
   }
