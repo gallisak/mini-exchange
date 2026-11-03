@@ -1,4 +1,5 @@
 import Redis from 'ioredis';
+import { io } from 'socket.io-client';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/data-source';
 import { applyCommands } from '../../src/orders/engine/apply-commands';
@@ -108,6 +109,23 @@ describe('instrument failover between engine processes', () => {
     expect(await lockOwner('ABC')).toMatch(/^engine-b/);
     expect((await client.orders(seller)).every((order) => order.status === 'filled')).toBe(true);
     await expectStoredStateMatchesReplay();
+  });
+
+  it('gives a WebSocket client the real book even on an instance that does not own it', async () => {
+    const { standby } = await startPair(LONG_LEASE);
+    const client = api(standby);
+    const seller = await client.register();
+    await client.submit(seller, { side: 'sell', price: '100.00', quantity: '1' });
+    await eventually(async () => expect(await client.orders(seller)).toHaveLength(1));
+
+    const socket = io(standby.url, { transports: ['websocket'] });
+    try {
+      const book = new Promise<{ asks: unknown[] }>((resolve) => socket.once('book', resolve));
+      socket.emit('subscribe', 'ABC');
+      expect((await book).asks).toHaveLength(1);
+    } finally {
+      socket.disconnect();
+    }
   });
 
   it('hands an instrument over at once when its owner shuts down gracefully', async () => {

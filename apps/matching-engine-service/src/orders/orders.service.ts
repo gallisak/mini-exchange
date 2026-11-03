@@ -5,11 +5,12 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { In, Repository } from 'typeorm';
 import { Order } from './entities/order.entity';
-import { OrderBookService } from './order-book.service';
 import { SubmitOrderDto } from './dto/submit-order.dto';
 import { CommandStreamService } from './engine/command-stream.service';
+import { BookSnapshot } from './order-book.types';
+import { sortByPriceTimePriority } from './matcher';
 import { RedisService } from '../redis/redis.service';
 import { PRICE_SCALE, QUANTITY_SCALE, normalizeDecimal } from '../common/decimal';
 import { uuidV5 } from '../common/uuid';
@@ -40,7 +41,6 @@ export interface CancelAccepted {
 export class OrdersService {
   constructor(
     @InjectRepository(Order) private readonly orders: Repository<Order>,
-    private readonly orderBook: OrderBookService,
     private readonly commands: CommandStreamService,
     private readonly redis: RedisService,
   ) {}
@@ -101,7 +101,19 @@ export class OrdersService {
     return this.orders.find({ where: { ownerId }, order: { createdAt: 'DESC' } });
   }
 
-  getDepth(instrument: string) {
-    return this.orderBook.depth(instrument);
+  async getDepth(instrument: string): Promise<BookSnapshot> {
+    const open = await this.orders.find({
+      where: { instrument, status: In(['open', 'partially_filled']) },
+    });
+    return {
+      bids: sortByPriceTimePriority(
+        open.filter((order) => order.side === 'buy'),
+        'buy',
+      ),
+      asks: sortByPriceTimePriority(
+        open.filter((order) => order.side === 'sell'),
+        'sell',
+      ),
+    };
   }
 }
