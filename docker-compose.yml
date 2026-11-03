@@ -73,12 +73,24 @@ services:
     ports:
       - '3001:3001'
 
-  settlement-service:
+  settlement-migrate:
     build: ./apps/settlement-service
     env_file: ./apps/settlement-service/.env.example
+    command: ['npm', 'run', 'migration:run:prod']
     depends_on:
       exchange-db:
         condition: service_healthy
+    restart: 'no'
+
+  settlement-service:
+    build: ./apps/settlement-service
+    env_file: ./apps/settlement-service/.env.example
+    restart: unless-stopped
+    depends_on:
+      exchange-db:
+        condition: service_healthy
+      settlement-migrate:
+        condition: service_completed_successfully
     ports:
       - '3002:3002'
 
