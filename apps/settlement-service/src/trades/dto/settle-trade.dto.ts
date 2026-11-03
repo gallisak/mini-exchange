@@ -10,9 +10,6 @@ import {
   QUANTITY_SCALE,
 } from '../../common/decimal';
 
-// Каркас DTO для події угоди, що приходитиме з matching-engine-service
-// через чергу. Поки що ендпоінт приймає її напряму по HTTP для зручності
-// розробки — інтеграцію з реальною чергою потрібно додати (див. ТЗ).
 const lowerCase = ({ value }: { value: unknown }) =>
   typeof value === 'string' ? value.toLowerCase() : value;
 

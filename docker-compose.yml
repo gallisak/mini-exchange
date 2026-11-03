@@ -86,8 +86,11 @@ services:
     build: ./apps/settlement-service
     env_file: ./apps/settlement-service/.env.example
     restart: unless-stopped
+    stop_grace_period: 15s
     depends_on:
       exchange-db:
+        condition: service_healthy
+      redis:
         condition: service_healthy
       settlement-migrate:
         condition: service_completed_successfully

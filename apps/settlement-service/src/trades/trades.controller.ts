@@ -7,8 +7,6 @@ import { InternalKeyGuard } from '../auth/internal-key.guard';
 export class TradesController {
   constructor(private readonly trades: TradesService) {}
 
-  // TODO: замінити на консюмер черги подій (партиційованої за instrument),
-  // а не прямий HTTP-виклик. Ендпоінт лишається зручним для тестування.
   @Post('settle')
   @HttpCode(200)
   @UseGuards(InternalKeyGuard)

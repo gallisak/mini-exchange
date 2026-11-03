@@ -5,6 +5,7 @@ import { TradesModule } from './trades/trades.module';
 import { buildDataSourceOptions } from './database/data-source';
 import { AuthModule } from './auth/auth.module';
 import { WalletsModule } from './wallets/wallets.module';
+import { ConsumerModule } from './consumer/consumer.module';
 
 @Module({
   imports: [
@@ -13,6 +14,7 @@ import { WalletsModule } from './wallets/wallets.module';
     AuthModule,
     TradesModule,
     WalletsModule,
+    ConsumerModule,
   ],
 })
 export class AppModule {}
