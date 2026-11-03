@@ -1,6 +1,5 @@
 import { Repository } from 'typeorm';
 import { OrdersService } from '../src/orders/orders.service';
-import { OrderBookService } from '../src/orders/order-book.service';
 import { Order } from '../src/orders/entities/order.entity';
 import { CommandStreamService } from '../src/orders/engine/command-stream.service';
 import { OrderCommand } from '../src/orders/engine/order-command';
@@ -27,7 +26,6 @@ function serviceWithRecordedCommands() {
   } as unknown as RedisService;
   const service = new OrdersService(
     { findOne: async () => null } as unknown as Repository<Order>,
-    new OrderBookService(),
     commands,
     redis,
   );

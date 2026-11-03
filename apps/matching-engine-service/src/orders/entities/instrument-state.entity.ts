@@ -16,4 +16,7 @@ export class InstrumentState {
 
   @Column('bigint', { default: 0 })
   bookSeq: string;
+
+  @Column('bigint', { default: 0 })
+  fence: string;
 }

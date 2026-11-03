@@ -9,6 +9,7 @@ import { sortByPriceTimePriority } from '../matcher';
 import { RedisService } from '../../redis/redis.service';
 import { EngineState, applyCommands, isValidSubmit } from './apply-commands';
 import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
+import { FencedOutError } from './fenced-out.error';
 
 export interface BookRunnerOptions {
   dataSource: DataSource;
@@ -17,6 +18,9 @@ export interface BookRunnerOptions {
   batchSize: number;
   blockMs: number;
   retryDelayMs: number;
+  fence: bigint;
+  leaseValid: () => boolean;
+  onFenced: (error: FencedOutError) => void;
 }
 
 type StreamEntry = [id: string, fields: string[]];
@@ -37,6 +41,7 @@ export class BookRunner {
   }
 
   async start(): Promise<void> {
+    await this.claimFence();
     await this.load();
     this.reader = this.options.redis.createConnection();
     this.readerId = (await this.reader.client('ID')) as number;
@@ -46,15 +51,19 @@ export class BookRunner {
 
   async stop(): Promise<void> {
     this.running = false;
-    if (this.readerId !== undefined) {
-      await this.options.redis.client.client('UNBLOCK', this.readerId).catch(() => undefined);
+    const reader = this.reader;
+    const readerId = this.readerId;
+    this.reader = undefined;
+    this.readerId = undefined;
+    if (readerId !== undefined) {
+      await this.options.redis.client.client('UNBLOCK', readerId).catch(() => undefined);
     }
     await this.loop;
-    await this.reader?.quit().catch(() => this.reader?.disconnect());
+    await reader?.quit().catch(() => reader.disconnect());
   }
 
-  private async load(): Promise<void> {
-    const { dataSource, orderBook } = this.options;
+  private async claimFence(): Promise<void> {
+    const { dataSource, fence } = this.options;
     await dataSource
       .createQueryBuilder()
       .insert()
@@ -62,6 +71,29 @@ export class BookRunner {
       .values({ instrument: this.instrument })
       .orIgnore()
       .execute();
+    const claimed = await dataSource
+      .createQueryBuilder()
+      .update(InstrumentState)
+      .set({ fence: fence.toString() })
+      .where('instrument = :instrument AND fence < :fence', {
+        instrument: this.instrument,
+        fence: fence.toString(),
+      })
+      .execute();
+    if (claimed.affected === 0) {
+      throw new FencedOutError(this.instrument, fence, await this.currentFence());
+    }
+  }
+
+  private async currentFence(): Promise<bigint> {
+    const row = await this.options.dataSource
+      .getRepository(InstrumentState)
+      .findOneByOrFail({ instrument: this.instrument });
+    return BigInt(row.fence);
+  }
+
+  private async load(): Promise<void> {
+    const { dataSource, orderBook } = this.options;
     const row = await dataSource
       .getRepository(InstrumentState)
       .findOneByOrFail({ instrument: this.instrument });
@@ -108,6 +140,12 @@ export class BookRunner {
         await this.process(entries.map(([id, fields]) => ({ id, command: decodeCommand(fields) })));
       } catch (error) {
         if (!this.running) return;
+        if (error instanceof FencedOutError) {
+          this.running = false;
+          this.logger.warn(error.message);
+          setImmediate(() => this.options.onFenced(error));
+          return;
+        }
         this.logger.error(`Batch failed, reloading state: ${(error as Error).message}`);
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
         await this.load().catch((loadError: Error) =>
@@ -139,16 +177,14 @@ export class BookRunner {
       new Set(known.map((order) => order.id)),
     );
 
+    if (!this.options.leaseValid()) {
+      throw new FencedOutError(this.instrument, this.options.fence, null);
+    }
+
     await dataSource.transaction(async (manager) => {
-      if (result.orders.length > 0) {
-        await manager.upsert(Order, result.orders, ['id']);
-      }
-      if (result.trades.length > 0) {
-        await manager.insert(TradeRecord, result.trades);
-      }
-      await manager.update(
+      const fenced = await manager.update(
         InstrumentState,
-        { instrument: this.instrument },
+        { instrument: this.instrument, fence: this.options.fence.toString() },
         {
           lastCommandId: result.state.lastCommandId,
           orderSeq: result.state.orderSeq.toString(),
@@ -156,6 +192,15 @@ export class BookRunner {
           bookSeq: result.state.bookSeq.toString(),
         },
       );
+      if (fenced.affected === 0) {
+        throw new FencedOutError(this.instrument, this.options.fence, await this.currentFence());
+      }
+      if (result.orders.length > 0) {
+        await manager.upsert(Order, result.orders, ['id']);
+      }
+      if (result.trades.length > 0) {
+        await manager.insert(TradeRecord, result.trades);
+      }
     });
 
     this.state = result.state;
