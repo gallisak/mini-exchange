@@ -4,6 +4,7 @@ import {
   Delete,
   Get,
   Param,
+  ParseUUIDPipe,
   Post,
   Query,
   Request,
@@ -39,7 +40,11 @@ export class OrdersController {
   }
 
   @Delete(':id')
-  cancel(@Param('id') id: string, @Query() query: InstrumentQueryDto) {
-    return this.orders.cancelOrder(id, query.instrument);
+  cancel(
+    @Param('id', ParseUUIDPipe) id: string,
+    @Query() query: InstrumentQueryDto,
+    @Request() req: AuthenticatedRequest,
+  ) {
+    return this.orders.cancelOrder(id, query.instrument, req.user.userId);
   }
 }
