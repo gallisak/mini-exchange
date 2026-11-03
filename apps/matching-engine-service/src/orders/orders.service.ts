@@ -7,6 +7,7 @@ import { OrderBookService } from './order-book.service';
 import { SubmitOrderDto } from './dto/submit-order.dto';
 import { matchOrder } from './matcher';
 import { Trade } from './order-book.types';
+import { PRICE_SCALE, QUANTITY_SCALE, normalizeDecimal } from '../common/decimal';
 
 @Injectable()
 export class OrdersService {
@@ -21,9 +22,9 @@ export class OrdersService {
       ownerId,
       instrument: dto.instrument,
       side: dto.side,
-      price: dto.price.toFixed(2),
-      quantity: dto.quantity.toFixed(8),
-      remainingQuantity: dto.quantity.toFixed(8),
+      price: normalizeDecimal(dto.price, PRICE_SCALE),
+      quantity: normalizeDecimal(dto.quantity, QUANTITY_SCALE),
+      remainingQuantity: normalizeDecimal(dto.quantity, QUANTITY_SCALE),
       status: 'open',
       createdAt: new Date(),
     };
