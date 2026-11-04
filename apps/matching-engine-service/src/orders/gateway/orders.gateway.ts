@@ -13,6 +13,7 @@ import Redis from 'ioredis';
 import { Server, Socket } from 'socket.io';
 import { OrdersService } from '../orders.service';
 import { INSTRUMENTS } from '../../common/instruments';
+import { corsOrigins, requireEnv } from '../../common/env';
 import { RedisService } from '../../redis/redis.service';
 import {
   MARKET_CHANNEL_PREFIX,
@@ -22,10 +23,6 @@ import {
 } from '../realtime/market-events';
 
 const bookRoom = (instrument: string) => `book:${instrument}`;
-const corsOrigins = (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
-  .split(',')
-  .map((origin) => origin.trim())
-  .filter((origin) => origin.length > 0);
 const userRoom = (userId: string) => `user:${userId}`;
 
 function parse<T>(message: string): T | null {
@@ -41,7 +38,7 @@ interface Identity {
   expiresAt: number;
 }
 
-@WebSocketGateway({ cors: { origin: corsOrigins } })
+@WebSocketGateway({ cors: { origin: corsOrigins() } })
 export class OrdersGateway
   implements OnGatewayConnection, OnGatewayDisconnect, OnGatewayInit, OnModuleDestroy
 {
@@ -139,7 +136,7 @@ export class OrdersGateway
     if (typeof token !== 'string') return null;
     try {
       const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown }>(token, {
-        secret: process.env.JWT_ACCESS_SECRET ?? 'change-me-access',
+        secret: requireEnv('JWT_ACCESS_SECRET'),
       });
       if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) return null;
       if (typeof payload.exp !== 'number') return null;

@@ -10,6 +10,7 @@ import * as bcrypt from 'bcrypt';
 import { User } from './entities/user.entity';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { requireEnv } from '../common/env';
 
 interface TokenPair {
   accessToken: string;
@@ -50,11 +51,11 @@ export class AuthService {
   private async issueTokens(user: User): Promise<TokenPair> {
     const payload = { sub: user.id, email: user.email };
     const accessToken = this.jwt.sign(payload, {
-      secret: process.env.JWT_ACCESS_SECRET ?? 'change-me-access',
+      secret: requireEnv('JWT_ACCESS_SECRET'),
       expiresIn: '15m',
     });
     const refreshToken = this.jwt.sign(payload, {
-      secret: process.env.JWT_REFRESH_SECRET ?? 'change-me-refresh',
+      secret: requireEnv('JWT_REFRESH_SECRET'),
       expiresIn: '7d',
     });
     user.refreshTokenHash = await bcrypt.hash(refreshToken, 10);
