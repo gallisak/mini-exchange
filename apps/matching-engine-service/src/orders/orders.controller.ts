@@ -23,11 +23,11 @@ interface AuthenticatedRequest {
 }
 
 @Controller('orders')
-@UseGuards(JwtAuthGuard)
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
   @Post()
+  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.ACCEPTED)
   submit(
     @Body() dto: SubmitOrderDto,
@@ -38,6 +38,7 @@ export class OrdersController {
   }
 
   @Get()
+  @UseGuards(JwtAuthGuard)
   listOwn(@Request() req: AuthenticatedRequest) {
     return this.orders.listOwn(req.user.userId);
   }
@@ -48,6 +49,7 @@ export class OrdersController {
   }
 
   @Delete(':id')
+  @UseGuards(JwtAuthGuard)
   @HttpCode(HttpStatus.ACCEPTED)
   cancel(@Param('id', ParseUUIDPipe) id: string, @Request() req: AuthenticatedRequest) {
     return this.orders.cancelOrder(id, req.user.userId);

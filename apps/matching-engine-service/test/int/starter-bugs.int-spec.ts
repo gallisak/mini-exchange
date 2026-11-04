@@ -2,7 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import {
   OrderRow,
   TestUser,
-  book,
+  restingOrders,
   cancel,
   createApp,
   eventually,
@@ -38,14 +38,14 @@ describe('starter order handling bugs', () => {
 
     responses.forEach((response) => expect(accepted).toContain(response.status));
     await eventually(async () => {
-      expect((await book(app, users[0])).bids).toHaveLength(10);
+      expect((await restingOrders(app)).bids).toHaveLength(10);
     });
   });
 
   it('never sells more than a resting order holds when buyers race for it', async () => {
     const [seller, ...buyers] = await Promise.all(range(11).map(() => register(app)));
     await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' });
-    await eventually(async () => expect((await book(app, seller)).asks).toHaveLength(1));
+    await eventually(async () => expect((await restingOrders(app)).asks).toHaveLength(1));
 
     await Promise.all(
       buyers.map((buyer) => submit(app, buyer, { side: 'buy', price: '100.00', quantity: '1' })),
@@ -55,7 +55,7 @@ describe('starter order handling bugs', () => {
       const orders = (await Promise.all(buyers.map((buyer) => listOrders(app, buyer)))).flat();
       expect(orders).toHaveLength(10);
       expect(orders.filter((order) => order.status === 'filled')).toHaveLength(1);
-      expect((await book(app, seller)).bids).toHaveLength(9);
+      expect((await restingOrders(app)).bids).toHaveLength(9);
     });
   });
 
@@ -64,7 +64,7 @@ describe('starter order handling bugs', () => {
     for (const i of range(15)) {
       await submit(app, seller, { side: 'sell', price: `${200 + i}.00`, quantity: '1' });
     }
-    await eventually(async () => expect((await book(app, seller)).asks).toHaveLength(15));
+    await eventually(async () => expect((await restingOrders(app)).asks).toHaveLength(15));
     const sells = await listOrders(app, seller);
 
     await Promise.all(
@@ -75,7 +75,7 @@ describe('starter order handling bugs', () => {
     );
 
     await eventually(async () => {
-      const current = await book(app, seller);
+      const current = await restingOrders(app);
       expect(current.asks).toHaveLength(0);
       expect(current.bids).toHaveLength(15);
     });
@@ -120,13 +120,13 @@ describe('starter order handling bugs', () => {
       expect(own.some((row) => row.price === '1.00')).toBe(true);
       expect(own.find((row) => row.id === order!.id)?.status).toBe('open');
     });
-    expect((await book(app, owner)).asks).toHaveLength(1);
+    expect((await restingOrders(app)).asks).toHaveLength(1);
   });
 
   it('marks a resting order filled in the database once it trades', async () => {
     const [seller, buyer] = await Promise.all(range(2).map(() => register(app)));
     await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' });
-    await eventually(async () => expect((await book(app, seller)).asks).toHaveLength(1));
+    await eventually(async () => expect((await restingOrders(app)).asks).toHaveLength(1));
 
     await submit(app, buyer, { side: 'buy', price: '100.00', quantity: '1' });
 
@@ -140,12 +140,12 @@ describe('starter order handling bugs', () => {
   it('keeps resting orders after a restart', async () => {
     const seller: TestUser = await register(app);
     await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' });
-    await eventually(async () => expect((await book(app, seller)).asks).toHaveLength(1));
+    await eventually(async () => expect((await restingOrders(app)).asks).toHaveLength(1));
 
     await app.close();
     app = await createApp();
 
-    await eventually(async () => expect((await book(app, seller)).asks).toHaveLength(1));
+    await eventually(async () => expect((await restingOrders(app)).asks).toHaveLength(1));
   });
 
   it('creates one order when a request is retried with the same Idempotency-Key', async () => {

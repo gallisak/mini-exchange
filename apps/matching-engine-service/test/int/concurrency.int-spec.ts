@@ -7,7 +7,7 @@ import { Order } from '../../src/orders/entities/order.entity';
 import { TradeRecord } from '../../src/orders/entities/trade-record.entity';
 import { QUANTITY_SCALE, toUnits } from '../../src/common/decimal';
 import {
-  book,
+  restingOrders,
   createApp,
   eventually,
   listOrders,
@@ -77,7 +77,7 @@ describe('concurrent order flow', () => {
       .getRepository(TradeRecord)
       .find({ where: { instrument: 'ABC' }, order: { seq: 'ASC' } });
     const stored = await dataSource.getRepository(Order).find({ where: { instrument: 'ABC' } });
-    const current = await book(app, users[0]);
+    const current = await restingOrders(app);
 
     expect(trades.length).toBeGreaterThan(0);
     expect(trades.map((t) => [t.id, t.buyOrderId, t.sellOrderId, t.price, t.quantity])).toEqual(

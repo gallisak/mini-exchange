@@ -10,6 +10,9 @@ import { RedisService } from '../../redis/redis.service';
 import { EngineState, applyCommands, isValidSubmit } from './apply-commands';
 import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
 import { FencedOutError } from './fenced-out.error';
+import { diffBooks } from '../depth';
+import { publicTrade } from '../../trades/public-trade';
+import { MarketEvent } from '../realtime/market-events';
 import { OutboxMessage } from '../../outbox/outbox-message.entity';
 import { tradeExecutedMessage } from '../../outbox/trade-event';
 
@@ -23,6 +26,8 @@ export interface BookRunnerOptions {
   fence: bigint;
   leaseValid: () => boolean;
   onFenced: (error: FencedOutError) => void;
+  publish?: (event: MarketEvent) => Promise<void>;
+  heartbeatMs?: number;
 }
 
 type StreamEntry = [id: string, fields: string[]];
@@ -33,6 +38,7 @@ export class BookRunner {
   private readerId?: number;
   private running = false;
   private loop?: Promise<void>;
+  private heartbeat?: NodeJS.Timeout;
   private state!: EngineState;
 
   constructor(
@@ -49,10 +55,14 @@ export class BookRunner {
     this.readerId = (await this.reader.client('ID')) as number;
     this.running = true;
     this.loop = this.run();
+    if (this.options.publish && this.options.heartbeatMs) {
+      this.heartbeat = setInterval(() => this.announceSeq(), this.options.heartbeatMs);
+    }
   }
 
   async stop(): Promise<void> {
     this.running = false;
+    clearInterval(this.heartbeat);
     const reader = this.reader;
     const readerId = this.readerId;
     this.reader = undefined;
@@ -62,6 +72,14 @@ export class BookRunner {
     }
     await this.loop;
     await reader?.quit().catch(() => reader.disconnect());
+  }
+
+  private announceSeq(): void {
+    if (!this.running) return;
+    void this.options.publish?.({
+      type: 'book_heartbeat',
+      heartbeat: { instrument: this.instrument, seq: Number(this.state.bookSeq) },
+    });
   }
 
   private async claimFence(): Promise<void> {
@@ -171,9 +189,10 @@ export class BookRunner {
             .getRepository(Order)
             .find({ select: { id: true }, where: { id: In(submitIds) } });
 
+    const before = orderBook.snapshot(this.instrument);
     const result = applyCommands(
       this.instrument,
-      orderBook.snapshot(this.instrument),
+      before,
       this.state,
       commands,
       new Set(known.map((order) => order.id)),
@@ -206,7 +225,41 @@ export class BookRunner {
       }
     });
 
+    const previousSeq = this.state.bookSeq;
     this.state = result.state;
     orderBook.replace(this.instrument, result.book);
+
+    if (result.trades.length > 0) {
+      void this.options.publish?.({
+        type: 'trades',
+        trades: result.trades.map(publicTrade),
+      });
+    }
+    if (result.orders.length > 0) {
+      void this.options.publish?.({
+        type: 'orders',
+        orders: result.orders.map((order) => ({
+          id: order.id,
+          ownerId: order.ownerId,
+          instrument: order.instrument,
+          side: order.side,
+          price: order.price,
+          quantity: order.quantity,
+          remainingQuantity: order.remainingQuantity,
+          status: order.status,
+          createdAt: order.createdAt.toISOString(),
+        })),
+      });
+    }
+    if (result.state.bookSeq !== previousSeq) {
+      void this.options.publish?.({
+        type: 'book_delta',
+        delta: {
+          instrument: this.instrument,
+          seq: Number(result.state.bookSeq),
+          changes: diffBooks(before, result.book),
+        },
+      });
+    }
   }
 }

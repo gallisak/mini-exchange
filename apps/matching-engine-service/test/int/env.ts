@@ -9,6 +9,7 @@ const defaults: Record<string, string> = {
   JWT_ACCESS_SECRET: 'test-access-secret',
   JWT_REFRESH_SECRET: 'test-refresh-secret',
   INSTANCE_ID: 'engine-test',
+  BOOK_HEARTBEAT_MS: '500',
 };
 
 for (const [key, value] of Object.entries(defaults)) {

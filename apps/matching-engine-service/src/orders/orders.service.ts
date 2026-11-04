@@ -9,8 +9,8 @@ import { In, Repository } from 'typeorm';
 import { Order } from './entities/order.entity';
 import { SubmitOrderDto } from './dto/submit-order.dto';
 import { CommandStreamService } from './engine/command-stream.service';
-import { BookSnapshot } from './order-book.types';
-import { sortByPriceTimePriority } from './matcher';
+import { InstrumentState } from './entities/instrument-state.entity';
+import { Depth, aggregate } from './depth';
 import { RedisService } from '../redis/redis.service';
 import { PRICE_SCALE, QUANTITY_SCALE, normalizeDecimal } from '../common/decimal';
 import { uuidV5 } from '../common/uuid';
@@ -30,6 +30,11 @@ function fingerprintOf(order: Order): string {
 export interface OrderAccepted {
   orderId: string;
   status: 'accepted';
+}
+
+export interface BookView extends Depth {
+  instrument: string;
+  seq: number;
 }
 
 export interface CancelAccepted {
@@ -101,19 +106,20 @@ export class OrdersService {
     return this.orders.find({ where: { ownerId }, order: { createdAt: 'DESC' } });
   }
 
-  async getDepth(instrument: string): Promise<BookSnapshot> {
-    const open = await this.orders.find({
-      where: { instrument, status: In(['open', 'partially_filled']) },
+  async getDepth(instrument: string): Promise<BookView> {
+    return this.orders.manager.transaction('REPEATABLE READ', async (manager) => {
+      const state = await manager.findOneBy(InstrumentState, { instrument });
+      const open = await manager.find(Order, {
+        where: { instrument, status: In(['open', 'partially_filled']) },
+      });
+      return {
+        instrument,
+        seq: Number(state?.bookSeq ?? 0),
+        ...aggregate({
+          bids: open.filter((order) => order.side === 'buy'),
+          asks: open.filter((order) => order.side === 'sell'),
+        }),
+      };
     });
-    return {
-      bids: sortByPriceTimePriority(
-        open.filter((order) => order.side === 'buy'),
-        'buy',
-      ),
-      asks: sortByPriceTimePriority(
-        open.filter((order) => order.side === 'sell'),
-        'sell',
-      ),
-    };
   }
 }

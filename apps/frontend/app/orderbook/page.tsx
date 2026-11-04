@@ -33,7 +33,7 @@ export default function OrderBookPage() {
       setStatus('live');
       socket.emit('subscribe', INSTRUMENT);
     });
-    socket.on('book', (data: BookState) => setBook(data));
+    socket.on('book_snapshot', (data: BookState) => setBook(data));
     socket.on('disconnect', () => setStatus('disconnected'));
 
     return () => {

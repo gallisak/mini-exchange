@@ -4,6 +4,7 @@ import { RedisService } from '../../redis/redis.service';
 import { OrderBookService } from '../order-book.service';
 import { BookRunner } from './book-runner';
 import { FencedOutError } from './fenced-out.error';
+import { MarketPublisherService } from '../realtime/market-publisher.service';
 
 export interface InstrumentLease {
   fence: bigint;
@@ -19,6 +20,7 @@ export class MatchingEngineService implements OnModuleDestroy {
     private readonly dataSource: DataSource,
     private readonly redis: RedisService,
     private readonly orderBook: OrderBookService,
+    private readonly market: MarketPublisherService,
   ) {}
 
   isRunning(instrument: string): boolean {
@@ -36,6 +38,8 @@ export class MatchingEngineService implements OnModuleDestroy {
       retryDelayMs: 1000,
       fence: lease.fence,
       leaseValid: lease.isValid,
+      publish: (event) => this.market.publish(instrument, event),
+      heartbeatMs: Number(process.env.BOOK_HEARTBEAT_MS ?? 2000),
       onFenced: (error) => {
         if (this.runners.get(instrument) === runner) this.runners.delete(instrument);
         void runner.stop();
