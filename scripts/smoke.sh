@@ -80,5 +80,14 @@ report=$($COMPOSE exec -T -e RECONCILIATION_LAG_MS=0 settlement-service \
 }
 echo "OK: reconciliation matches $(echo "$report" | jq -c '[.instruments[] | {instrument, trades: .ledger.count}]')"
 
+book_seq=$(curl -fsS "$ENGINE_URL/orders/book?instrument=ABC" | jq -r .seq)
+case "$book_seq" in
+  '' | *[!0-9]* | 0)
+    echo "FAIL: the public order book has no sequence number ($book_seq)"
+    exit 1
+    ;;
+esac
+echo "OK: the public order book is at seq $book_seq"
+
 wait_for "frontend serves the order book page" \
   curl -fsS "$FRONTEND_URL/orderbook"

@@ -120,9 +120,11 @@ describe('instrument failover between engine processes', () => {
 
     const socket = io(standby.url, { transports: ['websocket'] });
     try {
-      const book = new Promise<{ asks: unknown[] }>((resolve) => socket.once('book', resolve));
+      const book = new Promise<{ asks: unknown[] }>((resolve) =>
+        socket.once('book_snapshot', resolve),
+      );
       socket.emit('subscribe', 'ABC');
-      expect((await book).asks).toHaveLength(1);
+      expect((await book).asks).toEqual([{ price: '100.00', quantity: '1.00000000', orders: 1 }]);
     } finally {
       socket.disconnect();
     }

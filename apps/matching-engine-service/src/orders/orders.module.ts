@@ -11,6 +11,7 @@ import { RedisLockService } from '../locks/redis-lock.service';
 import { CommandStreamService } from './engine/command-stream.service';
 import { MatchingEngineService } from './engine/matching-engine.service';
 import { InstrumentOwnershipService } from './engine/instrument-ownership.service';
+import { MarketPublisherService } from './realtime/market-publisher.service';
 
 @Module({
   imports: [TypeOrmModule.forFeature([Order, TradeRecord, InstrumentState])],
@@ -23,6 +24,7 @@ import { InstrumentOwnershipService } from './engine/instrument-ownership.servic
     RedisLockService,
     CommandStreamService,
     MatchingEngineService,
+    MarketPublisherService,
   ],
   exports: [OrderBookService],
 })

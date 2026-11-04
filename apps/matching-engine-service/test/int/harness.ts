@@ -3,9 +3,11 @@ import { Test } from '@nestjs/testing';
 import { randomUUID } from 'crypto';
 import Redis from 'ioredis';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { AppModule } from '../../src/app.module';
 import { buildDataSourceOptions } from '../../src/database/data-source';
+import { Order } from '../../src/orders/entities/order.entity';
+import { sortByPriceTimePriority } from '../../src/orders/matcher';
 
 export interface TestUser {
   token: string;
@@ -96,16 +98,23 @@ export async function listOrders(app: INestApplication, user: TestUser): Promise
   return response.body;
 }
 
-export async function book(
+export async function restingOrders(
   app: INestApplication,
-  user: TestUser,
   instrument = 'ABC',
-): Promise<{ bids: OrderRow[]; asks: OrderRow[] }> {
-  const response = await request(app.getHttpServer())
-    .get(`/orders/book?instrument=${instrument}`)
-    .set('authorization', `Bearer ${user.token}`)
-    .expect(200);
-  return response.body;
+): Promise<{ bids: Order[]; asks: Order[] }> {
+  const open = await app.get(DataSource).getRepository(Order).find({
+    where: { instrument, status: In(['open', 'partially_filled']) },
+  });
+  return {
+    bids: sortByPriceTimePriority(
+      open.filter((order) => order.side === 'buy'),
+      'buy',
+    ),
+    asks: sortByPriceTimePriority(
+      open.filter((order) => order.side === 'sell'),
+      'sell',
+    ),
+  };
 }
 
 export async function eventually(assertion: () => Promise<void>, timeoutMs = 5000): Promise<void> {
