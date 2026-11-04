@@ -6,6 +6,7 @@ import { buildDataSourceOptions } from './database/data-source';
 import { AuthModule } from './auth/auth.module';
 import { WalletsModule } from './wallets/wallets.module';
 import { ConsumerModule } from './consumer/consumer.module';
+import { ReconciliationModule } from './reconciliation/reconciliation.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { ConsumerModule } from './consumer/consumer.module';
     TradesModule,
     WalletsModule,
     ConsumerModule,
+    ReconciliationModule,
   ],
 })
 export class AppModule {}
