@@ -186,7 +186,7 @@ export class LedgerService {
   }
 }
 
-function sameTrade(existing: SettledTrade, trade: SettleTradeDto): boolean {
+export function sameTrade(existing: SettledTrade, trade: SettleTradeDto): boolean {
   return (
     existing.instrument === trade.instrument &&
     existing.buyOrderId === trade.buyOrderId &&
