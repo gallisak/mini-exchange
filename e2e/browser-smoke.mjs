@@ -1,0 +1,96 @@
+import { execFileSync } from 'node:child_process';
+import { chromium } from 'playwright';
+
+const BASE = process.env.FRONTEND_URL ?? 'http://localhost:3000';
+const COMPOSE = (process.env.COMPOSE ?? 'docker compose').split(/\s+/);
+const SHOTS = process.env.SCREENSHOTS;
+const started = Date.now();
+const log = (...parts) => console.log(`[${((Date.now() - started) / 1000).toFixed(1).padStart(5)}s]`, ...parts);
+const compose = (...args) => execFileSync(COMPOSE[0], [...COMPOSE.slice(1), ...args], { stdio: 'pipe' }).toString();
+
+async function shot(page, name) {
+  if (SHOTS) await page.screenshot({ path: `${SHOTS}/${name}.png`, fullPage: true });
+}
+
+async function register(page, email, next = '') {
+  await page.goto(`${BASE}/login${next}`);
+  await page.getByRole('tab', { name: 'Register' }).click();
+  await page.getByLabel('Email').fill(email);
+  await page.getByLabel('Password').fill('password123');
+  await page.getByRole('button', { name: 'Create account' }).click();
+  await page.waitForURL('**/orders');
+}
+
+async function placeOrder(page, side, price, quantity) {
+  await page.getByRole('tab', { name: side === 'buy' ? 'Buy' : 'Sell', exact: true }).click();
+  await page.getByLabel('Price (USD)').fill(price);
+  await page.getByLabel(/Quantity/).fill(quantity);
+  await page.getByRole('button', { name: new RegExp(`^${side === 'buy' ? 'Buy' : 'Sell'} ABC$`) }).click();
+  await page.getByText(/accepted/).first().waitFor();
+}
+
+async function waitStatus(page, status, timeout = 15_000) {
+  await page.locator(`[data-status="${status}"]`).waitFor({ timeout });
+  log(`book is ${status}`);
+}
+
+const book = await fetch(`${BASE}/api/market/book?instrument=ABC`).then((response) => response.json());
+if (book.bids.length > 0 || book.asks.length > 0) {
+  console.error('BROWSER SMOKE NEEDS A FRESH STACK: the ABC book already has orders that would match ours');
+  process.exit(1);
+}
+
+const browser = await chromium.launch();
+try {
+  const run = Date.now();
+  const seller = await (await browser.newContext()).newPage();
+  const buyer = await (await browser.newContext()).newPage();
+
+  await register(seller, `browser-seller-${run}@example.com`, '?next=//example.com');
+  log('signed up, and a sign-in link to another site still landed on', new URL(seller.url()).pathname);
+  await register(buyer, `browser-buyer-${run}@example.com`);
+
+  await placeOrder(seller, 'sell', '20.00', '3');
+  await seller.getByTestId('order-row').first().getByText('open').waitFor();
+  await placeOrder(buyer, 'buy', '20.00', '1');
+  await seller.getByTestId('order-row').first().getByText('partially filled').waitFor({ timeout: 10_000 });
+  log("the seller's order turned partially filled without a reload");
+  await shot(seller, 'orders');
+
+  const market = await (await browser.newContext()).newPage();
+  await market.goto(`${BASE}/orderbook?instrument=ABC`);
+  await waitStatus(market, 'live');
+  await market.getByTestId('asks').getByText('20.00').waitFor();
+  await market.getByTestId('trade').first().waitFor();
+  await shot(market, 'orderbook');
+
+  const seq = Number((await market.getByText(/^Sequence \d+/).textContent()).match(/\d+/)[0]);
+  compose('exec', '-T', 'redis', 'redis-cli', 'PUBLISH', 'market:ABC',
+    JSON.stringify({ type: 'book_heartbeat', heartbeat: { instrument: 'ABC', seq: seq + 5 } }));
+  await market.getByText(/resynced 1×/).waitFor({ timeout: 10_000 });
+  await waitStatus(market, 'live');
+  log('a heartbeat ahead of the book made it fetch a fresh snapshot');
+
+  compose('stop', '-t', '0', 'matching-engine-service');
+  await waitStatus(market, 'reconnecting');
+  compose('start', 'matching-engine-service');
+  await waitStatus(market, 'live', 30_000);
+
+  await placeOrder(buyer, 'buy', '20.00', '2');
+  await market.getByTestId('asks').getByText('No asks').waitFor({ timeout: 10_000 });
+  log('after reconnecting the book still follows every change');
+
+  await buyer.goto(`${BASE}/wallet`);
+  await buyer.getByTestId('balance-row').filter({ hasText: 'ABC' }).getByText('1003').waitFor({ timeout: 10_000 });
+  log('the buyer wallet shows the 3 ABC bought');
+  await shot(buyer, 'wallet');
+
+  await buyer.goto(`${BASE}/ops`);
+  await buyer.getByText('Admins only').waitFor();
+  log('the operations panel is closed to a regular user');
+} catch (error) {
+  console.error(`BROWSER SMOKE FAILED: ${error.message}`);
+  process.exitCode = 1;
+} finally {
+  await browser.close();
+}
