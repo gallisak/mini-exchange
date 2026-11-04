@@ -146,6 +146,20 @@ describe('real-time order book', () => {
     expect(heartbeat).toEqual({ instrument: 'ABC', seq });
   });
 
+  it('stops sending a book to a client that unsubscribed from it', async () => {
+    const seller = await register(app);
+    const { socket } = await subscribed();
+    const deltas = collect(socket, 'book_delta');
+    socket.emit('unsubscribe', 'ABC');
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
+    await eventually(async () => expect(await listOrders(app, seller)).toHaveLength(1));
+    await new Promise((resolve) => setTimeout(resolve, 500));
+
+    expect(deltas).toEqual([]);
+  });
+
   it('serves the same snapshot over REST to anyone without exposing owners', async () => {
     const seller = await register(app);
     await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);

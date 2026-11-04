@@ -119,6 +119,12 @@ export class OrdersGateway
     client.emit('book_snapshot', await this.orders.getDepth(instrument));
   }
 
+  @SubscribeMessage('unsubscribe')
+  async unsubscribe(client: Socket, instrument: unknown) {
+    if (typeof instrument !== 'string' || !INSTRUMENTS.includes(instrument)) return;
+    await client.leave(bookRoom(instrument));
+  }
+
   private snapshotRetryAfter(socketId: string): number {
     const limit = Number(process.env.WS_SNAPSHOT_LIMIT ?? 10);
     const windowMs = Number(process.env.WS_SNAPSHOT_WINDOW_MS ?? 10_000);
