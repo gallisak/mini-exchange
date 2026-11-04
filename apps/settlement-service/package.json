@@ -14,7 +14,9 @@
     "test:int": "nest build && jest --config jest.int.config.js --runInBand",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
     "migration:run": "ts-node src/database/migrate.ts",
-    "migration:run:prod": "node dist/database/migrate.js"
+    "migration:run:prod": "node dist/database/migrate.js",
+    "reconcile": "ts-node src/reconciliation/reconcile.ts",
+    "reconcile:prod": "node dist/reconciliation/reconcile.js"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",

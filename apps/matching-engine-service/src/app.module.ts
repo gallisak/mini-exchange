@@ -6,6 +6,7 @@ import { OrdersModule } from './orders/orders.module';
 import { buildDataSourceOptions } from './database/data-source';
 import { RedisModule } from './redis/redis.module';
 import { OutboxModule } from './outbox/outbox.module';
+import { TradesModule } from './trades/trades.module';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { OutboxModule } from './outbox/outbox.module';
     AuthModule,
     OrdersModule,
     OutboxModule,
+    TradesModule,
   ],
 })
 export class AppModule {}

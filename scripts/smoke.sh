@@ -5,6 +5,7 @@ ENGINE_URL="${ENGINE_URL:-http://localhost:3001}"
 SETTLEMENT_URL="${SETTLEMENT_URL:-http://localhost:3002}"
 FRONTEND_URL="${FRONTEND_URL:-http://localhost:3000}"
 TIMEOUT="${SMOKE_TIMEOUT:-120}"
+COMPOSE="${COMPOSE:-docker compose}"
 
 wait_for() {
   name="$1"
@@ -70,6 +71,14 @@ if [ "$start_usd" != "100000.00" ] || [ "$buyer_usd" != "99990.00" ] ||
   exit 1
 fi
 echo "OK: buyer paid 10.00 USD to the seller for 1 ABC"
+
+report=$($COMPOSE exec -T -e RECONCILIATION_LAG_MS=0 settlement-service \
+  node dist/reconciliation/reconcile.js) || {
+  echo "FAIL: reconciliation did not match"
+  echo "$report"
+  exit 1
+}
+echo "OK: reconciliation matches $(echo "$report" | jq -c '[.instruments[] | {instrument, trades: .ledger.count}]')"
 
 wait_for "frontend serves the order book page" \
   curl -fsS "$FRONTEND_URL/orderbook"
