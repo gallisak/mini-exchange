@@ -14,7 +14,7 @@ import { Server, Socket } from 'socket.io';
 import { OrdersService } from '../orders.service';
 import { INSTRUMENTS } from '../../common/instruments';
 import { corsOrigins, requireEnv } from '../../common/env';
-import { RedisService } from '../../redis/redis.service';
+import { RedisService, closeRedis } from '../../redis/redis.service';
 import {
   MARKET_CHANNEL_PREFIX,
   MarketEvent,
@@ -85,7 +85,7 @@ export class OrdersGateway
   async onModuleDestroy(): Promise<void> {
     this.expiries.forEach((timer) => clearTimeout(timer));
     this.expiries.clear();
-    await this.subscriber?.quit().catch(() => this.subscriber?.disconnect());
+    await closeRedis(this.subscriber);
   }
 
   async handleConnection(client: Socket) {

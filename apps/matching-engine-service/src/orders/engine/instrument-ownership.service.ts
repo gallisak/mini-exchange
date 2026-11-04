@@ -35,6 +35,10 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
     private readonly engine: MatchingEngineService,
   ) {}
 
+  identity(): string {
+    return this.ownerId;
+  }
+
   ownedInstruments(): string[] {
     return [...this.owned.keys()];
   }

@@ -5,6 +5,7 @@ import {
   HttpStatus,
   Injectable,
   Logger,
+  ServiceUnavailableException,
   SetMetadata,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
@@ -39,8 +40,13 @@ export class RateLimitGuard implements CanActivate {
 
     let result;
     try {
+      if (!this.limiter.isAvailable()) throw new Error('Redis is not connected');
       result = await this.limiter.hit(`${name}:${subject}`, policy.limit, policy.windowMs);
     } catch (error) {
+      if (policy.failClosed) {
+        this.logger.warn(`Refusing ${name} request, its rate limit cannot be checked: ${(error as Error).message}`);
+        throw new ServiceUnavailableException('Service temporarily unavailable, try again shortly');
+      }
       this.logger.warn(`Rate limit check skipped: ${(error as Error).message}`);
       return true;
     }

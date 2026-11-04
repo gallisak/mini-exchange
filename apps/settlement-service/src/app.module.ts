@@ -8,6 +8,7 @@ import { WalletsModule } from './wallets/wallets.module';
 import { ConsumerModule } from './consumer/consumer.module';
 import { ReconciliationModule } from './reconciliation/reconciliation.module';
 import { TraceMiddleware } from './observability/trace.middleware';
+import { OpsModule } from './ops/ops.module';
 
 @Module({
   imports: [
@@ -18,6 +19,7 @@ import { TraceMiddleware } from './observability/trace.middleware';
     WalletsModule,
     ConsumerModule,
     ReconciliationModule,
+    OpsModule,
   ],
 })
 export class AppModule implements NestModule {

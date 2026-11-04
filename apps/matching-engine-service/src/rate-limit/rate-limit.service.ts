@@ -18,6 +18,10 @@ export interface RateLimitResult {
 export class RateLimitService {
   constructor(private readonly redis: RedisService) {}
 
+  isAvailable(): boolean {
+    return this.redis.isReady();
+  }
+
   async hit(key: string, limit: number, windowMs: number): Promise<RateLimitResult> {
     const [count, ttl] = (await this.redis.client.eval(HIT, 1, `ratelimit:${key}`, windowMs)) as [
       number,

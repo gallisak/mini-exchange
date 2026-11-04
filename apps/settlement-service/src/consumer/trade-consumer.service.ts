@@ -12,6 +12,8 @@ import {
   tradeStreamKey,
 } from './trade-event';
 import { runWithTrace } from '../observability/trace-context';
+import { tradeEvents } from '../observability/metrics';
+import { closeRedis, createRedis } from '../common/redis';
 
 const MAX_BACKOFF_MS = 5000;
 
@@ -22,13 +24,6 @@ class SettlementFailedError extends Error {
   constructor(stream: string, id: string, cause: Error) {
     super(`Could not settle ${stream} ${id}, will retry: ${cause.message}`);
   }
-}
-
-function redisConnection(): Redis {
-  return new Redis({
-    host: process.env.REDIS_HOST ?? 'localhost',
-    port: Number(process.env.REDIS_PORT ?? 6379),
-  });
 }
 
 @Injectable()
@@ -48,8 +43,8 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
 
   onApplicationBootstrap(): void {
     if (process.env.CONSUMER_ENABLED === 'false') return;
-    this.client = redisConnection();
-    this.reader = redisConnection();
+    this.client = createRedis();
+    this.reader = createRedis();
     this.running = true;
     this.loop = this.run();
   }
@@ -61,7 +56,7 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
     }
     await this.loop;
     for (const connection of [this.reader, this.client]) {
-      await connection?.quit().catch(() => connection.disconnect());
+      await closeRedis(connection);
     }
   }
 
@@ -141,6 +136,26 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
           if (entry) await this.handle(stream, entry[0], fieldsOf(entry[1]), deliveries + 1);
         }
       }
+      await this.forgetIdleConsumers(stream);
+    }
+  }
+
+  private async forgetIdleConsumers(stream: string): Promise<void> {
+    const consumers = (await this.client!.xinfo('CONSUMERS', stream, this.options.group)) as (
+      | string
+      | number
+    )[][];
+    for (const fields of consumers) {
+      const info: Record<string, string | number> = {};
+      for (let i = 0; i + 1 < fields.length; i += 2) info[String(fields[i])] = fields[i + 1];
+      if (
+        info.name !== this.options.consumer &&
+        Number(info.pending) === 0 &&
+        Number(info.idle) >= this.options.idleConsumerMs
+      ) {
+        await this.client!.xgroup('DELCONSUMER', stream, this.options.group, String(info.name));
+        this.logger.log(`Removed idle consumer ${info.name} from ${stream}`);
+      }
     }
   }
 
@@ -170,9 +185,11 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
         await this.deadLetter(stream, id, fields, deliveries, error.message);
         return;
       }
+      tradeEvents.inc({ result: 'failed' });
       throw new SettlementFailedError(stream, id, error as Error);
     }
     await this.client!.xack(stream, this.options.group, id);
+    tradeEvents.inc({ result });
     this.logger.log(`Trade ${tradeId} ${result} from ${stream} ${id}`);
   }
 
@@ -198,6 +215,7 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
       JSON.stringify(fields),
     );
     await this.client!.xack(stream, this.options.group, id);
+    tradeEvents.inc({ result: 'dead_lettered' });
     this.logger.error(`Dead-lettered ${stream} ${id}: ${reason}`);
   }
 }

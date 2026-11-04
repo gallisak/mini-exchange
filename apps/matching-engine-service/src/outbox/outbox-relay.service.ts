@@ -3,6 +3,7 @@ import { DataSource, In, IsNull, LessThan } from 'typeorm';
 import { RedisService } from '../redis/redis.service';
 import { OutboxMessage } from './outbox-message.entity';
 import { runWithTrace } from '../observability/trace-context';
+import { outboxPublished } from '../observability/metrics';
 
 const RELAY_LOCK_KEY = 7_340_101;
 const MAX_BACKOFF_MS = 5_000;
@@ -68,6 +69,7 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
         { id: In(pending.map((message) => message.id)) },
         { publishedAt: () => 'now()' },
       );
+      outboxPublished.inc(pending.length);
       for (const message of pending) {
         const traceId = message.payload.traceId;
         runWithTrace(typeof traceId === 'string' ? traceId : undefined, () =>

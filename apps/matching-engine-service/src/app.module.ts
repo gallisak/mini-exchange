@@ -9,6 +9,7 @@ import { OutboxModule } from './outbox/outbox.module';
 import { TradesModule } from './trades/trades.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
 import { TraceMiddleware } from './observability/trace.middleware';
+import { OpsModule } from './ops/ops.module';
 
 @Module({
   imports: [
@@ -20,6 +21,7 @@ import { TraceMiddleware } from './observability/trace.middleware';
     OrdersModule,
     OutboxModule,
     TradesModule,
+    OpsModule,
   ],
 })
 export class AppModule implements NestModule {

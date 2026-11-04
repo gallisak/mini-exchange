@@ -12,6 +12,7 @@ const defaults: Record<string, string> = {
   CONSUMER_BLOCK_MS: '200',
   CONSUMER_RETRY_IDLE_MS: '500',
   CONSUMER_RECLAIM_INTERVAL_MS: '200',
+  CONSUMER_IDLE_DELETE_MS: '1000',
 };
 
 for (const [key, value] of Object.entries(defaults)) {
