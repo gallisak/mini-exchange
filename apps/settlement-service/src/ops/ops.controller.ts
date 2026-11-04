@@ -1,3 +1,4 @@
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Header, HttpStatus, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
@@ -5,6 +6,7 @@ import { AdminGuard } from '../auth/admin.guard';
 import { metricsRegistry } from '../observability/metrics';
 import { OpsService } from './ops.service';
 
+@ApiTags('ops')
 @Controller()
 export class OpsController {
   constructor(private readonly ops: OpsService) {}
@@ -23,6 +25,7 @@ export class OpsController {
   }
 
   @Get('ops/status')
+  @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, AdminGuard)
   status() {
     return this.ops.status();

@@ -1,3 +1,4 @@
+import { ApiBearerAuth, ApiHeader, ApiTags } from '@nestjs/swagger';
 import {
   Body,
   Controller,
@@ -23,11 +24,14 @@ interface AuthenticatedRequest {
   user: { userId: string; email: string };
 }
 
+@ApiTags('orders')
 @Controller('orders')
 export class OrdersController {
   constructor(private readonly orders: OrdersService) {}
 
   @Post()
+  @ApiBearerAuth()
+  @ApiHeader({ name: 'Idempotency-Key', required: true })
   @UseGuards(JwtAuthGuard, RateLimitGuard)
   @RateLimit('ORDER')
   @HttpCode(HttpStatus.ACCEPTED)
@@ -40,6 +44,7 @@ export class OrdersController {
   }
 
   @Get()
+  @ApiBearerAuth()
   @UseGuards(JwtAuthGuard)
   listOwn(@Request() req: AuthenticatedRequest) {
     return this.orders.listOwn(req.user.userId);
@@ -53,6 +58,7 @@ export class OrdersController {
   }
 
   @Delete(':id')
+  @ApiBearerAuth()
   @UseGuards(JwtAuthGuard, RateLimitGuard)
   @RateLimit('ORDER')
   @HttpCode(HttpStatus.ACCEPTED)
