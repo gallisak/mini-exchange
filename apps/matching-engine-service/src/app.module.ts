@@ -1,4 +1,4 @@
-import { Module } from '@nestjs/common';
+import { MiddlewareConsumer, Module, NestModule } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { AuthModule } from './auth/auth.module';
@@ -8,6 +8,7 @@ import { RedisModule } from './redis/redis.module';
 import { OutboxModule } from './outbox/outbox.module';
 import { TradesModule } from './trades/trades.module';
 import { RateLimitModule } from './rate-limit/rate-limit.module';
+import { TraceMiddleware } from './observability/trace.middleware';
 
 @Module({
   imports: [
@@ -21,4 +22,8 @@ import { RateLimitModule } from './rate-limit/rate-limit.module';
     TradesModule,
   ],
 })
-export class AppModule {}
+export class AppModule implements NestModule {
+  configure(consumer: MiddlewareConsumer): void {
+    consumer.apply(TraceMiddleware).forRoutes('*');
+  }
+}

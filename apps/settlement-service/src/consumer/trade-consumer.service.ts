@@ -4,7 +4,14 @@ import { INSTRUMENTS } from '../common/instruments';
 import { LedgerService } from '../ledger/ledger.service';
 import { TradeConflictError } from '../ledger/trade-conflict.error';
 import { ConsumerOptions, consumerOptionsFromEnv } from './consumer-options';
-import { InvalidTradeEventError, fieldsOf, parseTradeEvent, tradeStreamKey } from './trade-event';
+import {
+  InvalidTradeEventError,
+  fieldsOf,
+  parseTradeEvent,
+  traceIdOf,
+  tradeStreamKey,
+} from './trade-event';
+import { runWithTrace } from '../observability/trace-context';
 
 const MAX_BACKOFF_MS = 5000;
 
@@ -137,15 +144,26 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
     }
   }
 
-  private async handle(
+  private handle(
     stream: string,
     id: string,
     fields: Record<string, string>,
     deliveries: number,
   ): Promise<void> {
+    return runWithTrace(traceIdOf(fields), () => this.settle(stream, id, fields, deliveries));
+  }
+
+  private async settle(
+    stream: string,
+    id: string,
+    fields: Record<string, string>,
+    deliveries: number,
+  ): Promise<void> {
+    let tradeId: string;
     let result: string;
     try {
       const trade = await parseTradeEvent(fields);
+      tradeId = trade.tradeId;
       result = await this.ledger.settleTrade(trade);
     } catch (error) {
       if (error instanceof InvalidTradeEventError || error instanceof TradeConflictError) {
@@ -155,7 +173,7 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
       throw new SettlementFailedError(stream, id, error as Error);
     }
     await this.client!.xack(stream, this.options.group, id);
-    this.logger.log(`Trade ${stream} ${id} ${result}`);
+    this.logger.log(`Trade ${tradeId} ${result} from ${stream} ${id}`);
   }
 
   private async deadLetter(

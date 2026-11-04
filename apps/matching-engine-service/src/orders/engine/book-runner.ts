@@ -7,9 +7,10 @@ import { InstrumentState } from '../entities/instrument-state.entity';
 import { OrderBookService } from '../order-book.service';
 import { sortByPriceTimePriority } from '../matcher';
 import { RedisService } from '../../redis/redis.service';
-import { EngineState, applyCommands, isValidSubmit } from './apply-commands';
+import { EngineState, ExecutedTrade, applyCommands, isValidSubmit } from './apply-commands';
 import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
 import { FencedOutError } from './fenced-out.error';
+import { runWithTrace } from '../../observability/trace-context';
 import { diffBooks } from '../depth';
 import { publicTrade } from '../../trades/public-trade';
 import { MarketEvent } from '../realtime/market-events';
@@ -72,6 +73,23 @@ export class BookRunner {
     }
     await this.loop;
     await reader?.quit().catch(() => reader.disconnect());
+  }
+
+  private logApplied(commands: StreamCommand[], orders: Order[], trades: ExecutedTrade[]): void {
+    const statuses = new Map(orders.map((order) => [order.id, order.status]));
+    for (const { id, command } of commands) {
+      if (!command) continue;
+      runWithTrace(command.traceId, () =>
+        this.logger.log(
+          `Applied ${command.type} ${command.orderId} from ${id}: ${statuses.get(command.orderId) ?? 'unchanged'}`,
+        ),
+      );
+    }
+    for (const trade of trades) {
+      runWithTrace(trade.traceId ?? undefined, () =>
+        this.logger.log(`Trade ${trade.id} executed ${trade.quantity} @ ${trade.price}`),
+      );
+    }
   }
 
   private announceSeq(): void {
@@ -228,6 +246,7 @@ export class BookRunner {
     const previousSeq = this.state.bookSeq;
     this.state = result.state;
     orderBook.replace(this.instrument, result.book);
+    this.logApplied(commands, result.orders, result.trades);
 
     if (result.trades.length > 0) {
       void this.options.publish?.({

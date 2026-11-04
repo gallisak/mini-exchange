@@ -1,20 +1,22 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { corsOrigins, requireEnv } from './common/env';
+import { JsonLogger } from './observability/json-logger';
 
 async function bootstrap() {
   requireEnv('JWT_ACCESS_SECRET');
   requireEnv('JWT_REFRESH_SECRET');
-  const app = await NestFactory.create<NestExpressApplication>(AppModule);
+  const app = await NestFactory.create<NestExpressApplication>(AppModule, {
+    logger: new JsonLogger('matching-engine-service'),
+  });
   app.set('trust proxy', process.env.TRUST_PROXY ?? 'loopback, uniquelocal');
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   app.enableCors({ origin: corsOrigins() });
   app.enableShutdownHooks();
   const port = process.env.PORT ?? 3001;
   await app.listen(port);
-  // eslint-disable-next-line no-console
-  console.log(`matching-engine-service (${process.env.INSTANCE_ID ?? 'engine'}) listening on ${port}`);
+  new Logger('Bootstrap').log(`Listening on ${port}`);
 }
 bootstrap();

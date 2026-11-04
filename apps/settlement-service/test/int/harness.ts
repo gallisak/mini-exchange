@@ -17,6 +17,7 @@ export interface TradeBody {
   price: string;
   quantity: string;
   executedAt: string;
+  traceId?: string;
 }
 
 export const TRADE_STREAM = 'trades:ABC';

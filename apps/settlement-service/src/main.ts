@@ -1,14 +1,16 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { AppModule } from './app.module';
+import { JsonLogger } from './observability/json-logger';
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule);
+  const app = await NestFactory.create(AppModule, {
+    logger: new JsonLogger('settlement-service'),
+  });
   app.enableShutdownHooks();
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
   const port = process.env.PORT ?? 3002;
   await app.listen(port);
-  // eslint-disable-next-line no-console
-  console.log(`settlement-service listening on ${port}`);
+  new Logger('Bootstrap').log(`Listening on ${port}`);
 }
 bootstrap();

@@ -1,6 +1,7 @@
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { SettleTradeDto } from '../trades/dto/settle-trade.dto';
+import { acceptTraceId } from '../observability/trace-context';
 
 export const TRADE_EXECUTED = 'trade.executed';
 
@@ -37,4 +38,12 @@ export async function parseTradeEvent(fields: Record<string, string>): Promise<S
     );
   }
   return trade;
+}
+
+export function traceIdOf(fields: Record<string, string>): string {
+  try {
+    return acceptTraceId((JSON.parse(fields.payload) as { traceId?: unknown }).traceId);
+  } catch {
+    return acceptTraceId(undefined);
+  }
 }

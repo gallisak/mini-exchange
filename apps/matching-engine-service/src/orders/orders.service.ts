@@ -14,6 +14,7 @@ import { Depth, aggregate } from './depth';
 import { RedisService } from '../redis/redis.service';
 import { PRICE_SCALE, QUANTITY_SCALE, normalizeDecimal } from '../common/decimal';
 import { uuidV5 } from '../common/uuid';
+import { currentTraceId } from '../observability/trace-context';
 
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 const IDEMPOTENCY_MISMATCH = 'Idempotency-Key was already used for a different order';
@@ -86,6 +87,7 @@ export class OrdersService {
       side: dto.side,
       price,
       quantity,
+      traceId: currentTraceId(),
     });
     return { orderId, status: 'accepted' };
   }
@@ -98,7 +100,12 @@ export class OrdersService {
     if (order.status === 'filled' || order.status === 'cancelled') {
       throw new ConflictException(`Order is already ${order.status}`);
     }
-    await this.commands.append(order.instrument, { type: 'cancel', orderId, ownerId });
+    await this.commands.append(order.instrument, {
+      type: 'cancel',
+      orderId,
+      ownerId,
+      traceId: currentTraceId(),
+    });
     return { orderId, status: 'cancel_requested' };
   }
 
