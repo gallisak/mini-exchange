@@ -1,20 +1,22 @@
-import { NextRequest, NextResponse } from 'next/server';
-import { engineFetch } from '@/lib/api';
+import { NextRequest } from 'next/server';
+import { upstream, withSession } from '@/lib/server/upstream';
 
-// NOTE (стартовий код): проксі поки що без передачі Authorization —
-// автентифікацію на фронтенді потрібно підключити (див. ТЗ щодо
-// перенесеного модуля автентифікації).
-export async function POST(req: NextRequest) {
-  const body = await req.json();
-  const idempotencyKey = req.headers.get('idempotency-key');
-  try {
-    const accepted = await engineFetch('/orders', {
-      method: 'POST',
-      headers: idempotencyKey ? { 'Idempotency-Key': idempotencyKey } : undefined,
-      body: JSON.stringify(body),
-    });
-    return NextResponse.json(accepted, { status: 202 });
-  } catch (err) {
-    return NextResponse.json({ error: (err as Error).message }, { status: 400 });
-  }
+export const dynamic = 'force-dynamic';
+
+export function GET(request: NextRequest) {
+  return withSession(request, (token) => upstream(request, 'engine', '/orders', {}, token));
+}
+
+export async function POST(request: NextRequest) {
+  const body = await request.text();
+  const idempotencyKey = request.headers.get('idempotency-key') ?? '';
+  return withSession(request, (token) =>
+    upstream(
+      request,
+      'engine',
+      '/orders',
+      { method: 'POST', body, headers: { 'idempotency-key': idempotencyKey } },
+      token,
+    ),
+  );
 }
