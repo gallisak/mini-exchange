@@ -26,6 +26,15 @@ export interface OrderUpdate {
   createdAt: string;
 }
 
+export interface TradeEvent {
+  id: string;
+  instrument: string;
+  seq: number;
+  price: string;
+  quantity: string;
+  executedAt: string;
+}
+
 export interface BookHeartbeat {
   instrument: string;
   seq: number;
@@ -34,6 +43,7 @@ export interface BookHeartbeat {
 export type MarketEvent =
   | { type: 'book_delta'; delta: BookDelta }
   | { type: 'book_heartbeat'; heartbeat: BookHeartbeat }
+  | { type: 'trades'; trades: TradeEvent[] }
   | { type: 'orders'; orders: OrderUpdate[] };
 
 export interface WalletChanged {

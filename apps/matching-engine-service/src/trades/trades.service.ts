@@ -2,6 +2,7 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TradeRecord } from '../orders/entities/trade-record.entity';
+import { PublicTrade, publicTrade } from './public-trade';
 
 export interface InstrumentTradeTotals {
   instrument: string;
@@ -19,6 +20,15 @@ export interface TradeSummary {
 @Injectable()
 export class TradesService {
   constructor(@InjectRepository(TradeRecord) private readonly trades: Repository<TradeRecord>) {}
+
+  async recent(instrument: string, limit = 50): Promise<PublicTrade[]> {
+    const trades = await this.trades.find({
+      where: { instrument },
+      order: { seq: 'DESC' },
+      take: limit,
+    });
+    return trades.map(publicTrade);
+  }
 
   async summary(fromValue: string, toValue: string): Promise<TradeSummary> {
     const from = new Date(fromValue);

@@ -139,6 +139,11 @@ export class OrdersGateway
         .to(bookRoom(event.heartbeat.instrument))
         .emit('book_heartbeat', event.heartbeat);
     }
+    if (event?.type === 'trades') {
+      for (const trade of event.trades) {
+        this.server.to(bookRoom(trade.instrument)).emit('trade', trade);
+      }
+    }
     if (event?.type === 'orders') {
       for (const { ownerId, ...order } of event.orders) {
         this.server.to(userRoom(ownerId)).emit('order', order);

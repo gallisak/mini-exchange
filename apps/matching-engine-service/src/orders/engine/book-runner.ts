@@ -11,6 +11,7 @@ import { EngineState, applyCommands, isValidSubmit } from './apply-commands';
 import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
 import { FencedOutError } from './fenced-out.error';
 import { diffBooks } from '../depth';
+import { publicTrade } from '../../trades/public-trade';
 import { MarketEvent } from '../realtime/market-events';
 import { OutboxMessage } from '../../outbox/outbox-message.entity';
 import { tradeExecutedMessage } from '../../outbox/trade-event';
@@ -228,6 +229,12 @@ export class BookRunner {
     this.state = result.state;
     orderBook.replace(this.instrument, result.book);
 
+    if (result.trades.length > 0) {
+      void this.options.publish?.({
+        type: 'trades',
+        trades: result.trades.map(publicTrade),
+      });
+    }
     if (result.orders.length > 0) {
       void this.options.publish?.({
         type: 'orders',
