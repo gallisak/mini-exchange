@@ -8,7 +8,6 @@ const defaults: Record<string, string> = {
   REDIS_PORT: '56379',
   JWT_ACCESS_SECRET: 'test-access-secret',
   SETTLEMENT_INTERNAL_KEY: 'test-internal-key',
-  RECONCILIATION_API_KEY: 'test-reconciliation-key',
   INSTRUMENTS: 'ABC,DEF,XYZ',
   CONSUMER_BLOCK_MS: '200',
   CONSUMER_RETRY_IDLE_MS: '500',

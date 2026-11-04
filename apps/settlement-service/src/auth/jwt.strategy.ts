@@ -6,6 +6,7 @@ import { requireEnv } from '../common/env';
 
 export interface AuthUser {
   userId: string;
+  role: string;
 }
 
 @Injectable()
@@ -18,10 +19,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  validate(payload: { sub?: unknown }): AuthUser {
+  validate(payload: { sub?: unknown; role?: unknown }): AuthUser {
     if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) {
       throw new UnauthorizedException();
     }
-    return { userId: payload.sub.toLowerCase() };
+    return {
+      userId: payload.sub.toLowerCase(),
+      role: typeof payload.role === 'string' ? payload.role : 'user',
+    };
   }
 }
