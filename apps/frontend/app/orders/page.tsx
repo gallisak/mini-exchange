@@ -1,69 +1,38 @@
 'use client';
 
-import { useState } from 'react';
+import { Suspense } from 'react';
+import { InstrumentSelect, useInstrument } from '@/components/instrument-select';
+import { OrderForm } from '@/components/orders/order-form';
+import { OrdersTable } from '@/components/orders/orders-table';
+import { RequireSession } from '@/components/require-session';
+import { useOrders } from '@/lib/client/use-orders';
+
+function Orders() {
+  const instrument = useInstrument();
+  const { orders, error, reload } = useOrders();
+  return (
+    <div className="space-y-6">
+      <div className="flex flex-wrap items-center justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-semibold tracking-tight">Orders</h1>
+          <p className="text-sm text-muted-foreground">
+            Place limit orders and follow them as they fill, live.
+          </p>
+        </div>
+        <InstrumentSelect />
+      </div>
+      <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
+        <OrderForm instrument={instrument} />
+        <OrdersTable orders={orders} error={error} reload={reload} />
+      </div>
+    </div>
+  );
+}
 
 export default function OrdersPage() {
-  const [instrument, setInstrument] = useState('ABC');
-  const [side, setSide] = useState<'buy' | 'sell'>('buy');
-  const [price, setPrice] = useState('');
-  const [quantity, setQuantity] = useState('');
-  const [result, setResult] = useState<string | null>(null);
-
-  async function onSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setResult(null);
-    try {
-      const res = await fetch('/api/orders', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Idempotency-Key': crypto.randomUUID(),
-        },
-        body: JSON.stringify({
-          instrument,
-          side,
-          price: price.trim(),
-          quantity: quantity.trim(),
-        }),
-      });
-      if (!res.ok) throw new Error('Не вдалося подати заявку');
-      const { orderId } = await res.json();
-      setResult(`Заявку прийнято: ${orderId}`);
-    } catch (err) {
-      setResult((err as Error).message);
-    }
-  }
-
   return (
-    <main style={{ maxWidth: 360, margin: '60px auto' }}>
-      <h1>Подати заявку</h1>
-      <form onSubmit={onSubmit}>
-        <input
-          value={instrument}
-          onChange={(e) => setInstrument(e.target.value)}
-          placeholder="Інструмент"
-        />
-        <br />
-        <select value={side} onChange={(e) => setSide(e.target.value as 'buy' | 'sell')}>
-          <option value="buy">Buy</option>
-          <option value="sell">Sell</option>
-        </select>
-        <br />
-        <input
-          value={price}
-          onChange={(e) => setPrice(e.target.value)}
-          placeholder="Ціна"
-        />
-        <br />
-        <input
-          value={quantity}
-          onChange={(e) => setQuantity(e.target.value)}
-          placeholder="Кількість"
-        />
-        <br />
-        <button type="submit">Подати</button>
-      </form>
-      {result && <p>{result}</p>}
-    </main>
+    <Suspense>
+      <RequireSession>{() => <Orders />}</RequireSession>
+    </Suspense>
   );
 }

@@ -55,6 +55,30 @@ describe('platform protections', () => {
       expect(other.status).toBe(202);
     });
 
+    it('counts logins per user address when the frontend proxy vouches for it with its key', async () => {
+      const restoreKey = withEnv({ FRONTEND_PROXY_KEY: 'proxy-key' });
+      const login = (address: string, key: string) =>
+        request(app.getHttpServer())
+          .post('/auth/login')
+          .set('x-client-ip', address)
+          .set('x-proxy-key', key)
+          .send({ email: 'nobody@example.com', password: 'wrong-password' });
+      try {
+        for (let attempt = 0; attempt < 5; attempt += 1) await login('203.0.113.7', 'proxy-key');
+
+        expect((await login('203.0.113.7', 'proxy-key')).status).toBe(429);
+        expect((await login('198.51.100.20', 'proxy-key')).status).toBe(401);
+
+        const forged = [];
+        for (let attempt = 0; attempt < 6; attempt += 1) {
+          forged.push((await login(`192.0.2.${attempt}`, 'wrong-key')).status);
+        }
+        expect(forged).toEqual([401, 401, 401, 401, 401, 429]);
+      } finally {
+        restoreKey();
+      }
+    });
+
     it('answers 429 to repeated login attempts from one address', async () => {
       const attempts = [];
       for (let attempt = 0; attempt < 8; attempt += 1) {

@@ -131,3 +131,25 @@ echo "OK: forging X-Forwarded-For does not get around the login rate limit"
 
 wait_for "frontend serves the order book page" \
   curl -fsS "$FRONTEND_URL/orderbook"
+
+jar=$(mktemp)
+curl -fsS -c "$jar" -X POST "$FRONTEND_URL/api/auth/register" -H 'content-type: application/json' \
+  -d "{\"email\":\"frontend-$(date +%s)@example.com\",\"password\":\"password123\"}" >/dev/null
+grep -q 'HttpOnly_.*mx_refresh' "$jar" || { echo "FAIL: the frontend did not keep the session in an httpOnly cookie"; exit 1; }
+curl -fsS -b "$jar" -X POST "$FRONTEND_URL/api/orders" -H 'content-type: application/json' \
+  -H "idempotency-key: frontend-$(date +%s)" \
+  -d '{"instrument":"XYZ","side":"buy","price":"1.00","quantity":"1"}' | jq -e '.status == "accepted"' >/dev/null
+curl -fsS -b "$jar" "$FRONTEND_URL/api/wallet" | jq -e '.balances | length == 4' >/dev/null
+rm -f "$jar"
+echo "OK: the frontend signs in with httpOnly cookies, places an order and reads the wallet"
+
+forged=$(seq 1 12 | while read -r n; do
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST "$FRONTEND_URL/api/auth/login" \
+    -H "x-forwarded-for: 10.9.7.$n" -H 'content-type: application/json' \
+    -d '{"email":"nobody@example.com","password":"wrong-password"}'
+done | grep -c '^429$' || true)
+if [ "$forged" -lt 1 ]; then
+  echo "FAIL: a forged X-Forwarded-For header gets around the login rate limit through the frontend"
+  exit 1
+fi
+echo "OK: forging X-Forwarded-For through the frontend does not get around the login rate limit"

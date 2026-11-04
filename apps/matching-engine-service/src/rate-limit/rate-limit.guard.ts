@@ -9,11 +9,31 @@ import {
   SetMetadata,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
+import { createHash, timingSafeEqual } from 'crypto';
 import { Request, Response } from 'express';
 import { RateLimitName, rateLimitPolicy } from './rate-limit.policies';
 import { RateLimitService } from './rate-limit.service';
 
 const RATE_LIMIT = 'rateLimit';
+const ADDRESS = /^[0-9A-Fa-f:.]{2,45}$/;
+
+const digest = (value: string) => createHash('sha256').update(value).digest();
+
+export function clientAddress(request: Request): string | undefined {
+  const expected = process.env.FRONTEND_PROXY_KEY;
+  const provided = request.header('x-proxy-key');
+  const forwarded = request.header('x-client-ip');
+  if (
+    expected &&
+    provided &&
+    forwarded &&
+    ADDRESS.test(forwarded) &&
+    timingSafeEqual(digest(expected), digest(provided))
+  ) {
+    return `client:${forwarded}`;
+  }
+  return request.ip;
+}
 
 export const RateLimit = (name: RateLimitName) => SetMetadata(RATE_LIMIT, name);
 
@@ -35,7 +55,7 @@ export class RateLimitGuard implements CanActivate {
     const http = context.switchToHttp();
     const request = http.getRequest<Request & { user?: { userId?: string } }>();
     const policy = rateLimitPolicy(name);
-    const subject = policy.by === 'user' ? request.user?.userId : request.ip;
+    const subject = policy.by === 'user' ? request.user?.userId : clientAddress(request);
     if (!subject) return true;
 
     let result;
