@@ -8,11 +8,13 @@ export type OrderCommand =
       side: OrderSide;
       price: string;
       quantity: string;
+      traceId?: string;
     }
   | {
       type: 'cancel';
       orderId: string;
       ownerId: string;
+      traceId?: string;
     };
 
 export interface StreamCommand {

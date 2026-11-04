@@ -14,6 +14,7 @@ export interface TradeExecutedEvent {
   price: string;
   quantity: string;
   executedAt: string;
+  traceId?: string;
 }
 
 export function tradeStreamKey(instrument: string): string {
@@ -32,6 +33,7 @@ export function tradeExecutedMessage(trade: ExecutedTrade): Partial<OutboxMessag
     price: trade.price,
     quantity: trade.quantity,
     executedAt: trade.executedAt.toISOString(),
+    ...(trade.traceId ? { traceId: trade.traceId } : {}),
   };
   return {
     stream: tradeStreamKey(trade.instrument),

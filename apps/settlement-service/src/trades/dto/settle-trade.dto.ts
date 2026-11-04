@@ -1,5 +1,5 @@
 import { Transform } from 'class-transformer';
-import { IsIn, IsISO8601, IsUUID } from 'class-validator';
+import { IsIn, IsISO8601, IsOptional, IsUUID, Matches } from 'class-validator';
 import { INSTRUMENTS } from '../../common/instruments';
 import { IsPositiveDecimal } from '../../common/is-positive-decimal.decorator';
 import { DiffersFrom } from '../../common/differs-from.decorator';
@@ -46,4 +46,8 @@ export class SettleTradeDto {
 
   @IsISO8601({ strict: true })
   executedAt: string;
+
+  @IsOptional()
+  @Matches(/^[A-Za-z0-9._:-]{1,64}$/)
+  traceId?: string;
 }

@@ -21,6 +21,7 @@ export interface EngineState {
 
 export interface ExecutedTrade extends Trade {
   seq: string;
+  traceId?: string | null;
 }
 
 export interface ApplyResult {
@@ -76,7 +77,7 @@ export function applyCommands(
       }
       for (const trade of result.trades) {
         tradeSeq += 1n;
-        trades.push({ ...trade, seq: tradeSeq.toString() });
+        trades.push({ ...trade, seq: tradeSeq.toString(), traceId: command.traceId ?? null });
       }
       continue;
     }

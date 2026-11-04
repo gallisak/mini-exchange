@@ -1,10 +1,14 @@
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Query, UseGuards } from '@nestjs/common';
-import { ReconciliationKeyGuard } from '../auth/internal-key.guard';
+import { AdminGuard } from '../auth/admin.guard';
+import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { ReconciliationQueryDto } from './dto/reconciliation-query.dto';
 import { ReconciliationService } from './reconciliation.service';
 
+@ApiTags('admin')
+@ApiBearerAuth()
 @Controller('admin/reconciliation')
-@UseGuards(ReconciliationKeyGuard)
+@UseGuards(JwtAuthGuard, AdminGuard)
 export class ReconciliationController {
   constructor(private readonly reconciliation: ReconciliationService) {}
 

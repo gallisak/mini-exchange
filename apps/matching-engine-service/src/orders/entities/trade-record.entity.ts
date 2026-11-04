@@ -33,4 +33,7 @@ export class TradeRecord {
 
   @Column({ type: 'timestamptz' })
   executedAt: Date;
+
+  @Column({ type: 'varchar', nullable: true })
+  traceId?: string | null;
 }

@@ -1,19 +1,35 @@
-import {
-  ConflictException,
-  Injectable,
-  UnauthorizedException,
-} from '@nestjs/common';
+import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
-import { User } from './entities/user.entity';
+import { createHash, randomUUID } from 'crypto';
+import { User, UserRole } from './entities/user.entity';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
+import { requireEnv } from '../common/env';
 
 interface TokenPair {
   accessToken: string;
   refreshToken: string;
+}
+
+const INVALID_CREDENTIALS = 'Invalid email or password';
+const INVALID_REFRESH = 'Refresh token is invalid or was already used';
+
+const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
+
+function adminEmails(): Set<string> {
+  return new Set(
+    (process.env.ADMIN_EMAILS ?? '')
+      .split(',')
+      .map((email) => email.trim().toLowerCase())
+      .filter((email) => email.length > 0),
+  );
+}
+
+function roleFor(email: string): UserRole {
+  return adminEmails().has(email.toLowerCase()) ? 'admin' : 'user';
 }
 
 @Injectable()
@@ -26,11 +42,11 @@ export class AuthService {
   async register(dto: RegisterDto): Promise<TokenPair> {
     const existing = await this.users.findOne({ where: { email: dto.email } });
     if (existing) {
-      throw new ConflictException('Email вже зареєстровано');
+      throw new ConflictException('Email is already registered');
     }
     const passwordHash = await bcrypt.hash(dto.password, 10);
     const user = await this.users.save(
-      this.users.create({ email: dto.email, passwordHash }),
+      this.users.create({ email: dto.email, passwordHash, role: roleFor(dto.email) }),
     );
     return this.issueTokens(user);
   }
@@ -38,27 +54,64 @@ export class AuthService {
   async login(dto: LoginDto): Promise<TokenPair> {
     const user = await this.users.findOne({ where: { email: dto.email } });
     if (!user) {
-      throw new UnauthorizedException('Невірний email або пароль');
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
     const valid = await bcrypt.compare(dto.password, user.passwordHash);
     if (!valid) {
-      throw new UnauthorizedException('Невірний email або пароль');
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
     return this.issueTokens(user);
   }
 
+  async refresh(refreshToken: string): Promise<TokenPair> {
+    let userId: string;
+    try {
+      ({ sub: userId } = this.jwt.verify<{ sub: string }>(refreshToken, {
+        secret: requireEnv('JWT_REFRESH_SECRET'),
+      }));
+    } catch {
+      throw new UnauthorizedException(INVALID_REFRESH);
+    }
+    const user = await this.users.findOne({ where: { id: userId } });
+    if (!user) {
+      throw new UnauthorizedException(INVALID_REFRESH);
+    }
+    const role = roleFor(user.email);
+    const pair = this.signTokens({ ...user, role });
+    const rotated = await this.users.update(
+      { id: user.id, refreshTokenHash: tokenHash(refreshToken) },
+      { refreshTokenHash: tokenHash(pair.refreshToken), role },
+    );
+    if (rotated.affected === 0) {
+      await this.users.update({ id: user.id }, { refreshTokenHash: null });
+      throw new UnauthorizedException(INVALID_REFRESH);
+    }
+    return pair;
+  }
+
+  async logout(userId: string): Promise<void> {
+    await this.users.update({ id: userId }, { refreshTokenHash: null });
+  }
+
   private async issueTokens(user: User): Promise<TokenPair> {
-    const payload = { sub: user.id, email: user.email };
-    const accessToken = this.jwt.sign(payload, {
-      secret: process.env.JWT_ACCESS_SECRET ?? 'change-me-access',
-      expiresIn: '15m',
-    });
-    const refreshToken = this.jwt.sign(payload, {
-      secret: process.env.JWT_REFRESH_SECRET ?? 'change-me-refresh',
-      expiresIn: '7d',
-    });
-    user.refreshTokenHash = await bcrypt.hash(refreshToken, 10);
-    await this.users.save(user);
+    const role = roleFor(user.email);
+    const pair = this.signTokens({ ...user, role });
+    await this.users.update(
+      { id: user.id },
+      { refreshTokenHash: tokenHash(pair.refreshToken), role },
+    );
+    return pair;
+  }
+
+  private signTokens(user: User): TokenPair {
+    const accessToken = this.jwt.sign(
+      { sub: user.id, email: user.email, role: user.role },
+      { secret: requireEnv('JWT_ACCESS_SECRET'), expiresIn: '15m' },
+    );
+    const refreshToken = this.jwt.sign(
+      { sub: user.id, jti: randomUUID() },
+      { secret: requireEnv('JWT_REFRESH_SECRET'), expiresIn: '7d' },
+    );
     return { accessToken, refreshToken };
   }
 }

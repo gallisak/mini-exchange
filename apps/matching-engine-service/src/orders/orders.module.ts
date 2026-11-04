@@ -27,6 +27,6 @@ import { MarketPublisherService } from './realtime/market-publisher.service';
     MatchingEngineService,
     MarketPublisherService,
   ],
-  exports: [OrderBookService],
+  exports: [OrderBookService, InstrumentOwnershipService],
 })
 export class OrdersModule {}

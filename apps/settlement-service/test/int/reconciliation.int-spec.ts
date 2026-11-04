@@ -1,12 +1,13 @@
 import { INestApplication } from '@nestjs/common';
 import { spawn } from 'child_process';
+import { randomUUID } from 'crypto';
 import { once } from 'events';
 import { Server, createServer } from 'http';
 import { AddressInfo } from 'net';
 import { resolve } from 'path';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
-import { TradeBody, createApp, resetState, settle, trade } from './harness';
+import { TradeBody, accessToken, createApp, resetState, settle, trade } from './harness';
 
 const FROM = '2026-11-04T10:00:00.000Z';
 const TO = '2026-11-04T11:00:00.000Z';
@@ -73,7 +74,7 @@ describe('reconciliation', () => {
   const reconcile = (query: Record<string, string> = { from: FROM, to: TO }) =>
     request(app.getHttpServer())
       .get('/admin/reconciliation')
-      .set('x-internal-key', process.env.RECONCILIATION_API_KEY as string)
+      .set('authorization', `Bearer ${accessToken(randomUUID(), 'admin')}`)
       .query(query);
 
   const corrupt = (sql: string, parameters: unknown[] = []) =>
@@ -306,17 +307,15 @@ describe('reconciliation', () => {
     expect(Date.now() - new Date(to).getTime()).toBeGreaterThanOrEqual(60000);
   });
 
-  it('is closed without its own key and rejects a bad period', async () => {
+  it('is open only to admins and rejects a bad period', async () => {
+    const asUser = (token: string) =>
+      request(app.getHttpServer()).get('/admin/reconciliation').set('authorization', `Bearer ${token}`);
     await request(app.getHttpServer()).get('/admin/reconciliation').expect(401);
     await request(app.getHttpServer())
       .get('/admin/reconciliation')
       .set('x-internal-key', process.env.SETTLEMENT_INTERNAL_KEY as string)
       .expect(401);
-    await request(app.getHttpServer())
-      .post('/trades/settle')
-      .set('x-internal-key', process.env.RECONCILIATION_API_KEY as string)
-      .send(trade())
-      .expect(401);
+    await asUser(accessToken(randomUUID())).expect(403);
     await reconcile({ from: TO, to: FROM }).expect(400);
     await reconcile({ from: 'yesterday' }).expect(400);
   });

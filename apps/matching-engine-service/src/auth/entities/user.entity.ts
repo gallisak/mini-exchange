@@ -1,5 +1,7 @@
 import { Column, Entity, PrimaryGeneratedColumn } from 'typeorm';
 
+export type UserRole = 'user' | 'admin';
+
 @Entity('users')
 export class User {
   @PrimaryGeneratedColumn('uuid')
@@ -13,4 +15,7 @@ export class User {
 
   @Column({ type: 'varchar', nullable: true })
   refreshTokenHash: string | null;
+
+  @Column({ type: 'varchar', default: 'user' })
+  role: UserRole;
 }

@@ -15,6 +15,7 @@ function serviceWithRecordedCommands() {
   } as unknown as CommandStreamService;
   const records = new Map<string, string>();
   const redis = {
+    isReady: () => true,
     client: {
       set: async (key: string, value: string) => {
         if (records.has(key)) return null;

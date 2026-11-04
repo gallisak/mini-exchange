@@ -2,6 +2,7 @@ import {
   ConflictException,
   Injectable,
   NotFoundException,
+  ServiceUnavailableException,
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
@@ -14,6 +15,8 @@ import { Depth, aggregate } from './depth';
 import { RedisService } from '../redis/redis.service';
 import { PRICE_SCALE, QUANTITY_SCALE, normalizeDecimal } from '../common/decimal';
 import { uuidV5 } from '../common/uuid';
+import { currentTraceId } from '../observability/trace-context';
+import { ordersAccepted } from '../observability/metrics';
 
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 const IDEMPOTENCY_MISMATCH = 'Idempotency-Key was already used for a different order';
@@ -55,6 +58,7 @@ export class OrdersService {
     ownerId: string,
     idempotencyKey: string,
   ): Promise<OrderAccepted> {
+    this.assertQueueAvailable();
     const price = normalizeDecimal(dto.price, PRICE_SCALE);
     const quantity = normalizeDecimal(dto.quantity, QUANTITY_SCALE);
     const fingerprint = [dto.instrument, dto.side, price, quantity].join('|');
@@ -86,11 +90,14 @@ export class OrdersService {
       side: dto.side,
       price,
       quantity,
+      traceId: currentTraceId(),
     });
+    ordersAccepted.inc({ instrument: dto.instrument });
     return { orderId, status: 'accepted' };
   }
 
   async cancelOrder(orderId: string, ownerId: string): Promise<CancelAccepted> {
+    this.assertQueueAvailable();
     const order = await this.orders.findOne({ where: { id: orderId, ownerId } });
     if (!order) {
       throw new NotFoundException('Order not found');
@@ -98,8 +105,19 @@ export class OrdersService {
     if (order.status === 'filled' || order.status === 'cancelled') {
       throw new ConflictException(`Order is already ${order.status}`);
     }
-    await this.commands.append(order.instrument, { type: 'cancel', orderId, ownerId });
+    await this.commands.append(order.instrument, {
+      type: 'cancel',
+      orderId,
+      ownerId,
+      traceId: currentTraceId(),
+    });
     return { orderId, status: 'cancel_requested' };
+  }
+
+  private assertQueueAvailable(): void {
+    if (!this.redis.isReady()) {
+      throw new ServiceUnavailableException('Order queue is unavailable, try again shortly');
+    }
   }
 
   async listOwn(ownerId: string): Promise<Order[]> {

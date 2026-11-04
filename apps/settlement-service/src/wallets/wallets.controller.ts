@@ -1,9 +1,12 @@
+import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Req, UseGuards } from '@nestjs/common';
 import { Request } from 'express';
 import { JwtAuthGuard } from '../auth/jwt-auth.guard';
 import { AuthUser } from '../auth/jwt.strategy';
 import { LedgerService } from '../ledger/ledger.service';
 
+@ApiTags('wallets')
+@ApiBearerAuth()
 @Controller('wallets')
 @UseGuards(JwtAuthGuard)
 export class WalletsController {

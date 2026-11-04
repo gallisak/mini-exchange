@@ -4,11 +4,10 @@ import { Request } from 'express';
 
 const digest = (value: string) => createHash('sha256').update(value).digest();
 
-abstract class HeaderKeyGuard implements CanActivate {
-  protected constructor(private readonly keyEnv: string) {}
-
+@Injectable()
+export class InternalKeyGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
-    const expected = process.env[this.keyEnv];
+    const expected = process.env.SETTLEMENT_INTERNAL_KEY;
     const provided = context.switchToHttp().getRequest<Request>().header('x-internal-key');
     if (!expected || !provided || !timingSafeEqual(digest(expected), digest(provided))) {
       throw new UnauthorizedException();
@@ -17,16 +16,3 @@ abstract class HeaderKeyGuard implements CanActivate {
   }
 }
 
-@Injectable()
-export class InternalKeyGuard extends HeaderKeyGuard {
-  constructor() {
-    super('SETTLEMENT_INTERNAL_KEY');
-  }
-}
-
-@Injectable()
-export class ReconciliationKeyGuard extends HeaderKeyGuard {
-  constructor() {
-    super('RECONCILIATION_API_KEY');
-  }
-}
