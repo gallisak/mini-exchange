@@ -228,6 +228,22 @@ export class BookRunner {
     this.state = result.state;
     orderBook.replace(this.instrument, result.book);
 
+    if (result.orders.length > 0) {
+      void this.options.publish?.({
+        type: 'orders',
+        orders: result.orders.map((order) => ({
+          id: order.id,
+          ownerId: order.ownerId,
+          instrument: order.instrument,
+          side: order.side,
+          price: order.price,
+          quantity: order.quantity,
+          remainingQuantity: order.remainingQuantity,
+          status: order.status,
+          createdAt: order.createdAt.toISOString(),
+        })),
+      });
+    }
     if (result.state.bookSeq !== previousSeq) {
       void this.options.publish?.({
         type: 'book_delta',

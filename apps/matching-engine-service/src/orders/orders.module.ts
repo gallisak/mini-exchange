@@ -1,4 +1,5 @@
 import { Module } from '@nestjs/common';
+import { JwtModule } from '@nestjs/jwt';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { OrdersService } from './orders.service';
 import { OrdersController } from './orders.controller';
@@ -14,7 +15,7 @@ import { InstrumentOwnershipService } from './engine/instrument-ownership.servic
 import { MarketPublisherService } from './realtime/market-publisher.service';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Order, TradeRecord, InstrumentState])],
+  imports: [TypeOrmModule.forFeature([Order, TradeRecord, InstrumentState]), JwtModule.register({})],
   controllers: [OrdersController],
   providers: [
     InstrumentOwnershipService,

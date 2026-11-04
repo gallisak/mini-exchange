@@ -18,6 +18,7 @@ import {
   tradePostings,
 } from './postings';
 import { TradeConflictError } from './trade-conflict.error';
+import { WalletNotifier } from '../notifications/wallet-notifier.service';
 
 export type SettlementResult = 'settled' | 'duplicate';
 
@@ -36,9 +37,20 @@ const byKey = <T>(key: (item: T) => string) => (a: T, b: T) =>
 
 @Injectable()
 export class LedgerService {
-  constructor(private readonly dataSource: DataSource) {}
+  constructor(
+    private readonly dataSource: DataSource,
+    private readonly notifier: WalletNotifier,
+  ) {}
 
-  settleTrade(trade: SettleTradeDto): Promise<SettlementResult> {
+  async settleTrade(trade: SettleTradeDto): Promise<SettlementResult> {
+    const result = await this.record(trade);
+    if (result === 'settled') {
+      await this.notifier.walletsChanged(trade.tradeId, [trade.buyerId, trade.sellerId]);
+    }
+    return result;
+  }
+
+  private record(trade: SettleTradeDto): Promise<SettlementResult> {
     return this.dataSource.transaction(async (manager) => {
       const [transaction] = await manager
         .createQueryBuilder()

@@ -1,7 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import request from 'supertest';
-import { balances, createApp, range, resetState, settle, trade } from './harness';
+import { balances, createApp, eventually, range, redisClient, resetState, settle, trade } from './harness';
 
 const OPENING = { USD: '100000.00', ABC: '1000.00000000', DEF: '1000.00000000', XYZ: '1000.00000000' };
 
@@ -69,6 +69,25 @@ describe('trade settlement', () => {
     expect(responses.map((response) => response.status)).toEqual(range(10).map(() => 200));
     expect(responses.filter((response) => response.body.status === 'settled')).toHaveLength(1);
     expect((await balances(app, executed.buyerId)).USD).toBe('99979.00');
+  });
+
+  it('announces the changed wallets of both sides once per trade', async () => {
+    const subscriber = redisClient();
+    const announced: unknown[] = [];
+    subscriber.on('message', (_channel: string, message: string) => announced.push(JSON.parse(message)));
+    await subscriber.subscribe('wallets:updates');
+    const executed = trade();
+
+    await settle(app, executed).expect(200);
+    await settle(app, executed).expect(200);
+
+    await eventually(async () => expect(announced).toHaveLength(2));
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    await subscriber.quit();
+    expect(announced).toEqual([
+      { ownerId: executed.buyerId, tradeId: executed.tradeId },
+      { ownerId: executed.sellerId, tradeId: executed.tradeId },
+    ]);
   });
 
   it('rejects a trade id reused with different details', async () => {
