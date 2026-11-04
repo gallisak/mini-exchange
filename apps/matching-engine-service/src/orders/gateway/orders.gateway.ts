@@ -48,6 +48,7 @@ export class OrdersGateway
   private readonly logger = new Logger(OrdersGateway.name);
   private subscriber?: Redis;
   private readonly expiries = new Map<string, NodeJS.Timeout>();
+  private readonly snapshots = new Map<string, { windowStart: number; count: number }>();
 
   @WebSocketServer()
   server: Server;
@@ -106,13 +107,32 @@ export class OrdersGateway
   handleDisconnect(client: Socket) {
     clearTimeout(this.expiries.get(client.id));
     this.expiries.delete(client.id);
+    this.snapshots.delete(client.id);
   }
 
   @SubscribeMessage('subscribe')
   async subscribe(client: Socket, instrument: unknown) {
     if (typeof instrument !== 'string' || !INSTRUMENTS.includes(instrument)) return;
+    const retryAfterMs = this.snapshotRetryAfter(client.id);
+    if (retryAfterMs > 0) {
+      client.emit('rate_limited', { event: 'subscribe', retryAfterMs });
+      return;
+    }
     await client.join(bookRoom(instrument));
     client.emit('book_snapshot', await this.orders.getDepth(instrument));
+  }
+
+  private snapshotRetryAfter(socketId: string): number {
+    const limit = Number(process.env.WS_SNAPSHOT_LIMIT ?? 10);
+    const windowMs = Number(process.env.WS_SNAPSHOT_WINDOW_MS ?? 10_000);
+    const now = Date.now();
+    const usage = this.snapshots.get(socketId);
+    if (!usage || now - usage.windowStart >= windowMs) {
+      this.snapshots.set(socketId, { windowStart: now, count: 1 });
+      return 0;
+    }
+    usage.count += 1;
+    return usage.count > limit ? usage.windowStart + windowMs - now : 0;
   }
 
   private identityFrom(token: unknown): Identity | null {

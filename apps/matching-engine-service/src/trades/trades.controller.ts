@@ -1,9 +1,12 @@
-import { Controller, Get, Query } from '@nestjs/common';
+import { Controller, Get, Query, UseGuards } from '@nestjs/common';
+import { RateLimit, RateLimitGuard } from '../rate-limit/rate-limit.guard';
 import { PeriodQueryDto } from './dto/period-query.dto';
 import { RecentTradesQueryDto } from './dto/recent-trades-query.dto';
 import { TradesService } from './trades.service';
 
 @Controller('trades')
+@UseGuards(RateLimitGuard)
+@RateLimit('PUBLIC')
 export class TradesController {
   constructor(private readonly trades: TradesService) {}
 
