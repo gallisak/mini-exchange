@@ -158,9 +158,11 @@ move again.
 every trade has the right four entries, and that the engine's trade count, quantity and
 `Σ price × quantity` per instrument equal the ledger's count, quantity and USD moved. It looks at
 one period: the trades executed in it, the ledger transactions created in it, and the accounts
-they touched. A run without `from` starts where the last matching run ended and stops a minute ago,
-so a trade that never got settled keeps showing up until it is fixed, while a clean history is not
-checked again. Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
+they touched. A run without `from` checks at most one day (`RECONCILIATION_STEP_HOURS`), starting
+where the last matching run ended, or at the first trade either service knows of, and never later
+than a minute ago. A mismatch keeps the start where it is, so a trade that never got settled keeps
+showing up until it is fixed, a clean history is not checked again, and no run scans everything.
+Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
 
 ```bash
 docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/reconciliation/reconcile.js

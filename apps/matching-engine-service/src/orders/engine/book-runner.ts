@@ -11,6 +11,7 @@ import { EngineState, ExecutedTrade, applyCommands, isValidSubmit } from './appl
 import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
 import { FencedOutError } from './fenced-out.error';
 import { runWithTrace } from '../../observability/trace-context';
+import { withTimeout } from '../../common/with-timeout';
 import { bookBatchFailures, tradesExecuted } from '../../observability/metrics';
 import { diffBooks } from '../depth';
 import { publicTrade } from '../../trades/public-trade';
@@ -28,7 +29,7 @@ export interface BookRunnerOptions {
   fence: bigint;
   leaseValid: () => boolean;
   onFenced: (error: FencedOutError) => void;
-  publish?: (event: MarketEvent) => Promise<void>;
+  publish?: (event: MarketEvent) => Promise<boolean | void>;
   heartbeatMs?: number;
 }
 
@@ -36,6 +37,7 @@ type StreamEntry = [id: string, fields: string[]];
 
 const STUCK_TTL_MS = 30_000;
 const ROWS_PER_INSERT = 1_000;
+const MARKER_TIMEOUT_MS = 1_000;
 
 function chunks<T>(rows: T[]): T[][] {
   const result: T[][] = [];
@@ -99,8 +101,12 @@ export class BookRunner {
     await closeRedis(reader);
   }
 
-  private publish(event: MarketEvent): Promise<void> {
-    return this.options.publish?.(event).catch(() => undefined) ?? Promise.resolve();
+  private async publish(event: MarketEvent): Promise<boolean> {
+    if (!this.options.publish) return true;
+    return this.options
+      .publish(event)
+      .then((published) => published !== false)
+      .catch(() => false);
   }
 
   private logApplied(commands: StreamCommand[], orders: Order[], trades: ExecutedTrade[]): void {
@@ -195,22 +201,26 @@ export class BookRunner {
 
   private async announceUnpublished(): Promise<void> {
     const key = publishedKey(this.instrument);
-    const published = await this.options.redis.client.get(key).catch(() => null);
+    const published = await withTimeout(this.options.redis.client.get(key), MARKER_TIMEOUT_MS, 'Redis').catch(
+      () => null,
+    );
     const bookSeq = this.state.bookSeq;
     if (bookSeq === 0n) return;
     if (published !== null && /^\d+$/.test(published) && BigInt(published) >= bookSeq) return;
     this.logger.warn(`Changes up to book seq ${bookSeq} may not have been published, telling clients to reload`);
-    await this.publish({
+    const announced = await this.publish({
       type: 'resync',
       resync: { instruments: [this.instrument], owners: [], allOwners: true },
     });
-    await this.markPublished(bookSeq);
+    if (announced) await this.markPublished(bookSeq);
   }
 
   private async markPublished(bookSeq: bigint): Promise<void> {
-    await this.options.redis.client
-      .set(publishedKey(this.instrument), bookSeq.toString())
-      .catch(() => undefined);
+    await withTimeout(
+      this.options.redis.client.set(publishedKey(this.instrument), bookSeq.toString()),
+      MARKER_TIMEOUT_MS,
+      'Redis',
+    ).catch(() => undefined);
   }
 
   private async run(): Promise<void> {
@@ -327,7 +337,7 @@ export class BookRunner {
     this.logApplied(commands, result.orders, result.trades);
     tradesExecuted.inc({ instrument: this.instrument }, result.trades.length);
 
-    const updates: Promise<void>[] = [];
+    const updates: Promise<boolean>[] = [];
     if (result.trades.length > 0) {
       updates.push(this.publish({ type: 'trades', trades: result.trades.map(publicTrade) }));
     }
@@ -361,7 +371,9 @@ export class BookRunner {
         }),
       );
     }
-    await Promise.all(updates);
-    if (result.state.bookSeq !== previousSeq) await this.markPublished(result.state.bookSeq);
+    const published = await Promise.all(updates);
+    if (result.state.bookSeq !== previousSeq && published.every(Boolean)) {
+      await this.markPublished(result.state.bookSeq);
+    }
   }
 }

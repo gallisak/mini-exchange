@@ -14,6 +14,7 @@ export interface InstrumentTradeTotals {
 export interface TradeSummary {
   from: string;
   to: string;
+  firstTradeAt: string | null;
   instruments: InstrumentTradeTotals[];
 }
 
@@ -47,9 +48,14 @@ export class TradesService {
         .groupBy('trade.instrument')
         .orderBy('trade.instrument')
         .getRawMany();
+    const first: { firstTradeAt: Date | null } | undefined = await this.trades
+      .createQueryBuilder('trade')
+      .select('MIN(trade.executedAt)', 'firstTradeAt')
+      .getRawOne();
     return {
       from: from.toISOString(),
       to: to.toISOString(),
+      firstTradeAt: first?.firstTradeAt ? new Date(first.firstTradeAt).toISOString() : null,
       instruments: rows.map((row) => ({
         instrument: row.instrument,
         count: Number(row.count),

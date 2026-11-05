@@ -1,6 +1,7 @@
 import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { RedisService } from '../../redis/redis.service';
 import { MarketEvent, marketChannel } from './market-events';
+import { withTimeout } from '../../common/with-timeout';
 
 const RESYNC_RETRY_MS = 1000;
 const PUBLISH_TIMEOUT_MS = 1000;
@@ -21,7 +22,7 @@ export class MarketPublisherService implements OnModuleDestroy {
     this.retry = undefined;
   }
 
-  async publish(instrument: string, event: MarketEvent): Promise<void> {
+  async publish(instrument: string, event: MarketEvent): Promise<boolean> {
     try {
       await this.withTimeout(this.redis.client.publish(marketChannel(instrument), JSON.stringify(event)));
     } catch (error) {
@@ -29,9 +30,10 @@ export class MarketPublisherService implements OnModuleDestroy {
       this.logger.warn(
         `Could not publish ${event.type} for ${instrument}, its subscribers will resync: ${(error as Error).message}`,
       );
-      return;
+      return false;
     }
     await this.announceLost();
+    return true;
   }
 
   private remember(instrument: string, event: MarketEvent): void {
@@ -52,19 +54,8 @@ export class MarketPublisherService implements OnModuleDestroy {
     this.retry.unref?.();
   }
 
-  private async withTimeout<T>(command: Promise<T>): Promise<T> {
-    let timer: NodeJS.Timeout | undefined;
-    const timeout = new Promise<never>((_, reject) => {
-      timer = setTimeout(
-        () => reject(new Error(`Redis did not answer within ${PUBLISH_TIMEOUT_MS} ms`)),
-        PUBLISH_TIMEOUT_MS,
-      );
-    });
-    try {
-      return await Promise.race([command, timeout]);
-    } finally {
-      clearTimeout(timer);
-    }
+  private withTimeout<T>(command: Promise<T>): Promise<T> {
+    return withTimeout(command, PUBLISH_TIMEOUT_MS, 'Redis');
   }
 
   private async announceLost(): Promise<void> {

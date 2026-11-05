@@ -161,8 +161,15 @@ export class AuthService {
     if (!successor || successor.usedAt || successor.revokedAt) return null;
     const issuedAt = Math.floor(successor.createdAt.getTime() / 1000);
     const pair = this.signTokens(user, successor.id, successor.familyId, issuedAt);
-    if (successor.tokenHash !== tokenHash(pair.refreshToken)) return null;
-    return pair;
+    if (successor.tokenHash === tokenHash(pair.refreshToken)) return pair;
+    const reissuedAt = Math.floor(Date.now() / 1000);
+    const reissued = this.signTokens(user, successor.id, successor.familyId, reissuedAt);
+    await manager.update(
+      RefreshSession,
+      { id: successor.id },
+      { tokenHash: tokenHash(reissued.refreshToken), createdAt: new Date(reissuedAt * 1000) },
+    );
+    return reissued;
   }
 
   private issueTokens(user: User): Promise<TokenPair> {

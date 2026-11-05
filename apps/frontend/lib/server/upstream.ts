@@ -76,7 +76,7 @@ export async function upstream(
 }
 
 export function rotateTokens(request: NextRequest, tokens: SessionTokens): Promise<Rotation> {
-  const client = `${clientAddress(request) ?? ''} ${request.headers.get('user-agent') ?? ''}`;
+  const client = request.headers.get('user-agent') ?? '';
   return refreshOnce({ ...tokens, client }, async (token, attempt) => {
     const result = await upstream(request, 'engine', '/auth/refresh', {
       method: 'POST',

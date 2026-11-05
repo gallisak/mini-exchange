@@ -52,6 +52,7 @@ describe('trade summary', () => {
     expect(response.body).toEqual({
       from: '2026-11-04T10:00:00.000Z',
       to: '2026-11-04T11:00:00.000Z',
+      firstTradeAt: '2026-11-04T10:00:00.000Z',
       instruments: [
         { instrument: 'ABC', count: 2, quantity: '2.12345678', notional: '7.2358023678' },
         { instrument: 'DEF', count: 1, quantity: '0.00000001', notional: '0.0000000001' },

@@ -65,23 +65,46 @@ const EMPTY_LEDGER_TOTALS: LedgerTradeTotals = {
 @Injectable()
 export class ReconciliationService {
   private readonly lagMs = intEnv('RECONCILIATION_LAG_MS', 60_000, 0);
+  private readonly stepMs = intEnv('RECONCILIATION_STEP_HOURS', 24) * 3_600_000;
 
   constructor(
     private readonly dataSource: DataSource,
     private readonly engine: EngineClient,
   ) {}
 
-  async defaultPeriod(to?: Date): Promise<{ from: Date; to: Date }> {
+  periodEnd(to?: Date): Date {
     const latest = Date.now() - this.lagMs;
-    const end = new Date(Math.min(to?.getTime() ?? latest, latest));
+    return new Date(Math.min(to?.getTime() ?? latest, latest));
+  }
+
+  async defaultPeriod(to?: Date): Promise<{ from: Date; to: Date }> {
+    const end = this.periodEnd(to).getTime();
     const checkpoint = await this.dataSource
       .getRepository(ReconciliationCheckpoint)
       .findOneBy({ name: CHECKPOINT });
-    const from =
-      checkpoint && checkpoint.reconciledUntil.getTime() < end.getTime()
-        ? checkpoint.reconciledUntil
-        : new Date(0);
-    return { from, to: end };
+    let from =
+      checkpoint && checkpoint.reconciledUntil.getTime() < end
+        ? checkpoint.reconciledUntil.getTime()
+        : await this.firstActivity();
+    if (from === null || from >= end) from = end - this.stepMs;
+    return { from: new Date(from), to: new Date(Math.min(end, from + this.stepMs)) };
+  }
+
+  private async firstActivity(): Promise<number | null> {
+    const [ledger, engine] = await Promise.all([
+      this.dataSource
+        .query(
+          `SELECT LEAST((SELECT MIN("executedAt") FROM "settled_trades"),
+                        (SELECT MIN("createdAt") FROM "ledger_transactions")) AS "first"`,
+        )
+        .then(([row]: { first: Date | null }[]) => (row?.first ? new Date(row.first).getTime() : null)),
+      this.engine.firstTradeAt().then(
+        (first) => first?.getTime() ?? null,
+        () => null,
+      ),
+    ]);
+    const known = [ledger, engine].filter((time): time is number => time !== null);
+    return known.length > 0 ? Math.min(...known) : null;
   }
 
   async reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {

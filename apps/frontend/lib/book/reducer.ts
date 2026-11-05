@@ -33,6 +33,7 @@ export interface BookState {
   silenceLimitMs: number;
   resyncs: number;
   olderSnapshots: number;
+  heartbeats: boolean;
 }
 
 export type BookAction =
@@ -65,6 +66,7 @@ export function initialBook(instrument: string, at = 0): BookState {
     silenceLimitMs: SILENCE_LIMIT_MS,
     resyncs: 0,
     olderSnapshots: 0,
+    heartbeats: false,
   };
 }
 
@@ -186,6 +188,7 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
         ...state,
         lastHeardAt: action.at,
         silenceLimitMs: silenceLimitFor(action.intervalMs),
+        heartbeats: true,
       };
       return state.status === 'live' && state.seq !== null && action.seq > state.seq
         ? stale(heard)
@@ -203,7 +206,7 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
       ) {
         return stale(state);
       }
-      return state.status === 'live' && action.at - state.lastHeardAt > state.silenceLimitMs
+      return state.status === 'live' && state.heartbeats && action.at - state.lastHeardAt > state.silenceLimitMs
         ? stale(state)
         : state;
   }

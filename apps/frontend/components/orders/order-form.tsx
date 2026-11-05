@@ -18,6 +18,7 @@ import {
   saveAttempt,
   unconfirmed,
 } from '@/lib/client/order-attempt';
+import { useSession } from '@/lib/client/session';
 import { cn } from '@/lib/utils';
 
 const PRICE = /^\d{1,16}(\.\d{1,2})?$/;
@@ -37,16 +38,18 @@ export function OrderForm({ instrument }: { instrument: string }) {
   const [quantity, setQuantity] = useState('');
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
+  const owner = useSession().user?.id ?? null;
+  const scope = owner && `${owner}:${instrument}`;
   const [restored, setRestored] = useState<string | null>(null);
 
   useEffect(() => {
-    setAttempt(loadAttempt(sessionStore(), instrument));
-    setRestored(instrument);
-  }, [instrument]);
+    setAttempt(owner ? loadAttempt(sessionStore(), owner, instrument) : null);
+    setRestored(scope);
+  }, [owner, instrument, scope]);
 
   useEffect(() => {
-    if (restored === instrument) saveAttempt(sessionStore(), instrument, attempt);
-  }, [attempt, restored, instrument]);
+    if (owner && scope && restored === scope) saveAttempt(sessionStore(), owner, instrument, attempt);
+  }, [attempt, restored, scope, owner, instrument]);
 
   const priceError =
     price && !(PRICE.test(price) && positive(price)) ? 'Up to 2 decimals, above zero' : null;

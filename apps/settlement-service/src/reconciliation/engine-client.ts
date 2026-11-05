@@ -36,6 +36,18 @@ export class EngineClient {
   private readonly timeoutMs = intEnv('ENGINE_TIMEOUT_MS', 30_000);
 
   async tradeTotals(from: Date, to: Date): Promise<EngineInstrumentTotals[]> {
+    return (await this.summary(from, to)).instruments;
+  }
+
+  async firstTradeAt(): Promise<Date | null> {
+    const { firstTradeAt } = await this.summary(new Date(0), new Date(1));
+    return firstTradeAt;
+  }
+
+  private async summary(
+    from: Date,
+    to: Date,
+  ): Promise<{ instruments: EngineInstrumentTotals[]; firstTradeAt: Date | null }> {
     const url = new URL('/trades/summary', process.env.ENGINE_URL ?? 'http://localhost:3001');
     url.searchParams.set('from', from.toISOString());
     url.searchParams.set('to', to.toISOString());
@@ -46,10 +58,17 @@ export class EngineClient {
     if (!response.ok) {
       throw new Error(`Engine answered ${response.status} for the trade summary`);
     }
-    const body = (await response.json().catch(() => null)) as { instruments?: unknown } | null;
+    const body = (await response.json().catch(() => null)) as {
+      instruments?: unknown;
+      firstTradeAt?: unknown;
+    } | null;
     if (!Array.isArray(body?.instruments) || !body.instruments.every(isTotals)) {
       throw new Error('Engine returned a malformed trade summary');
     }
-    return body.instruments;
+    const first = typeof body.firstTradeAt === 'string' ? new Date(body.firstTradeAt) : null;
+    return {
+      instruments: body.instruments,
+      firstTradeAt: first && !Number.isNaN(first.getTime()) ? first : null,
+    };
   }
 }

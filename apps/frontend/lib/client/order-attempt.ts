@@ -33,27 +33,32 @@ export function afterFailure(attempt: Attempt, status: number): Attempt {
   return { ...attempt, unconfirmed: isUnknownOutcome(status) };
 }
 
-const storageKey = (instrument: string) => `mx:unconfirmed-order:${instrument}`;
+const storageKey = (owner: string, instrument: string) => `mx:unconfirmed-order:${owner}:${instrument}`;
 
 type AttemptStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 export function saveAttempt(
   storage: AttemptStorage | null,
+  owner: string,
   instrument: string,
   attempt: Attempt | null,
 ): void {
   try {
     if (attempt?.unconfirmed && attempt.draft.instrument === instrument) {
-      storage?.setItem(storageKey(instrument), JSON.stringify(attempt));
-    } else storage?.removeItem(storageKey(instrument));
+      storage?.setItem(storageKey(owner, instrument), JSON.stringify(attempt));
+    } else storage?.removeItem(storageKey(owner, instrument));
   } catch {
     return;
   }
 }
 
-export function loadAttempt(storage: AttemptStorage | null, instrument: string): Attempt | null {
+export function loadAttempt(
+  storage: AttemptStorage | null,
+  owner: string,
+  instrument: string,
+): Attempt | null {
   try {
-    const stored = JSON.parse(storage?.getItem(storageKey(instrument)) ?? 'null') as Partial<Attempt> | null;
+    const stored = JSON.parse(storage?.getItem(storageKey(owner, instrument)) ?? 'null') as Partial<Attempt> | null;
     const draft = stored?.draft;
     const valid =
       typeof stored?.key === 'string' &&

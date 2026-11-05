@@ -13,12 +13,9 @@ export class ReconciliationController {
   constructor(private readonly reconciliation: ReconciliationService) {}
 
   @Get()
-  async reconcile(@Query() query: ReconciliationQueryDto) {
+  reconcile(@Query() query: ReconciliationQueryDto) {
     const to = query.to ? new Date(query.to) : undefined;
     if (!query.from) return this.reconciliation.reconcileSinceCheckpoint(to);
-    return this.reconciliation.reconcile(
-      new Date(query.from),
-      (await this.reconciliation.defaultPeriod(to)).to,
-    );
+    return this.reconciliation.reconcile(new Date(query.from), this.reconciliation.periodEnd(to));
   }
 }
