@@ -3,6 +3,7 @@ import {
   BookState,
   Delta,
   SILENCE_LIMIT_MS,
+  SNAPSHOT_TIMEOUT_MS,
   Snapshot,
   bookReducer,
   initialBook,
@@ -147,6 +148,28 @@ describe('order book resync', () => {
 
     expect(quiet.status).toBe('stale');
     expect(recent.status).toBe('live');
+  });
+
+  it('asks again when a requested snapshot never arrives, even while deltas keep coming', () => {
+    let state = bookReducer(live(5), { type: 'delta', delta: delta(7, [ask('1.00', '9')]), at: 1 });
+    state = bookReducer(state, { type: 'snapshotRequested', at: 2 });
+    state = bookReducer(state, { type: 'delta', delta: delta(8, [ask('2.00', '1')]), at: 1_000 });
+    state = bookReducer(state, { type: 'delta', delta: delta(9, [ask('3.00', '1')]), at: 4_000 });
+
+    expect(needsSnapshot(bookReducer(state, { type: 'tick', at: 2 + SNAPSHOT_TIMEOUT_MS - 1 }))).toBe(
+      false,
+    );
+    state = bookReducer(state, { type: 'tick', at: 2 + SNAPSHOT_TIMEOUT_MS + 1 });
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
+  });
+
+  it('asks again when the snapshot after connecting never arrives', () => {
+    let state = bookReducer(initialBook('ABC'), { type: 'connected', at: 0 });
+    state = bookReducer(state, { type: 'tick', at: SNAPSHOT_TIMEOUT_MS + 1 });
+
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
   });
 
   it('shows reconnecting on a lost connection and asks for a fresh snapshot once back', () => {

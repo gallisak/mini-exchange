@@ -28,6 +28,7 @@ export interface BookState {
   asks: Level[];
   pending: Delta[];
   awaitingSnapshot: boolean;
+  requestedAt: number | null;
   lastHeardAt: number;
   resyncs: number;
 }
@@ -42,6 +43,7 @@ export type BookAction =
   | { type: 'tick'; at: number };
 
 export const SILENCE_LIMIT_MS = 7_000;
+export const SNAPSHOT_TIMEOUT_MS = 5_000;
 const PENDING_LIMIT = 1_000;
 
 export function initialBook(instrument: string, at = 0): BookState {
@@ -53,6 +55,7 @@ export function initialBook(instrument: string, at = 0): BookState {
     asks: [],
     pending: [],
     awaitingSnapshot: false,
+    requestedAt: null,
     lastHeardAt: at,
     resyncs: 0,
   };
@@ -89,7 +92,7 @@ function applyChanges(state: BookState, delta: Delta): BookState {
 }
 
 function stale(state: BookState): BookState {
-  return { ...state, status: 'stale', awaitingSnapshot: false };
+  return { ...state, status: 'stale', awaitingSnapshot: false, requestedAt: null };
 }
 
 export function needsSnapshot(state: BookState): boolean {
@@ -103,15 +106,22 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
         ...state,
         status: state.seq === null ? 'connecting' : 'reconnecting',
         awaitingSnapshot: true,
+        requestedAt: action.at,
         pending: [],
         lastHeardAt: action.at,
       };
 
     case 'disconnected':
-      return { ...state, status: 'reconnecting', awaitingSnapshot: false };
+      return { ...state, status: 'reconnecting', awaitingSnapshot: false, requestedAt: null };
 
     case 'snapshotRequested':
-      return { ...state, awaitingSnapshot: true, resyncs: state.resyncs + 1, lastHeardAt: action.at };
+      return {
+        ...state,
+        awaitingSnapshot: true,
+        requestedAt: action.at,
+        resyncs: state.resyncs + 1,
+        lastHeardAt: action.at,
+      };
 
     case 'snapshot': {
       if (action.snapshot.instrument !== state.instrument) return state;
@@ -123,6 +133,7 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
         asks: sortLevels(action.snapshot.asks, 'sell'),
         pending: [],
         awaitingSnapshot: false,
+        requestedAt: null,
         lastHeardAt: action.at,
       };
       const buffered = [...state.pending]
@@ -156,6 +167,13 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
     }
 
     case 'tick':
+      if (
+        state.awaitingSnapshot &&
+        state.requestedAt !== null &&
+        action.at - state.requestedAt > SNAPSHOT_TIMEOUT_MS
+      ) {
+        return stale(state);
+      }
       return state.status === 'live' && action.at - state.lastHeardAt > SILENCE_LIMIT_MS
         ? stale(state)
         : state;

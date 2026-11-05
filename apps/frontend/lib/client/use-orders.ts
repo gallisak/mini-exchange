@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
+import { mergeOrders } from './feeds';
 import { useSocket } from './socket';
 import { Order } from './types';
 
@@ -13,7 +14,8 @@ export function useOrders() {
 
   const load = useCallback(async () => {
     try {
-      setOrders(await api<Order[]>('/api/orders'));
+      const fresh = await api<Order[]>('/api/orders');
+      setOrders((current) => mergeOrders(current ?? [], fresh));
       loaded.current = true;
       setError(null);
     } catch (failure) {
@@ -32,11 +34,7 @@ export function useOrders() {
         void load();
         return;
       }
-      setOrders((current) => {
-        if (!current) return current;
-        const rest = current.filter((known) => known.id !== order.id);
-        return [order, ...rest].sort((a, b) => b.createdAt.localeCompare(a.createdAt));
-      });
+      setOrders((current) => (current ? mergeOrders(current, [order]) : current));
     };
     const onReconnect = () => void load();
     socket.on('order', onOrder);
