@@ -14,10 +14,7 @@ export class ReconciliationController {
 
   @Get()
   reconcile(@Query() query: ReconciliationQueryDto) {
-    const period = this.reconciliation.defaultPeriod();
-    return this.reconciliation.reconcile(
-      query.from ? new Date(query.from) : period.from,
-      query.to ? new Date(query.to) : period.to,
-    );
+    const period = this.reconciliation.defaultPeriod(query.to ? new Date(query.to) : undefined);
+    return this.reconciliation.reconcile(query.from ? new Date(query.from) : period.from, period.to);
   }
 }

@@ -12,6 +12,7 @@ export class LedgerTransaction {
   @Column()
   kind: string;
 
+  @Index('IDX_ledger_transactions_created_at')
   @CreateDateColumn({ type: 'timestamptz' })
   createdAt: Date;
 }

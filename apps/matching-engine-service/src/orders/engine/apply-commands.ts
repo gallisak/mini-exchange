@@ -1,6 +1,6 @@
 import { Order } from '../entities/order.entity';
 import { BookSnapshot, Trade } from '../order-book.types';
-import { matchOrder } from '../matcher';
+import { matchOrder, withoutOrder } from '../matcher';
 import { uuidV5 } from '../../common/uuid';
 import {
   PRICE_INTEGER_DIGITS,
@@ -37,7 +37,7 @@ export function applyCommands(
   commands: StreamCommand[],
   knownOrderIds: ReadonlySet<string>,
 ): ApplyResult {
-  let current: BookSnapshot = { bids: [...book.bids], asks: [...book.asks] };
+  let current: BookSnapshot = { bids: book.bids, asks: book.asks };
   let { orderSeq, tradeSeq } = state;
   const changed = new Map<string, Order>();
   const trades: ExecutedTrade[] = [];
@@ -81,10 +81,10 @@ export function applyCommands(
 
     const resting = [...current.bids, ...current.asks].find((o) => o.id === command.orderId);
     if (!resting || resting.ownerId !== command.ownerId) continue;
-    current = {
-      bids: current.bids.filter((o) => o.id !== resting.id),
-      asks: current.asks.filter((o) => o.id !== resting.id),
-    };
+    current =
+      resting.side === 'buy'
+        ? { bids: withoutOrder(current.bids, resting.id), asks: current.asks }
+        : { bids: current.bids, asks: withoutOrder(current.asks, resting.id) };
     changed.set(resting.id, { ...resting, status: 'cancelled' });
   }
 

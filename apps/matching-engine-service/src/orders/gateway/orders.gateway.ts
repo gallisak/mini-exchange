@@ -13,8 +13,9 @@ import Redis from 'ioredis';
 import proxyAddr from 'proxy-addr';
 import { Server, Socket } from 'socket.io';
 import { OrdersService } from '../orders.service';
+import { WS_AUDIENCE } from '../../auth/auth.service';
 import { INSTRUMENTS } from '../../common/instruments';
-import { corsOrigins, requireEnv, trustedProxies } from '../../common/env';
+import { corsOrigins, intEnv, requireEnv, trustedProxies } from '../../common/env';
 import { RateLimitService } from '../../rate-limit/rate-limit.service';
 import { rateLimitPolicy } from '../../rate-limit/rate-limit.policies';
 import { RedisService, closeRedis } from '../../redis/redis.service';
@@ -173,8 +174,8 @@ export class OrdersGateway
   }
 
   private snapshotRetryAfter(socketId: string): number {
-    const limit = Number(process.env.WS_SNAPSHOT_LIMIT ?? 10);
-    const windowMs = Number(process.env.WS_SNAPSHOT_WINDOW_MS ?? 10_000);
+    const limit = intEnv('WS_SNAPSHOT_LIMIT', 10);
+    const windowMs = intEnv('WS_SNAPSHOT_WINDOW_MS', 10_000);
     const now = Date.now();
     const usage = this.snapshots.get(socketId);
     if (!usage || now - usage.windowStart >= windowMs) {
@@ -188,12 +189,13 @@ export class OrdersGateway
   private identityFrom(token: unknown): Identity | null {
     if (typeof token !== 'string') return null;
     try {
-      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown }>(token, {
+      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; until?: unknown }>(token, {
         secret: requireEnv('JWT_ACCESS_SECRET'),
+        audience: WS_AUDIENCE,
       });
       if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) return null;
-      if (typeof payload.exp !== 'number') return null;
-      return { userId: payload.sub, expiresAt: payload.exp * 1000 };
+      if (typeof payload.exp !== 'number' || typeof payload.until !== 'number') return null;
+      return { userId: payload.sub, expiresAt: payload.until * 1000 };
     } catch {
       return null;
     }
@@ -228,14 +230,15 @@ export class OrdersGateway
       }
     }
     if (event.type === 'resync') {
-      const { instruments, owners } = event.resync ?? {};
+      const { instruments, owners, allOwners } = event.resync ?? {};
       for (const instrument of Array.isArray(instruments) ? instruments : []) {
         if (isInstrument(instrument)) this.server.to(bookRoom(instrument)).emit('resync', { instrument });
       }
       const rooms = (Array.isArray(owners) ? owners : [])
         .filter((owner): owner is string => typeof owner === 'string')
         .map(userRoom);
-      if (rooms.length > 0) this.server.to(rooms).emit('resync', { orders: true });
+      if (allOwners === true) this.server.emit('resync', { orders: true });
+      else if (rooms.length > 0) this.server.to(rooms).emit('resync', { orders: true });
     }
   }
 

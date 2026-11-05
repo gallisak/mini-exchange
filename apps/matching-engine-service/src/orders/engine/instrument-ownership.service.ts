@@ -2,6 +2,7 @@ import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@ne
 import { randomUUID } from 'crypto';
 import { performance } from 'perf_hooks';
 import { INSTRUMENTS } from '../../common/instruments';
+import { intEnv } from '../../common/env';
 import { RedisLockService } from '../../locks/redis-lock.service';
 import { MatchingEngineService } from './matching-engine.service';
 import { FencedOutError } from './fenced-out.error';
@@ -19,9 +20,9 @@ interface Lease {
 export class InstrumentOwnershipService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(InstrumentOwnershipService.name);
   private readonly ownerId = `${process.env.INSTANCE_ID ?? 'engine'}:${randomUUID()}`;
-  private readonly ttlMs = Number(process.env.LOCK_TTL_MS ?? 5000);
-  private readonly renewIntervalMs = Number(process.env.LOCK_RENEW_INTERVAL_MS ?? 1500);
-  private readonly acquireIntervalMs = Number(process.env.LOCK_ACQUIRE_INTERVAL_MS ?? 1000);
+  private readonly ttlMs = intEnv('LOCK_TTL_MS', 5000);
+  private readonly renewIntervalMs = intEnv('LOCK_RENEW_INTERVAL_MS', 1500);
+  private readonly acquireIntervalMs = intEnv('LOCK_ACQUIRE_INTERVAL_MS', 1000);
   private readonly safetyMarginMs = Math.max(this.ttlMs / 5, 200);
   private readonly owned = new Map<string, Lease>();
   private acquireTimer?: NodeJS.Timeout;
@@ -138,11 +139,11 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
           lease.renewedAt = requestedAt;
           continue;
         }
-        await this.demote(instrument, 'the lock is held by someone else');
+        this.demote(instrument, 'the lock is held by someone else');
       } catch (error) {
         this.logger.error(`Could not renew ${instrument}: ${(error as Error).message}`);
         if (!this.isLeaseValid(instrument, lease.token)) {
-          await this.demote(instrument, 'the lease expired while Redis was unreachable');
+          this.demote(instrument, 'the lease expired while Redis was unreachable');
         }
       }
     }
@@ -159,9 +160,11 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
     }
   }
 
-  private async demote(instrument: string, reason: string): Promise<void> {
+  private demote(instrument: string, reason: string): void {
     this.owned.delete(instrument);
-    await this.engine.stopInstrument(instrument);
     this.logger.warn(`${this.ownerId} lost ownership of ${instrument}: ${reason}`);
+    this.engine
+      .stopInstrument(instrument)
+      .catch((error: Error) => this.logger.error(`Could not stop ${instrument}: ${error.message}`));
   }
 }

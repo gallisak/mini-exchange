@@ -1,9 +1,10 @@
 import Redis, { RedisOptions } from 'ioredis';
+import { intEnv } from './env';
 
 export function createRedis(options: RedisOptions = {}): Redis {
   return new Redis({
     host: process.env.REDIS_HOST ?? 'localhost',
-    port: Number(process.env.REDIS_PORT ?? 6379),
+    port: intEnv('REDIS_PORT', 6379),
     retryStrategy: (attempt) => Math.min(attempt * 50, 500),
     ...options,
   });

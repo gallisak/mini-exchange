@@ -66,7 +66,9 @@ flowchart LR
 3. It commits the batch in one Postgres transaction: changed orders, trades, outbox rows and the id
    of the last applied command. The first statement checks its fencing token.
 4. After the commit it publishes book deltas with a sequence number, trades and order updates
-   through Redis pub/sub; every engine forwards them to its own WebSocket clients.
+   through Redis pub/sub, and reads the next batch only once they are out; every engine forwards
+   them to its own WebSocket clients. An owner that dies between commit and publish loses those
+   messages, so every new owner of a book first tells all clients to reload it and their orders.
 5. The outbox relay moves each trade to `trades:<instrument>`.
 6. Settlement reads that stream through a consumer group and books the trade in one transaction.
 7. It publishes the wallet change of both sides and only then acknowledges the event; each owner
@@ -154,8 +156,10 @@ move again.
 
 **Reconciliation** checks that every ledger transaction balances, every balance equals its entries,
 every trade has the right four entries, and that the engine's trade count, quantity and
-`Σ price × quantity` per instrument equal the ledger's count, quantity and USD moved. Run it as
-`GET /admin/reconciliation` (admins) or:
+`Σ price × quantity` per instrument equal the ledger's count, quantity and USD moved. It looks at
+one period, by default the 24 hours (`RECONCILIATION_WINDOW_HOURS`) that end a minute ago: the
+trades executed in it, the ledger transactions created in it, and the accounts they touched. Pass
+`from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
 
 ```bash
 docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/reconciliation/reconcile.js
@@ -169,9 +173,10 @@ docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist
 | `orders` | `(ownerId, createdAt)`, and the same where active | a user's finished and active orders |
 | `orders` | `(instrument, seq)` where open | loading a book, snapshots |
 | `trades` | unique `(instrument, seq)`, `(executedAt)` | trade feed, engine totals |
-| `outbox` | `(id)` where unpublished | the relay |
+| `outbox` | `(id)` where unpublished, `(publishedAt)` where published | the relay, purging old messages |
+| `users` | unique `(email)`, `(lower(email))` | sign-in |
 | `accounts` | unique `(ownerId, asset)` | a user's wallet, posting |
-| `ledger_transactions` | unique `(reference)` | idempotent settlement |
+| `ledger_transactions` | unique `(reference)`, `(createdAt)` | idempotent settlement, reconciliation by period |
 | `ledger_entries` | `(transactionId)`, `(accountId)` | reconciliation of transactions and balances |
 | `settled_trades` | primary key `tradeId`, `(executedAt)`, `(instrument, executedAt)` | redelivery check, reconciliation by period |
 
@@ -275,6 +280,7 @@ Redis Streams is the order log and Redis is the coordinator.
 | `GET /orders/book` with a token, raw orders | Public, aggregated levels with `seq`, no owners | Public depth, no data leak |
 | WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, and private `order` and `wallet` | Sequence numbers and resync |
 | `POST /auth/login` → 201 | 200, plus `/auth/refresh` and `/auth/logout` | Sessions |
+| WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token |
 | `GET /orders` returned every order | Every active order and the latest 100 finished ones | Bounded response |
 | Any password length | At most 72 bytes | bcrypt compares only 72 bytes |
 | Messages in Ukrainian | English | Language of the project |
@@ -286,8 +292,6 @@ Redis Streams is the order log and Redis is the coordinator.
 - **Redis is a single point of failure.** Losing its disk loses commands accepted but not yet
   applied. A replicated log (Redis with a replica and `WAIT`, or Kafka) would close that.
 - **No load balancing of instruments.** One instance can end up owning all of them.
-- **A frozen owner slows the API.** nginx keeps sending part of the requests to it until they time
-  out; a short read timeout with a retry on the other engine would fix that.
 - **Streams are never trimmed**, to keep a full replay possible; production would trim them after a
   snapshot.
 - **No balance reservation.** Balances can go negative.

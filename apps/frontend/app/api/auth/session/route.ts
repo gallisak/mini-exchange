@@ -14,7 +14,7 @@ export async function GET(request: NextRequest) {
   if (isFresh(accessToken)) return NextResponse.json({ user: userOf(accessToken) });
   if (!refreshToken) return NextResponse.json({ user: null });
 
-  const outcome = await rotateTokens(request, refreshToken);
+  const outcome = await rotateTokens(request, { refreshToken, accessToken });
   if (outcome.kind === 'unavailable') return unavailable();
   if (outcome.kind === 'invalid') {
     const response = NextResponse.json({ user: null });

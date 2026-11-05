@@ -46,7 +46,7 @@ export type MarketEvent =
   | { type: 'book_heartbeat'; heartbeat: BookHeartbeat }
   | { type: 'trades'; trades: TradeEvent[] }
   | { type: 'orders'; orders: OrderUpdate[] }
-  | { type: 'resync'; resync: { instruments: string[]; owners: string[] } };
+  | { type: 'resync'; resync: { instruments: string[]; owners: string[]; allOwners?: boolean } };
 
 export interface WalletChanged {
   ownerId: string;

@@ -3,6 +3,7 @@ import Redis from 'ioredis';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../database/data-source';
 import { INSTRUMENTS } from '../common/instruments';
+import { intEnv } from '../common/env';
 import { applyCommands } from '../orders/engine/apply-commands';
 import { StreamCommand, commandStreamKey, decodeCommand } from '../orders/engine/order-command';
 import { InstrumentState } from '../orders/entities/instrument-state.entity';
@@ -134,7 +135,7 @@ async function main(): Promise<number> {
   const dataSource = await new DataSource(buildDataSourceOptions()).initialize();
   const redis = new Redis({
     host: process.env.REDIS_HOST ?? 'localhost',
-    port: Number(process.env.REDIS_PORT ?? 6379),
+    port: intEnv('REDIS_PORT', 6379),
   });
   try {
     const instruments: InstrumentReplay[] = [];

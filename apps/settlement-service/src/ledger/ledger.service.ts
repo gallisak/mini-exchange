@@ -123,24 +123,29 @@ export class LedgerService {
     manager: EntityManager,
     accounts: { ownerId: string; asset: string }[],
   ): Promise<JournalEntry[]> {
-    const journal: JournalEntry[] = [];
     const ordered = accounts.sort(byKey((account) => `${account.ownerId}:${account.asset}`));
-    for (const { ownerId, asset } of ordered) {
-      const result = await manager
-        .createQueryBuilder()
-        .insert()
-        .into(LedgerTransaction)
-        .values({ reference: `opening:${ownerId}:${asset}`, kind: 'opening' })
-        .orIgnore()
-        .returning(['id'])
-        .execute();
-      const [opened] = result.raw as { id: string }[];
-      if (opened) journal.push({ transactionId: opened.id, postings: openingPostings(ownerId, asset) });
-    }
-    return journal;
+    const references = new Map(
+      ordered.map((account) => [`opening:${account.ownerId}:${account.asset}`, account]),
+    );
+    if (references.size === 0) return [];
+    const opened: { id: string; reference: string }[] = await manager.query(
+      `INSERT INTO "ledger_transactions" ("reference", "kind")
+       SELECT "reference", 'opening' FROM unnest($1::varchar[]) WITH ORDINALITY AS r("reference", "position")
+        ORDER BY "position"
+       ON CONFLICT ("reference") DO NOTHING
+       RETURNING "id", "reference"`,
+      [[...references.keys()]],
+    );
+    return opened
+      .sort(byKey((row) => row.reference))
+      .map((row) => {
+        const { ownerId, asset } = references.get(row.reference) as { ownerId: string; asset: string };
+        return { transactionId: row.id, postings: openingPostings(ownerId, asset) };
+      });
   }
 
   private async post(manager: EntityManager, journal: JournalEntry[]): Promise<void> {
+    if (journal.length === 0) return;
     if (journal.some((entry) => !isBalanced(entry.postings))) {
       throw new Error('Refusing to post an unbalanced ledger transaction');
     }
@@ -151,22 +156,23 @@ export class LedgerService {
       deltas.set(key, { ...posting, amount: (current?.amount ?? 0n) + posting.amount });
     }
 
-    const accountIds = new Map<string, string>();
-    for (const [key, delta] of [...deltas.entries()].sort(byKey(([key]) => key))) {
-      const [account] = await manager.query(
-        `INSERT INTO "accounts" ("ownerId", "asset", "kind", "balance")
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT ("ownerId", "asset") DO UPDATE SET "balance" = "accounts"."balance" + EXCLUDED."balance"
-         RETURNING "id"`,
-        [
-          delta.ownerId,
-          delta.asset,
-          delta.ownerId === SYSTEM_OWNER ? 'system' : 'user',
-          fromUnits(delta.amount, LEDGER_SCALE),
-        ],
-      );
-      accountIds.set(key, account.id);
-    }
+    const ordered = [...deltas.values()].sort(byKey((delta) => `${delta.ownerId}:${delta.asset}`));
+    const accounts: { id: string; ownerId: string; asset: string }[] = await manager.query(
+      `INSERT INTO "accounts" ("ownerId", "asset", "kind", "balance")
+       SELECT "ownerId", "asset", "kind", "balance"
+         FROM unnest($1::varchar[], $2::varchar[], $3::varchar[], $4::numeric[])
+              WITH ORDINALITY AS d("ownerId", "asset", "kind", "balance", "position")
+        ORDER BY "position"
+       ON CONFLICT ("ownerId", "asset") DO UPDATE SET "balance" = "accounts"."balance" + EXCLUDED."balance"
+       RETURNING "id", "ownerId", "asset"`,
+      [
+        ordered.map((delta) => delta.ownerId),
+        ordered.map((delta) => delta.asset),
+        ordered.map((delta) => (delta.ownerId === SYSTEM_OWNER ? 'system' : 'user')),
+        ordered.map((delta) => fromUnits(delta.amount, LEDGER_SCALE)),
+      ],
+    );
+    const accountIds = new Map(accounts.map((account) => [`${account.ownerId}:${account.asset}`, account.id]));
 
     await manager.insert(
       LedgerEntry,

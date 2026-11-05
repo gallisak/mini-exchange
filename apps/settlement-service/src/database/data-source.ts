@@ -1,6 +1,7 @@
 import 'reflect-metadata';
 import { join } from 'path';
 import { DataSource, DataSourceOptions } from 'typeorm';
+import { intEnv } from '../common/env';
 import { Account } from '../ledger/entities/account.entity';
 import { LedgerTransaction } from '../ledger/entities/ledger-transaction.entity';
 import { LedgerEntry } from '../ledger/entities/ledger-entry.entity';
@@ -12,7 +13,7 @@ export function buildDataSourceOptions(database = process.env.LEDGER_DATABASE_NA
   return {
     type: 'postgres',
     host: process.env.LEDGER_DATABASE_HOST,
-    port: Number(process.env.LEDGER_DATABASE_PORT ?? 5432),
+    port: intEnv('LEDGER_DATABASE_PORT', 5432),
     username: process.env.LEDGER_DATABASE_USER,
     password: process.env.LEDGER_DATABASE_PASSWORD,
     database,

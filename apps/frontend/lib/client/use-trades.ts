@@ -52,15 +52,20 @@ export function useTrades(instrument: string) {
       if (skipped) void load();
     };
     const onConnect = () => void load();
+    const onJoined = (snapshot: { instrument?: string }) => {
+      if (snapshot?.instrument === instrument) void load();
+    };
     const onResync = (scope?: ResyncScope) => {
       if (resyncsBook(scope, instrument)) void load();
     };
     socket.on('trade', onTrade);
     socket.on('connect', onConnect);
+    socket.on('book_snapshot', onJoined);
     socket.on('resync', onResync);
     return () => {
       socket.off('trade', onTrade);
       socket.off('connect', onConnect);
+      socket.off('book_snapshot', onJoined);
       socket.off('resync', onResync);
     };
   }, [socket, instrument, load]);

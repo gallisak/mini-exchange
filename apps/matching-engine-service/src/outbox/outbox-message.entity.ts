@@ -2,6 +2,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryGeneratedColumn } from 
 
 @Entity('outbox')
 @Index('IDX_outbox_unpublished', ['id'], { where: '"publishedAt" IS NULL' })
+@Index('IDX_outbox_published_at', ['publishedAt'], { where: '"publishedAt" IS NOT NULL' })
 export class OutboxMessage {
   @PrimaryGeneratedColumn('increment', { type: 'bigint' })
   id: string;

@@ -32,8 +32,16 @@ describe('private real-time updates', () => {
     await app.close();
   });
 
+  async function ticketFor(user: TestUser): Promise<string> {
+    const response = await request(app.getHttpServer())
+      .post('/auth/ws-ticket')
+      .set('authorization', `Bearer ${user.token}`)
+      .expect(200);
+    return response.body.ticket;
+  }
+
   async function connect(user?: TestUser | string) {
-    const token = typeof user === 'string' ? user : user?.token;
+    const token = typeof user === 'string' ? user : user && (await ticketFor(user));
     const socket = io(url, { transports: ['websocket'], auth: token ? { token } : {} });
     sockets.push(socket);
     const events = { orders: [] as OrderEvent[], wallets: [] as unknown[] };
@@ -87,11 +95,11 @@ describe('private real-time updates', () => {
     await expect(connect('not-a-token')).rejects.toThrow('Unauthorized');
   });
 
-  it('disconnects a client when its access token expires', async () => {
+  it('disconnects a client when the access token behind its ticket expires', async () => {
     const alice = await register(app);
     const shortLived = new JwtService().sign(
-      { sub: alice.userId, email: 'alice@example.com' },
-      { secret: process.env.JWT_ACCESS_SECRET, expiresIn: '1s' },
+      { sub: alice.userId, until: Math.floor(Date.now() / 1000) + 1 },
+      { secret: process.env.JWT_ACCESS_SECRET, audience: 'ws', expiresIn: '30s' },
     );
     const { socket } = await connect(shortLived);
 
@@ -103,8 +111,8 @@ describe('private real-time updates', () => {
   it('refuses a token without an expiry', async () => {
     const alice = await register(app);
     const endless = new JwtService().sign(
-      { sub: alice.userId },
-      { secret: process.env.JWT_ACCESS_SECRET },
+      { sub: alice.userId, until: Math.floor(Date.now() / 1000) + 900 },
+      { secret: process.env.JWT_ACCESS_SECRET, audience: 'ws' },
     );
 
     await expect(connect(endless)).rejects.toThrow('Unauthorized');
@@ -189,12 +197,7 @@ describe('private real-time updates', () => {
 
   it('takes only a real-time ticket for the connection, not an API access token', async () => {
     const alice = await register(app);
-    const ticket = (
-      await request(app.getHttpServer())
-        .post('/auth/ws-ticket')
-        .set('authorization', `Bearer ${alice.token}`)
-        .expect(200)
-    ).body.ticket;
+    const ticket = await ticketFor(alice);
 
     await expect(connect(alice.token)).rejects.toThrow('Unauthorized');
     await expect(connect(ticket)).resolves.toBeDefined();

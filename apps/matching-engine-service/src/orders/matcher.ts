@@ -25,26 +25,29 @@ export function matchOrder(
 ): MatchResult {
   const trades: Trade[] = [];
   const touchedOrders: Order[] = [];
-  const rawOpposite = incoming.side === 'buy' ? [...book.asks] : [...book.bids];
+  const rawOpposite = incoming.side === 'buy' ? book.asks : book.bids;
   const oppositeSide: Order['side'] = incoming.side === 'buy' ? 'sell' : 'buy';
   // Явно впорядковуємо протилежну сторону за price-time priority перед
   // матчингом — не покладаємось на те, що виклик передав уже відсортований
   // знімок книги.
-  const opposite = sortByPriceTimePriority(rawOpposite, oppositeSide);
+  const opposite = inPriceTimePriority(rawOpposite, oppositeSide);
   const remainingOpposite: Order[] = [];
 
   const incomingPrice = toUnits(incoming.price, PRICE_SCALE);
   let remainingQty = toUnits(incoming.remainingQuantity, QUANTITY_SCALE);
 
-  for (const resting of opposite) {
+  let index = 0;
+  for (; index < opposite.length && remainingQty > 0n; index++) {
+    const resting = opposite[index];
     const restingPrice = toUnits(resting.price, PRICE_SCALE);
     const priceCrosses =
       incoming.side === 'buy' ? incomingPrice >= restingPrice : incomingPrice <= restingPrice;
+    if (!priceCrosses) break;
 
     // Self-trade prevention: заявки одного власника не зіставляються.
     const sameOwner = resting.ownerId === incoming.ownerId;
 
-    if (remainingQty > 0n && priceCrosses && !sameOwner) {
+    if (!sameOwner) {
       const restingQty = toUnits(resting.remainingQuantity, QUANTITY_SCALE);
       const tradeQty = remainingQty < restingQty ? remainingQty : restingQty;
       const buyer = incoming.side === 'buy' ? incoming : resting;
@@ -91,37 +94,74 @@ export function matchOrder(
   };
   const restingOrder: Order | null = remainingQty > 0n ? incomingOrder : null;
 
+  const restOfOpposite = index === 0 ? opposite : remainingOpposite.concat(opposite.slice(index));
+  sorted.add(restOfOpposite);
+
   const same = incoming.side === 'buy' ? book.bids : book.asks;
-  const updatedSame = restingOrder ? insertByPriceTimePriority(same, restingOrder) : same;
+  const updatedSame = restingOrder
+    ? insertByPriceTimePriority(inPriceTimePriority(same, incoming.side), restingOrder)
+    : same;
 
   return {
     trades,
     restingOrder,
     incomingOrder,
     touchedOrders,
-    updatedBids: incoming.side === 'buy' ? updatedSame : remainingOpposite,
-    updatedAsks: incoming.side === 'buy' ? remainingOpposite : updatedSame,
+    updatedBids: incoming.side === 'buy' ? updatedSame : restOfOpposite,
+    updatedAsks: incoming.side === 'buy' ? restOfOpposite : updatedSame,
   };
 }
 
-function insertByPriceTimePriority(list: Order[], order: Order): Order[] {
-  return sortByPriceTimePriority([...list, order], order.side);
-}
+const sorted = new WeakSet<Order[]>();
 
-export function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
-  const keyed = list.map((order) => ({
+function priorityKey(order: Order) {
+  return {
     order,
     price: toUnits(order.price, PRICE_SCALE),
     seq: order.seq != null ? BigInt(order.seq) : null,
-  }));
-  keyed.sort((a, b) => {
-    const priceDiff =
-      side === 'buy'
-        ? compareUnits(b.price, a.price) // bids: спадання ціни
-        : compareUnits(a.price, b.price); // asks: зростання ціни
-    if (priceDiff !== 0) return priceDiff;
-    if (a.seq !== null && b.seq !== null) return compareUnits(a.seq, b.seq);
-    return a.order.createdAt.getTime() - b.order.createdAt.getTime();
-  });
-  return keyed.map(({ order }) => order);
+  };
+}
+
+type PriorityKey = ReturnType<typeof priorityKey>;
+
+function comparePriority(side: Order['side'], a: PriorityKey, b: PriorityKey): number {
+  const priceDiff =
+    side === 'buy'
+      ? compareUnits(b.price, a.price) // bids: спадання ціни
+      : compareUnits(a.price, b.price); // asks: зростання ціни
+  if (priceDiff !== 0) return priceDiff;
+  if (a.seq !== null && b.seq !== null) return compareUnits(a.seq, b.seq);
+  return a.order.createdAt.getTime() - b.order.createdAt.getTime();
+}
+
+function inPriceTimePriority(list: Order[], side: Order['side']): Order[] {
+  return sorted.has(list) ? list : sortByPriceTimePriority(list, side);
+}
+
+function insertByPriceTimePriority(list: Order[], order: Order): Order[] {
+  const key = priorityKey(order);
+  let low = 0;
+  let high = list.length;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (comparePriority(order.side, priorityKey(list[middle]), key) <= 0) low = middle + 1;
+    else high = middle;
+  }
+  const result = [...list.slice(0, low), order, ...list.slice(low)];
+  sorted.add(result);
+  return result;
+}
+
+export function withoutOrder(list: Order[], orderId: string): Order[] {
+  const result = list.filter((order) => order.id !== orderId);
+  if (sorted.has(list)) sorted.add(result);
+  return result;
+}
+
+export function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
+  const keyed = list.map(priorityKey);
+  keyed.sort((a, b) => comparePriority(side, a, b));
+  const result = keyed.map(({ order }) => order);
+  sorted.add(result);
+  return result;
 }

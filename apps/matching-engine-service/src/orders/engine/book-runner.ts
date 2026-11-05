@@ -35,6 +35,13 @@ export interface BookRunnerOptions {
 type StreamEntry = [id: string, fields: string[]];
 
 const STUCK_TTL_MS = 30_000;
+const ROWS_PER_INSERT = 1_000;
+
+function chunks<T>(rows: T[]): T[][] {
+  const result: T[][] = [];
+  for (let i = 0; i < rows.length; i += ROWS_PER_INSERT) result.push(rows.slice(i, i + ROWS_PER_INSERT));
+  return result;
+}
 
 export function stuckKey(instrument: string): string {
   return `book:stuck:${instrument}`;
@@ -49,7 +56,6 @@ export interface StuckBook {
 export class BookRunner {
   private readonly logger: Logger;
   private reader?: Redis;
-  private readerId?: number;
   private running = false;
   private loop?: Promise<void>;
   private heartbeat?: NodeJS.Timeout;
@@ -71,33 +77,30 @@ export class BookRunner {
   async start(): Promise<void> {
     await this.claimFence();
     await this.load();
-    const reader = this.options.redis.createConnection();
-    try {
-      this.readerId = (await reader.client('ID')) as number;
-    } catch (error) {
-      await closeRedis(reader);
-      throw error;
-    }
-    this.reader = reader;
+    this.reader = this.options.redis.createConnection();
     this.running = true;
     this.loop = this.run();
     if (this.options.publish && this.options.heartbeatMs) {
       this.heartbeat = setInterval(() => this.announceSeq(), this.options.heartbeatMs);
     }
+    void this.publish({
+      type: 'resync',
+      resync: { instruments: [this.instrument], owners: [], allOwners: true },
+    });
   }
 
   async stop(): Promise<void> {
     this.running = false;
     clearInterval(this.heartbeat);
     const reader = this.reader;
-    const readerId = this.readerId;
     this.reader = undefined;
-    this.readerId = undefined;
-    if (readerId !== undefined) {
-      await this.options.redis.client.client('UNBLOCK', readerId).catch(() => undefined);
-    }
+    reader?.disconnect();
     await this.loop;
     await closeRedis(reader);
+  }
+
+  private publish(event: MarketEvent): Promise<void> {
+    return this.options.publish?.(event).catch(() => undefined) ?? Promise.resolve();
   }
 
   private logApplied(commands: StreamCommand[], orders: Order[], trades: ExecutedTrade[]): void {
@@ -119,7 +122,7 @@ export class BookRunner {
 
   private announceSeq(): void {
     if (!this.running || this.reloadNeeded || !this.options.leaseValid()) return;
-    void this.options.publish?.({
+    void this.publish({
       type: 'book_heartbeat',
       heartbeat: {
         instrument: this.instrument,
@@ -288,12 +291,12 @@ export class BookRunner {
       if (fenced.affected === 0) {
         throw new FencedOutError(this.instrument, this.options.fence, await this.currentFence());
       }
-      if (result.orders.length > 0) {
-        await manager.upsert(Order, result.orders, ['id']);
+      for (const orders of chunks(result.orders)) {
+        await manager.upsert(Order, orders, ['id']);
       }
-      if (result.trades.length > 0) {
-        await manager.insert(TradeRecord, result.trades);
-        await manager.insert(OutboxMessage, result.trades.map(tradeExecutedMessage));
+      for (const trades of chunks(result.trades)) {
+        await manager.insert(TradeRecord, trades);
+        await manager.insert(OutboxMessage, trades.map(tradeExecutedMessage));
       }
     });
 
@@ -303,37 +306,40 @@ export class BookRunner {
     this.logApplied(commands, result.orders, result.trades);
     tradesExecuted.inc({ instrument: this.instrument }, result.trades.length);
 
+    const updates: Promise<void>[] = [];
     if (result.trades.length > 0) {
-      void this.options.publish?.({
-        type: 'trades',
-        trades: result.trades.map(publicTrade),
-      });
+      updates.push(this.publish({ type: 'trades', trades: result.trades.map(publicTrade) }));
     }
     if (result.orders.length > 0) {
-      void this.options.publish?.({
-        type: 'orders',
-        orders: result.orders.map((order) => ({
-          id: order.id,
-          ownerId: order.ownerId,
-          instrument: order.instrument,
-          side: order.side,
-          price: order.price,
-          quantity: order.quantity,
-          remainingQuantity: order.remainingQuantity,
-          status: order.status,
-          createdAt: order.createdAt.toISOString(),
-        })),
-      });
+      updates.push(
+        this.publish({
+          type: 'orders',
+          orders: result.orders.map((order) => ({
+            id: order.id,
+            ownerId: order.ownerId,
+            instrument: order.instrument,
+            side: order.side,
+            price: order.price,
+            quantity: order.quantity,
+            remainingQuantity: order.remainingQuantity,
+            status: order.status,
+            createdAt: order.createdAt.toISOString(),
+          })),
+        }),
+      );
     }
     if (result.state.bookSeq !== previousSeq) {
-      void this.options.publish?.({
-        type: 'book_delta',
-        delta: {
-          instrument: this.instrument,
-          seq: Number(result.state.bookSeq),
-          changes: diffBooks(before, result.book),
-        },
-      });
+      updates.push(
+        this.publish({
+          type: 'book_delta',
+          delta: {
+            instrument: this.instrument,
+            seq: Number(result.state.bookSeq),
+            changes: diffBooks(before, result.book),
+          },
+        }),
+      );
     }
+    await Promise.all(updates);
   }
 }

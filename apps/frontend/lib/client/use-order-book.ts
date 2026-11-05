@@ -68,6 +68,7 @@ export function useOrderBook(instrument: string): BookState {
       socket.off('book_heartbeat', onHeartbeat);
       socket.off('disconnect', onDisconnect);
       socket.emit('unsubscribe', instrument);
+      dispatch({ type: 'disconnected' });
     };
   }, [socket, instrument]);
 

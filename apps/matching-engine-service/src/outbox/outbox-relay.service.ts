@@ -4,6 +4,7 @@ import { RedisService } from '../redis/redis.service';
 import { OutboxMessage } from './outbox-message.entity';
 import { runWithTrace } from '../observability/trace-context';
 import { outboxPublished } from '../observability/metrics';
+import { intEnv } from '../common/env';
 
 const RELAY_LOCK_KEY = 7_340_101;
 const MAX_BACKOFF_MS = 5_000;
@@ -11,10 +12,10 @@ const MAX_BACKOFF_MS = 5_000;
 @Injectable()
 export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestroy {
   private readonly logger = new Logger(OutboxRelayService.name);
-  private readonly pollMs = Number(process.env.OUTBOX_POLL_MS ?? 100);
-  private readonly batchSize = Number(process.env.OUTBOX_BATCH_SIZE ?? 100);
-  private readonly retentionMs = Number(process.env.OUTBOX_RETENTION_HOURS ?? 24) * 3_600_000;
-  private readonly cleanupEveryMs = Number(process.env.OUTBOX_CLEANUP_INTERVAL_MS ?? 60_000);
+  private readonly pollMs = intEnv('OUTBOX_POLL_MS', 100);
+  private readonly batchSize = intEnv('OUTBOX_BATCH_SIZE', 100);
+  private readonly retentionMs = intEnv('OUTBOX_RETENTION_HOURS', 24) * 3_600_000;
+  private readonly cleanupEveryMs = intEnv('OUTBOX_CLEANUP_INTERVAL_MS', 60_000);
   private lastCleanup = 0;
   private running = false;
   private loop?: Promise<void>;

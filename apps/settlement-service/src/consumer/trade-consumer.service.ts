@@ -34,7 +34,6 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
   private readonly streams = INSTRUMENTS.map(tradeStreamKey);
   private client?: Redis;
   private reader?: Redis;
-  private readerId?: number;
   private running = false;
   private loop?: Promise<void>;
   private groupsReady = false;
@@ -52,9 +51,7 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
 
   async onModuleDestroy(): Promise<void> {
     this.running = false;
-    if (this.readerId !== undefined) {
-      await this.client?.client('UNBLOCK', this.readerId).catch(() => undefined);
-    }
+    this.reader?.disconnect();
     await this.loop;
     for (const connection of [this.reader, this.client]) {
       await closeRedis(connection);
@@ -90,7 +87,6 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
         if (!String((error as Error).message).includes('BUSYGROUP')) throw error;
       }
     }
-    this.readerId = (await this.reader!.client('ID')) as number;
     this.groupsReady = true;
   }
 

@@ -1,4 +1,4 @@
-import { ArgumentsHost, Catch, HttpStatus, Logger } from '@nestjs/common';
+import { ArgumentsHost, Catch, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { BaseExceptionFilter } from '@nestjs/core';
 import { Response } from 'express';
 
@@ -8,6 +8,7 @@ const DEPENDENCY_DOWN =
 export function isDependencyUnavailable(error: unknown): boolean {
   return (
     error instanceof Error &&
+    !(error instanceof HttpException) &&
     (error.name === 'MaxRetriesPerRequestError' || DEPENDENCY_DOWN.test(error.message))
   );
 }

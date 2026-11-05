@@ -17,13 +17,13 @@ import { PRICE_SCALE, QUANTITY_SCALE, normalizeDecimal } from '../common/decimal
 import { uuidV5 } from '../common/uuid';
 import { currentTraceId } from '../observability/trace-context';
 import { ordersAccepted } from '../observability/metrics';
+import { intEnv } from '../common/env';
 
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 const ACTIVE_STATUSES: OrderStatus[] = ['open', 'partially_filled'];
 
 function historyLimit(): number {
-  const value = Number(process.env.ORDER_HISTORY_LIMIT);
-  return Number.isInteger(value) && value > 0 ? value : 100;
+  return intEnv('ORDER_HISTORY_LIMIT', 100);
 }
 const IDEMPOTENCY_MISMATCH = 'Idempotency-Key was already used for a different order';
 

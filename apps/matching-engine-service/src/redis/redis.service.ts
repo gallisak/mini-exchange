@@ -1,5 +1,6 @@
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
 import Redis, { RedisOptions } from 'ioredis';
+import { intEnv } from '../common/env';
 
 export async function closeRedis(client: Redis | undefined): Promise<void> {
   if (!client || client.status === 'end') return;
@@ -14,8 +15,8 @@ export async function closeRedis(client: Redis | undefined): Promise<void> {
 export class RedisService implements OnApplicationShutdown {
   readonly client = new Redis({
     host: process.env.REDIS_HOST ?? 'localhost',
-    port: Number(process.env.REDIS_PORT ?? 6379),
-    maxRetriesPerRequest: Number(process.env.REDIS_MAX_RETRIES ?? 3),
+    port: intEnv('REDIS_PORT', 6379),
+    maxRetriesPerRequest: intEnv('REDIS_MAX_RETRIES', 3, 0),
     retryStrategy: (attempt) => Math.min(attempt * 50, 500),
   });
 

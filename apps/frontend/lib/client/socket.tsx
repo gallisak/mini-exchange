@@ -44,8 +44,8 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     return () => {
       closed = true;
       clearTimeout(retry);
-      connection.removeAllListeners();
       connection.disconnect();
+      connection.removeAllListeners();
       setSocket(null);
     };
   }, [userId, loading]);

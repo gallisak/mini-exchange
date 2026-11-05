@@ -13,7 +13,11 @@ jest.mock('bcrypt', () => {
 
 describe('login', () => {
   it('checks a password hash even for an unknown email, so timing does not reveal accounts', async () => {
-    const users = { findOne: async () => null } as unknown as Repository<User>;
+    const users = {
+      createQueryBuilder: () => ({
+        where: () => ({ getMany: async () => [] }),
+      }),
+    } as unknown as Repository<User>;
     const service = new AuthService(users, {} as Repository<RefreshSession>, new JwtService());
 
     await expect(

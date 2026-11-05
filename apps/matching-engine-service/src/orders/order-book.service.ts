@@ -24,10 +24,7 @@ export class OrderBookService {
 
   snapshot(instrument: string): BookSnapshot {
     const book = this.getOrInit(instrument);
-    return {
-      bids: book.bids.map((o) => ({ ...o })),
-      asks: book.asks.map((o) => ({ ...o })),
-    };
+    return { bids: book.bids, asks: book.asks };
   }
 
   depth(instrument: string): BookSnapshot {

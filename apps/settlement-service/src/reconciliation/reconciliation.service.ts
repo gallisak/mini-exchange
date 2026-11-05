@@ -3,6 +3,7 @@ import { DataSource } from 'typeorm';
 import { LEDGER_SCALE, PRICE_SCALE, QUANTITY_SCALE, fromUnits, toUnits } from '../common/decimal';
 import { CASH_ASSET } from '../ledger/postings';
 import { EngineClient, EngineInstrumentTotals } from './engine-client';
+import { intEnv } from '../common/env';
 
 const ISSUE_LIMIT = 100;
 
@@ -66,9 +67,11 @@ export class ReconciliationService {
     private readonly engine: EngineClient,
   ) {}
 
-  defaultPeriod(): { from: Date; to: Date } {
-    const lagMs = Number(process.env.RECONCILIATION_LAG_MS ?? 60000);
-    return { from: new Date(0), to: new Date(Date.now() - lagMs) };
+  defaultPeriod(to?: Date): { from: Date; to: Date } {
+    const lagMs = intEnv('RECONCILIATION_LAG_MS', 60_000, 0);
+    const windowMs = intEnv('RECONCILIATION_WINDOW_HOURS', 24) * 3_600_000;
+    const end = to ?? new Date(Date.now() - lagMs);
+    return { from: new Date(end.getTime() - windowMs), to: end };
   }
 
   async reconcile(from: Date, to: Date): Promise<ReconciliationReport> {
@@ -93,7 +96,7 @@ export class ReconciliationService {
 
     const ledgerBroken = Object.values(ledger).some((issues) => issues.length > 0);
     const status: ReconciliationStatus =
-      ledgerBroken || instruments.some((row) => engineTotals && !row.matches)
+      ledgerBroken || instruments.some((row) => !row.matches)
         ? 'mismatch'
         : engineTotals
           ? 'ok'
@@ -167,31 +170,50 @@ export class ReconciliationService {
   }
 
   private async ledgerIssues(from: Date, to: Date): Promise<LedgerIssues> {
+    const inPeriod = `
+      SELECT st."transactionId" AS "id" FROM "settled_trades" st
+       WHERE st."executedAt" >= $1 AND st."executedAt" < $2
+      UNION
+      SELECT t."id" FROM "ledger_transactions" t
+       WHERE t."createdAt" >= $1 AND t."createdAt" < $2`;
     const [unbalanced, withoutEntries, accounts, assets, trades] = await Promise.all([
       this.dataSource.query(
-        `SELECT "transactionId", "asset", SUM("amount")::text AS "total"
-           FROM "ledger_entries"
-          GROUP BY "transactionId", "asset"
-         HAVING SUM("amount") <> 0
-          ORDER BY "transactionId", "asset"
+        `SELECT e."transactionId", e."asset", SUM(e."amount")::text AS "total"
+           FROM "ledger_entries" e
+          WHERE e."transactionId" IN (${inPeriod})
+          GROUP BY e."transactionId", e."asset"
+         HAVING SUM(e."amount") <> 0
+          ORDER BY e."transactionId", e."asset"
           LIMIT ${ISSUE_LIMIT}`,
+        [from, to],
       ),
       this.dataSource.query(
         `SELECT t."id"
            FROM "ledger_transactions" t
-          WHERE NOT EXISTS (SELECT 1 FROM "ledger_entries" e WHERE e."transactionId" = t."id")
+          WHERE t."id" IN (${inPeriod})
+            AND NOT EXISTS (SELECT 1 FROM "ledger_entries" e WHERE e."transactionId" = t."id")
           ORDER BY t."id"
           LIMIT ${ISSUE_LIMIT}`,
+        [from, to],
       ),
       this.dataSource.query(
-        `SELECT a."id" AS "accountId", a."ownerId", a."asset", a."balance"::text AS "balance",
+        `WITH "touched" AS (
+           SELECT e."accountId" AS "id" FROM "ledger_entries" e WHERE e."transactionId" IN (${inPeriod})
+           UNION
+           SELECT a."id" FROM "accounts" a
+             JOIN "settled_trades" st ON a."ownerId" IN (st."buyerId", st."sellerId")
+            WHERE st."executedAt" >= $1 AND st."executedAt" < $2
+         )
+         SELECT a."id" AS "accountId", a."ownerId", a."asset", a."balance"::text AS "balance",
                 COALESCE(SUM(e."amount"), 0)::text AS "entries"
            FROM "accounts" a
            LEFT JOIN "ledger_entries" e ON e."accountId" = a."id"
+          WHERE a."id" IN (SELECT "id" FROM "touched")
           GROUP BY a."id"
          HAVING a."balance" <> COALESCE(SUM(e."amount"), 0)
           ORDER BY a."id"
           LIMIT ${ISSUE_LIMIT}`,
+        [from, to],
       ),
       this.dataSource.query(
         `SELECT "asset", SUM("balance")::text AS "total"

@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import {
   Rotation,
+  SessionTokens,
   TokenPair,
   clearTokens,
   isFresh,
@@ -74,11 +75,11 @@ export async function upstream(
   return { status: response.status, body };
 }
 
-export function rotateTokens(request: NextRequest, refreshToken: string): Promise<Rotation> {
-  return refreshOnce(refreshToken, async (token) => {
+export function rotateTokens(request: NextRequest, tokens: SessionTokens): Promise<Rotation> {
+  return refreshOnce(tokens, async (token, attempt) => {
     const result = await upstream(request, 'engine', '/auth/refresh', {
       method: 'POST',
-      body: JSON.stringify({ refreshToken: token }),
+      body: JSON.stringify({ refreshToken: token, attempt }),
     });
     if (result.status === 200) return { kind: 'rotated', tokens: result.body as TokenPair };
     if (result.status === 400 || result.status === 401) return { kind: 'invalid' };
@@ -95,7 +96,10 @@ export async function withSession(
   let accessToken = tokens.accessToken;
 
   const rotate = async (): Promise<NextResponse | null> => {
-    const outcome = await rotateTokens(request, tokens.refreshToken as string);
+    const outcome = await rotateTokens(request, {
+      refreshToken: tokens.refreshToken as string,
+      accessToken: tokens.accessToken,
+    });
     if (outcome.kind === 'invalid') return unauthorized();
     if (outcome.kind === 'unavailable') return unavailable();
     rotated = outcome.tokens;

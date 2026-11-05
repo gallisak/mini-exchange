@@ -24,4 +24,10 @@ export class RefreshSession {
 
   @Column({ type: 'timestamptz', nullable: true })
   revokedAt: Date | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  rotationAttempt: string | null;
+
+  @Column({ type: 'uuid', nullable: true })
+  successorId: string | null;
 }

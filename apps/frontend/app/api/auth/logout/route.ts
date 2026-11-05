@@ -6,7 +6,7 @@ export async function POST(request: NextRequest) {
   const { accessToken, refreshToken } = readTokens(request);
   let token = isFresh(accessToken) ? accessToken : undefined;
   if (!token && refreshToken) {
-    const outcome = await rotateTokens(request, refreshToken);
+    const outcome = await rotateTokens(request, { refreshToken, accessToken });
     if (outcome.kind === 'rotated') token = outcome.tokens.accessToken;
   }
   if (token) await upstream(request, 'engine', '/auth/logout', { method: 'POST' }, token);

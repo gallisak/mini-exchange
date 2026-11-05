@@ -21,6 +21,8 @@ const INVALID_REFRESH = 'Refresh token is invalid or was already used';
 const EMAIL_TAKEN = 'Email is already registered';
 const UNIQUE_VIOLATION = '23505';
 const DUMMY_HASH = bcrypt.hashSync(randomUUID(), 10);
+const ROTATION_RETRY_MS = 60_000;
+export const WS_AUDIENCE = 'ws';
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 
@@ -53,15 +55,31 @@ export class AuthService {
   }
 
   async login(dto: LoginDto): Promise<TokenPair> {
-    const user = await this.users.findOne({ where: { email: dto.email } });
-    const valid = await bcrypt.compare(dto.password, user?.passwordHash ?? DUMMY_HASH);
-    if (!user || !valid) {
+    const candidates = await this.users
+      .createQueryBuilder('user')
+      .where('lower(user.email) = :email', { email: dto.email })
+      .getMany();
+    candidates.sort((a, b) => Number(b.email === dto.email) - Number(a.email === dto.email));
+    let user: User | undefined;
+    for (const candidate of candidates.length > 0 ? candidates : [undefined]) {
+      const valid = await bcrypt.compare(dto.password, candidate?.passwordHash ?? DUMMY_HASH);
+      if (valid && candidate && !user) user = candidate;
+    }
+    if (!user) {
       throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
     return this.issueTokens(user);
   }
 
-  async refresh(refreshToken: string): Promise<TokenPair> {
+  wsTicket(userId: string, until: number): { ticket: string } {
+    const ticket = this.jwt.sign(
+      { sub: userId, until },
+      { secret: requireEnv('JWT_ACCESS_SECRET'), audience: WS_AUDIENCE, expiresIn: '30s' },
+    );
+    return { ticket };
+  }
+
+  async refresh(refreshToken: string, attempt?: string): Promise<TokenPair> {
     let claims: { sub?: unknown; jti?: unknown };
     try {
       claims = this.jwt.verify<{ sub?: unknown; jti?: unknown }>(refreshToken, {
@@ -80,7 +98,13 @@ export class AuthService {
         lock: { mode: 'pessimistic_write' },
       });
       if (!session || session.revokedAt || session.tokenHash !== tokenHash(refreshToken)) return null;
+      const user = await manager.findOneBy(User, { id: userId });
       if (session.usedAt) {
+        const retried =
+          user && attempt && this.retriesRotation(session, attempt)
+            ? await this.reissue(manager, user, session)
+            : null;
+        if (retried) return retried;
         await manager.update(
           RefreshSession,
           { familyId: session.familyId, revokedAt: IsNull() },
@@ -88,26 +112,63 @@ export class AuthService {
         );
         return null;
       }
-      const user = await manager.findOneBy(User, { id: userId });
       if (!user) return null;
-      await manager.update(RefreshSession, { id: session.id }, { usedAt: () => 'now()' });
-      return this.openSession(manager, user, session.familyId);
+      const successorId = randomUUID();
+      await manager.update(
+        RefreshSession,
+        { id: session.id },
+        {
+          usedAt: () => 'now()',
+          rotationAttempt: attempt ? tokenHash(attempt) : null,
+          successorId,
+        },
+      );
+      return this.openSession(manager, user, session.familyId, successorId);
     });
     if (!pair) throw new UnauthorizedException(INVALID_REFRESH);
     return pair;
   }
 
-  async logout(userId: string): Promise<void> {
-    await this.sessions.update({ userId, revokedAt: IsNull() }, { revokedAt: () => 'now()' });
+  async logout(userId: string, sessionId?: string): Promise<void> {
+    const scope = sessionId && isUUID(sessionId) ? { familyId: sessionId } : {};
+    await this.sessions.update({ userId, ...scope, revokedAt: IsNull() }, { revokedAt: () => 'now()' });
+  }
+
+  private retriesRotation(session: RefreshSession, attempt: string): boolean {
+    return (
+      session.successorId !== null &&
+      session.rotationAttempt === tokenHash(attempt) &&
+      session.usedAt !== null &&
+      Date.now() - session.usedAt.getTime() < ROTATION_RETRY_MS
+    );
+  }
+
+  private async reissue(
+    manager: EntityManager,
+    user: User,
+    session: RefreshSession,
+  ): Promise<TokenPair | null> {
+    const successor = await manager.findOne(RefreshSession, {
+      where: { id: session.successorId as string, familyId: session.familyId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!successor || successor.usedAt || successor.revokedAt) return null;
+    const pair = this.signTokens(user, successor.id, successor.familyId);
+    await manager.update(RefreshSession, { id: successor.id }, { tokenHash: tokenHash(pair.refreshToken) });
+    return pair;
   }
 
   private issueTokens(user: User): Promise<TokenPair> {
     return this.openSession(this.sessions.manager, user, randomUUID());
   }
 
-  private async openSession(manager: EntityManager, user: User, familyId: string): Promise<TokenPair> {
-    const id = randomUUID();
-    const pair = this.signTokens(user, id);
+  private async openSession(
+    manager: EntityManager,
+    user: User,
+    familyId: string,
+    id: string = randomUUID(),
+  ): Promise<TokenPair> {
+    const pair = this.signTokens(user, id, familyId);
     await manager.insert(RefreshSession, {
       id,
       userId: user.id,
@@ -117,9 +178,9 @@ export class AuthService {
     return pair;
   }
 
-  private signTokens(user: User, sessionId: string): TokenPair {
+  private signTokens(user: User, sessionId: string, familyId: string): TokenPair {
     const accessToken = this.jwt.sign(
-      { sub: user.id, email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
+      { sub: user.id, sid: familyId, email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
       { secret: requireEnv('JWT_ACCESS_SECRET'), expiresIn: '15m' },
     );
     const refreshToken = this.jwt.sign(

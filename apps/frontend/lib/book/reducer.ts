@@ -141,7 +141,7 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
 
     case 'snapshot': {
       if (action.snapshot.instrument !== state.instrument) return state;
-      if (!state.awaitingSnapshot && state.seq !== null && action.snapshot.seq < state.seq) return state;
+      if (state.seq !== null && action.snapshot.seq < state.seq) return state;
       let next: BookState = {
         ...state,
         status: 'live',

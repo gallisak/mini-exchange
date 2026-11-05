@@ -8,7 +8,7 @@ const RESYNC_CHANNEL = marketChannel('resync');
 @Injectable()
 export class MarketPublisherService implements OnModuleDestroy {
   private readonly logger = new Logger(MarketPublisherService.name);
-  private readonly lost = { instruments: new Set<string>(), owners: new Set<string>() };
+  private readonly lost = { instruments: new Set<string>(), owners: new Set<string>(), allOwners: false };
   private retry?: NodeJS.Timeout;
 
   constructor(private readonly redis: RedisService) {}
@@ -37,6 +37,7 @@ export class MarketPublisherService implements OnModuleDestroy {
     } else if (event.type === 'resync') {
       event.resync.instruments.forEach((name) => this.lost.instruments.add(name));
       event.resync.owners.forEach((owner) => this.lost.owners.add(owner));
+      if (event.resync.allOwners) this.lost.allOwners = true;
     } else {
       this.lost.instruments.add(instrument);
     }
@@ -47,13 +48,19 @@ export class MarketPublisherService implements OnModuleDestroy {
   }
 
   private async announceLost(): Promise<void> {
-    if (this.lost.instruments.size === 0 && this.lost.owners.size === 0) return;
+    const { instruments, owners, allOwners } = this.lost;
+    if (instruments.size === 0 && owners.size === 0 && !allOwners) return;
     const event: MarketEvent = {
       type: 'resync',
-      resync: { instruments: [...this.lost.instruments], owners: [...this.lost.owners] },
+      resync: {
+        instruments: [...instruments],
+        owners: [...owners],
+        ...(allOwners ? { allOwners } : {}),
+      },
     };
-    this.lost.instruments.clear();
-    this.lost.owners.clear();
+    instruments.clear();
+    owners.clear();
+    this.lost.allOwners = false;
     await this.redis.client
       .publish(RESYNC_CHANNEL, JSON.stringify(event))
       .catch(() => this.remember('', event));

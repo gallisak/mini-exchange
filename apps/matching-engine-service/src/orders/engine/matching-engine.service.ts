@@ -1,5 +1,6 @@
 import { Injectable, OnModuleDestroy } from '@nestjs/common';
 import { DataSource } from 'typeorm';
+import { intEnv } from '../../common/env';
 import { RedisService } from '../../redis/redis.service';
 import { OrderBookService } from '../order-book.service';
 import { BookRunner } from './book-runner';
@@ -47,7 +48,7 @@ export class MatchingEngineService implements OnModuleDestroy {
       fence: lease.fence,
       leaseValid: lease.isValid,
       publish: (event) => this.market.publish(instrument, event),
-      heartbeatMs: Number(process.env.BOOK_HEARTBEAT_MS ?? 2000),
+      heartbeatMs: intEnv('BOOK_HEARTBEAT_MS', 2000),
       onFenced: (error) => {
         if (this.runners.get(instrument) === runner) this.runners.delete(instrument);
         void this.track(instrument, runner);

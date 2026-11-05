@@ -8,8 +8,9 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
-import { api } from '@/lib/client/api';
-import { Attempt, attemptFor } from '@/lib/client/order-attempt';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { ApiError, api } from '@/lib/client/api';
+import { Attempt, attemptFor, isUnknownOutcome, unconfirmed } from '@/lib/client/order-attempt';
 import { cn } from '@/lib/utils';
 
 const PRICE = /^\d{1,16}(\.\d{1,2})?$/;
@@ -29,7 +30,10 @@ export function OrderForm({ instrument }: { instrument: string }) {
     quantity && !(QUANTITY.test(quantity) && positive(quantity))
       ? 'Up to 8 decimals, above zero'
       : null;
-  const ready = price && quantity && !priceError && !quantityError;
+  const pending = attempt?.unconfirmed ? attempt.draft : null;
+  const ready = pending || (price && quantity && !priceError && !quantityError);
+  const describe = (order: Attempt['draft']) =>
+    `${order.side === 'buy' ? 'Buy' : 'Sell'} ${order.quantity} ${order.instrument} @ ${order.price}`;
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
@@ -41,12 +45,15 @@ export function OrderForm({ instrument }: { instrument: string }) {
       await api('/api/orders', {
         method: 'POST',
         headers: { 'idempotency-key': current.key },
-        body: JSON.stringify({ instrument, side, price, quantity }),
+        body: JSON.stringify(current.draft),
       });
-      toast.success(`${side === 'buy' ? 'Buy' : 'Sell'} ${quantity} ${instrument} @ ${price} accepted`);
+      toast.success(`${describe(current.draft)} accepted`);
       setAttempt(null);
       setQuantity('');
     } catch (failure) {
+      if (failure instanceof ApiError && isUnknownOutcome(failure.status)) {
+        setAttempt(unconfirmed(current));
+      }
       toast.error((failure as Error).message);
     } finally {
       setBusy(false);
@@ -65,15 +72,28 @@ export function OrderForm({ instrument }: { instrument: string }) {
       </CardHeader>
       <CardContent>
         <form onSubmit={onSubmit} className="space-y-4">
+          {pending && (
+            <Alert>
+              <AlertDescription className="space-y-2">
+                <p>
+                  {describe(pending)} may have been placed. Send it again to find out: it will not be
+                  placed twice. Discard it only after checking your open orders.
+                </p>
+                <Button type="button" variant="outline" size="sm" onClick={() => setAttempt(null)}>
+                  Discard
+                </Button>
+              </AlertDescription>
+            </Alert>
+          )}
           <Tabs
-            value={side}
+            value={pending ? pending.side : side}
             onValueChange={(value) => setSide(value as 'buy' | 'sell')}
           >
             <TabsList className="grid w-full grid-cols-2">
-              <TabsTrigger value="buy" className="data-[state=active]:text-buy">
+              <TabsTrigger value="buy" disabled={Boolean(pending)} className="data-[state=active]:text-buy">
                 Buy
               </TabsTrigger>
-              <TabsTrigger value="sell" className="data-[state=active]:text-sell">
+              <TabsTrigger value="sell" disabled={Boolean(pending)} className="data-[state=active]:text-sell">
                 Sell
               </TabsTrigger>
             </TabsList>
@@ -84,8 +104,9 @@ export function OrderForm({ instrument }: { instrument: string }) {
               id="price"
               inputMode="decimal"
               placeholder="100.00"
-              value={price}
+              value={pending ? pending.price : price}
               onChange={edit(setPrice)}
+              disabled={Boolean(pending)}
               aria-invalid={Boolean(priceError)}
             />
             {priceError && <p className="text-xs text-destructive">{priceError}</p>}
@@ -96,8 +117,9 @@ export function OrderForm({ instrument }: { instrument: string }) {
               id="quantity"
               inputMode="decimal"
               placeholder="1.5"
-              value={quantity}
+              value={pending ? pending.quantity : quantity}
               onChange={edit(setQuantity)}
+              disabled={Boolean(pending)}
               aria-invalid={Boolean(quantityError)}
             />
             {quantityError && <p className="text-xs text-destructive">{quantityError}</p>}
@@ -107,12 +129,12 @@ export function OrderForm({ instrument }: { instrument: string }) {
             disabled={!ready || busy}
             className={cn(
               'w-full',
-              side === 'buy' ? 'bg-buy hover:bg-buy/90' : 'bg-sell hover:bg-sell/90',
+              (pending?.side ?? side) === 'buy' ? 'bg-buy hover:bg-buy/90' : 'bg-sell hover:bg-sell/90',
               'text-white',
             )}
           >
             {busy && <Loader2 className="mr-2 h-4 w-4 animate-spin" />}
-            {side === 'buy' ? 'Buy' : 'Sell'} {instrument}
+            {pending ? 'Send the same order again' : `${side === 'buy' ? 'Buy' : 'Sell'} ${instrument}`}
           </Button>
         </form>
       </CardContent>

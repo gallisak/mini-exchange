@@ -6,6 +6,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { AuthenticatedUser } from './strategies/jwt.strategy';
 
 @ApiTags('auth')
 @Controller('auth')
@@ -28,14 +29,23 @@ export class AuthController {
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
   refresh(@Body() dto: RefreshDto) {
-    return this.auth.refresh(dto.refreshToken);
+    return this.auth.refresh(dto.refreshToken, dto.attempt);
+  }
+
+  @Post('ws-ticket')
+  @ApiBearerAuth()
+  @HttpCode(HttpStatus.OK)
+  @RateLimit('PUBLIC')
+  @UseGuards(JwtAuthGuard)
+  wsTicket(@Request() req: { user: AuthenticatedUser }) {
+    return this.auth.wsTicket(req.user.userId, req.user.expiresAt);
   }
 
   @Post('logout')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
   @UseGuards(JwtAuthGuard)
-  logout(@Request() req: { user: { userId: string } }) {
-    return this.auth.logout(req.user.userId);
+  logout(@Request() req: { user: AuthenticatedUser }) {
+    return this.auth.logout(req.user.userId, req.user.sessionId);
   }
 }
