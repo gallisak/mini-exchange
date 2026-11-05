@@ -6,7 +6,7 @@ name="mx-gateway-test-$$"
 network="$name"
 
 cleanup() {
-  docker rm -f "$name-nginx" "$name-dropping" "$name-answering" "$name-slow-1" "$name-slow-2" >/dev/null 2>&1 || true
+  docker rm -f "$name-nginx" "$name-dropping" "$name-answering" "$name-slow-1" "$name-slow-2" "$name-hanging" "$name-quick" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -82,3 +82,27 @@ if [ "$status" != 200 ]; then
   exit 1
 fi
 echo "OK: one slow request does not take both engines out of rotation"
+
+docker rm -f "$name-nginx" "$name-slow-1" "$name-slow-2" >/dev/null
+engine hanging matching-engine-1 "if (req.url.startsWith('/slow')) return; res.end('engine-1');"
+engine quick matching-engine-2 "res.end('engine-2');"
+docker run -d --name "$name-nginx" --network "$network" -p 127.0.0.1::3001 \
+  -v "$root/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine >/dev/null
+port=$(docker port "$name-nginx" 3001 | head -n 1 | sed 's/.*://')
+for attempt in $(seq 1 30); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/health")" = 200 ] && break
+  sleep 1
+done
+sleep 3
+
+for attempt in 1 2 3; do
+  took=$(curl -s -o /dev/null -w '%{time_total}' "http://127.0.0.1:$port/slow")
+  [ "${took%%.*}" -ge 4 ] && break
+done
+answers=$(for n in 1 2 3 4 5 6; do curl -s "http://127.0.0.1:$port/orders/book"; echo; done)
+if ! echo "$answers" | grep -q engine-1; then
+  echo "FAIL: one timed out request took engine-1 out of rotation: $(echo "$answers" | tr '\n' ' ')"
+  exit 1
+fi
+echo "OK: one timed out request does not take an engine out of rotation"
+
