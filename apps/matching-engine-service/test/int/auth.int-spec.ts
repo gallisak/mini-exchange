@@ -210,8 +210,9 @@ describe('authentication sessions', () => {
 
     const retried = await refresh(session.refreshToken, attempt).expect(200);
 
-    await refresh(retried.body.refreshToken).expect(200);
+    const next = await refresh(retried.body.refreshToken).expect(200);
     await refresh(session.refreshToken, attempt).expect(401);
+    await refresh(next.body.refreshToken).expect(200);
   });
 
   it('still ends the session when a used refresh token comes back without the attempt that used it', async () => {

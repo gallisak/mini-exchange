@@ -319,6 +319,14 @@ describe('reconciliation', () => {
     expect(Date.now() - new Date(second.body.period.to).getTime()).toBeGreaterThanOrEqual(60000);
   });
 
+  it('never moves its starting point past a minute ago, whatever end it is asked for', async () => {
+    const future = new Date(Date.now() + 24 * 3_600_000).toISOString();
+
+    const response = await reconcile({ to: future }).expect(200);
+
+    expect(Date.now() - new Date(response.body.period.to).getTime()).toBeGreaterThanOrEqual(60000);
+  });
+
   it('keeps showing a trade the ledger never settled, however long ago it was executed', async () => {
     const executedAt = new Date(Date.now() - 30 * 3_600_000);
     engineRows = (from) =>
