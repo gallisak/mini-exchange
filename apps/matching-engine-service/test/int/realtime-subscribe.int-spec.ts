@@ -34,7 +34,9 @@ describe('real-time subscription of an engine', () => {
     const port = (app.getHttpServer().address() as AddressInfo).port;
     socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
     const deltas: unknown[] = [];
+    const resyncs: unknown[] = [];
     socket.on('book_delta', (delta: unknown) => deltas.push(delta));
+    socket.on('resync', (scope: unknown) => resyncs.push(scope));
     await new Promise((resolve) => {
       socket!.once('book_snapshot', resolve);
       socket!.emit('subscribe', 'ABC');
@@ -45,6 +47,7 @@ describe('real-time subscription of an engine', () => {
     await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
 
     expect(failed).toBe(true);
+    expect(resyncs).toEqual([{}]);
     await eventually(async () => expect(deltas).toHaveLength(1));
   });
 });

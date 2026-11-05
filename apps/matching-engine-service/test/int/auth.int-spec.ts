@@ -70,6 +70,34 @@ describe('authentication sessions', () => {
     expect(statuses.sort()).toEqual([200, 401]);
   });
 
+  it('keeps a user signed in on every device they signed in on', async () => {
+    const email = `devices-${randomUUID()}@example.com`;
+    const laptop = await signUp(email);
+    const phone = (
+      await http().post('/auth/login').send({ email, password: 'password123' }).expect(200)
+    ).body;
+
+    const laptopRefreshed = await refresh(laptop.refreshToken).expect(200);
+    const phoneRefreshed = await refresh(phone.refreshToken).expect(200);
+
+    await refresh(laptopRefreshed.body.refreshToken).expect(200);
+    await refresh(phoneRefreshed.body.refreshToken).expect(200);
+  });
+
+  it('ends only the session whose refresh token was used twice', async () => {
+    const email = `reuse-${randomUUID()}@example.com`;
+    const stolen = await signUp(email);
+    const other = (
+      await http().post('/auth/login').send({ email, password: 'password123' }).expect(200)
+    ).body;
+    const rotated = await refresh(stolen.refreshToken).expect(200);
+
+    await refresh(stolen.refreshToken).expect(401);
+
+    await refresh(rotated.body.refreshToken).expect(401);
+    await refresh(other.refreshToken).expect(200);
+  });
+
   it('does not accept an access token as a refresh token', async () => {
     const session = await signUp();
 

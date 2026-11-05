@@ -137,7 +137,7 @@ describe('private real-time updates', () => {
   async function watching(user: TestUser, instrument?: string) {
     const client = await connect(user);
     const resyncs: unknown[] = [];
-    client.socket.on('resync', () => resyncs.push(true));
+    client.socket.on('resync', (scope: unknown) => resyncs.push(scope));
     if (instrument) {
       await new Promise((resolve) => {
         client.socket.once('book_snapshot', resolve);
@@ -154,7 +154,7 @@ describe('private real-time updates', () => {
 
     await submit(app, alice, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
 
-    await eventually(async () => expect(aliceResyncs).toHaveLength(1));
+    await eventually(async () => expect(aliceResyncs).toEqual([{ orders: true }]));
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(bobResyncs).toEqual([]);
   });
@@ -166,7 +166,7 @@ describe('private real-time updates', () => {
 
     await submit(app, alice, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
 
-    await eventually(async () => expect(abcResyncs).toHaveLength(1));
+    await eventually(async () => expect(abcResyncs).toEqual([{ instrument: 'ABC' }]));
     await new Promise((resolve) => setTimeout(resolve, 1500));
     expect(defResyncs).toEqual([]);
   });
