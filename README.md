@@ -165,9 +165,9 @@ second. Acquire, renew and release are Lua scripts, so "check the holder and act
 
 | Event | Expected | Measured by the chaos test (three runs) |
 |---|---|---|
-| Owner killed (`kill -9`) | up to ~7 s: lease expiry ≤ 5 s, acquisition ≤ 1 s, loading the book | 4.0 s, 5.2 s, 4.7 s |
-| Owner frozen past its lease | same as a kill, the zombie is rejected when it wakes | 7.8 s, 7.8 s, 7.4 s |
-| Owner stopped gracefully (`SIGTERM`) | about 1 s: the owner releases its lease on shutdown | 1.2 s, 1.0 s, 1.2 s |
+| Owner killed (`kill -9`) | up to ~7 s: lease expiry ≤ 5 s, acquisition ≤ 1 s, loading the book | 5.5 s, 5.4 s, 5.3 s |
+| Owner frozen past its lease | same as a kill, the zombie is rejected when it wakes | 6.2 s, 6.2 s, 6.6 s |
+| Owner stopped gracefully (`SIGTERM`) | about 1 s: the owner releases its lease on shutdown | 1.5 s, 1.4 s, 1.3 s |
 
 During the downtime the API keeps accepting orders. They wait in the stream and the new owner
 applies them in order, so no accepted order is lost or applied twice.
@@ -298,6 +298,7 @@ it fails without the fix.
 | **A rate-limited snapshot request made the book go stale.** The client kept counting the snapshot timeout while it waited to retry. | `reducer.test.ts` | The timeout counts from the retry |
 | **Reconnecting reset the snapshot limit.** It was counted per socket. | `platform.int-spec.ts`: "keeps limiting a client that reconnects" | Also 60 per 10 s per client address, counted in Redis and shared by the engines |
 | **Postgres and Redis were published on the host** without passwords, and the command stream trusts whoever writes to it, so any local process could place or cancel orders for any user. | Reading `docker-compose.yml` | They are reachable only from the containers |
+| **The chaos test measured the load generator, and the secrets test only passed on macOS.** A takeover counted as finished at the next order from the load, which nginx partly sent to the frozen engine, so B failed on a slow CI runner with the new owner already working. The secrets test read the generated files from the host, which only works where Docker ignores file owners. | The `chaos` and `infrastructure` jobs failed in CI | A probe order sent straight to the new owner marks the end of a takeover; the secrets test runs on a Docker volume and also checks the files belong to the node user with mode 600 |
 | **Updates missed before a late first connect were lost.** Orders, trades and the wallet reloaded only on a reconnect, so when the socket first connected late, for example while its token could not be issued, what happened meanwhile never showed up. | `browser-smoke.mjs`: the buyer's socket token fails three times first | They reload on every connect |
 
 ## Chaos test
@@ -324,7 +325,9 @@ priced so most of them trade. On a timeout, a 5xx or a 429 a worker retries with
 - the engines applied every command in the streams;
 - `replay-check` rebuilds every book from its stream: same trades, same open orders;
 - reconciliation is `ok` and the number of settled trades equals the number of trades;
-- each takeover finished within its limit (10 s, 10 s, 3 s);
+- each takeover finished within its limit (10 s, 10 s, 3 s). A takeover counts as finished when a
+  probe order, sent straight to the new owner's container so that nginx cannot route it to the
+  frozen one, is committed;
 - the resumed zombie in B stepped down instead of writing.
 
 **Before the fixes** the starter could not even run this test: a killed owner kept its instrument
@@ -335,16 +338,18 @@ orders were lost (`proof/command-log`).
 
 | | Run 1 | Run 2 | Run 3 |
 |---|---|---|---|
-| A. `kill -9`: new owner / processing again | 3.9 s / 4.0 s | 4.9 s / 5.2 s | 4.6 s / 4.7 s |
-| B. pause past the lease: new owner / processing again | 6.1 s / 7.8 s | 4.2 s / 7.8 s | 5.7 s / 7.4 s |
-| C. `SIGTERM`: new owner / processing again | 0.9 s / 1.2 s | 1.0 s / 1.0 s | 0.9 s / 1.2 s |
-| D. settlement settling again after its restart | 1.3 s | 1.3 s | 1.2 s |
-| Orders accepted and stored exactly once | 10,456 | 10,049 | 9,147 |
+| A. `kill -9`: new owner / probe order committed | 5.1 s / 5.5 s | 4.9 s / 5.4 s | 4.9 s / 5.3 s |
+| B. pause past the lease: new owner / probe order committed | 5.7 s / 6.2 s | 5.7 s / 6.2 s | 6.1 s / 6.6 s |
+| C. `SIGTERM`: new owner / probe order committed | 1.1 s / 1.5 s | 1.0 s / 1.4 s | 0.8 s / 1.3 s |
+| D. settlement settling again after its restart | 1.3 s | 1.2 s | 1.2 s |
+| Orders accepted and stored exactly once | 9,759 | 9,524 | 8,972 |
 | Replay, reconciliation, nothing left unapplied | pass | pass | pass |
 
-In B the gap between the new owner and the first commit is mostly the load generator: nginx keeps
-sending about half the requests to the frozen instance, they wait for the client's timeout, and fewer
-commands arrive. See the limitations below.
+The probe measures the instrument, not the load generator. Earlier the test waited for the next
+order from the load instead, and in B nginx kept sending about half of those to the frozen instance,
+where they waited for the client's timeout. On a slow CI runner that alone stretched B past its
+limit while the new owner was already working. See the limitations below for that effect on
+clients.
 
 ## Why Redis
 
