@@ -14,7 +14,8 @@
     "test:int": "nest build && jest --config jest.int.config.js --runInBand",
     "migration:generate": "typeorm-ts-node-commonjs migration:generate -d src/database/data-source.ts",
     "migration:run": "typeorm-ts-node-commonjs migration:run -d src/database/data-source.ts",
-    "migration:run:prod": "typeorm migration:run -d dist/database/data-source.js"
+    "migration:run:prod": "typeorm migration:run -d dist/database/data-source.js",
+    "replay:check": "node dist/tools/replay-check.js"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",
