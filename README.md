@@ -33,7 +33,7 @@ docker compose up -d --build
 
 Compose starts Postgres and Redis, runs the migrations of both databases, then two matching engines
 behind nginx, settlement, the frontend and an nginx in front of it. Ports 3000, 3001, 3002, 5433
-and 6379 must be free.
+and 6379 must be free. All of them listen on `127.0.0.1` only.
 
 Register on http://localhost:3000/login; a new account starts with 100,000 USD and 1,000 of every
 instrument (`ABC`, `DEF`, `XYZ`). To open the operations panel, put your email into `ADMIN_EMAILS`
@@ -47,13 +47,18 @@ Useful commands:
 node e2e/browser-smoke.mjs                            # browser scenario (cd e2e && npm ci first; needs a fresh stack)
 docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build
 node scripts/chaos/run.mjs                            # chaos test, writes chaos-report.md
-docker compose exec settlement-service node dist/reconciliation/reconcile.js
+docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/reconciliation/reconcile.js
 docker compose exec matching-engine-1 node dist/tools/replay-check.js
 docker compose logs -f matching-engine-1 settlement-service   # JSON logs with traceId
 ```
 
-Every service has a `.env.example`; compose uses those files. Secrets have no defaults in code: an
-engine refuses to start without `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET`.
+Every service has a `.env.example`; compose uses those files for everything except secrets. On the
+first start a one-off `secrets` service generates random JWT secrets, the proxy key and the engine's
+internal key, one volume per service, and each service mounts and loads only its own keys before
+it starts. The placeholders in `.env.example` are for running a service outside compose. Secrets have
+no defaults in code: an engine refuses to start without `JWT_ACCESS_SECRET` and
+`JWT_REFRESH_SECRET`. `docker compose down -v` drops these volumes, so the next start issues new secrets
+and signs everyone out.
 
 ## Architecture and data path
 
@@ -251,7 +256,22 @@ fix.
 | 7 | **Counterparty leak.** `POST /orders` returned trades with both user ids. | "returns only the order id and status, never trades or counterparties" | Returns `{orderId, status}` | `proof/matcher-core` |
 | 8 | **Did not start cleanly.** A lint error broke the frontend build, `dist/main` was missing because tests were compiled into the build, an entity column had no type, and `synchronize: true` fails when two engines start together. | Compose smoke in CI | Fixes plus migrations run by a one-off `migrate` service | `proof/startup` |
 | 9 | **Settlement not implemented.** | `settlement.int-spec.ts` fails before the fix | See settlement above | `proof/settlement` |
-| 10 | **No rate limit, default secrets, open CORS.** | `platform.int-spec.ts` fails before the fix | Rate limits in Redis shared by instances, required secrets, CORS allow-list | `proof/platform` |
+| 10 | **No rate limit, default secrets, open CORS.** | `platform.int-spec.ts` fails before the fix | Rate limits in Redis shared by instances, required secrets, CORS allow-list. Compose generates the secrets on first start (see below) | `proof/platform` |
+
+### Found in a later review
+
+These were not in the starter; they came up in a review of the finished code. The tests named below
+fail without the fix.
+
+| Problem | How it was confirmed | Fix |
+|---|---|---|
+| **An instrument could hang with no book running.** If renewing failed while a book was still loading (a slow database), the owner dropped the lease but the book started anyway. When the same instance acquired the instrument again, `startInstrument` kept the stale book, which was fenced out on its first command. The instance then held and renewed the lease with nothing processing the stream, so no other instance could take over. | `ownership-lifecycle.spec.ts`: "does not keep a book running after losing the lease while it was starting" | The owner stops a book that finished loading after the lease was lost, and a new token replaces a running book instead of being ignored |
+| **The concurrency test compared the engine with itself.** It replayed the stream through the same `applyCommands`, so a matching bug would be reproduced by the replay. | Breaking the trade price, the time priority or self-trade prevention in the matcher still passed it | A separate, deliberately naive price-time reference. 40 random command streams in unit tests and the concurrent flow are checked against it, plus "no crossed book between different owners" |
+| **A snapshot that never arrived left the book stale for good.** Nothing asked again after a lost reply, for example when the database failed during `subscribe`. | `reducer.test.ts` | The client asks again after 5 s without a snapshot |
+| **The trade feed could skip trades and the order list could go back.** Trades that arrived while the list was loading were dropped, and gaps in the trade `seq` went unnoticed. A reload could replace a filled order with an older open version. | `feeds.test.ts` | Trades are buffered until the list loads and merged by id; a skipped `seq` reloads the list; an order only moves forward |
+| **Two sign-ups with one email at once gave a 500**, and login skipped the hash check for unknown emails, so timing showed which emails had accounts. | `auth.int-spec.ts`, `auth-login.spec.ts` | 409 on the unique violation; a dummy hash is checked for unknown emails |
+| **`/trades/summary` was public.** Anyone could make the engine total every trade in a period, 100 times a second. | `trade-summary.int-spec.ts` | It needs the engine's internal key, which reconciliation sends |
+| **Compose ran with the published placeholder secrets** and exposed the APIs on every interface. Anyone who read the repository could sign a token for any user or as an admin, or pick their own address for the sign-in limit with the proxy key. | Reading `docker-compose.yml` and `.env.example` | Secrets generated per installation, ports on `127.0.0.1` |
 
 ## Chaos test
 
@@ -340,6 +360,9 @@ Redis Streams is the order log and Redis is the coordinator.
   The nginx gateways overwrite `X-Forwarded-For` so a client cannot pick its own address. The
   frontend passes the user's address with a shared key. Sign-in and orders answer 503 rather than
   skipping the limit while Redis is down.
+- **Secrets and internal calls.** Compose generates the secrets on first start, and each service
+  sees only its own. The engine's trade summary, used by reconciliation, needs an internal key.
+  Unknown emails still cost a password-hash check at sign-in, so timing does not reveal accounts.
 - **Observability.**
   - JSON logs with a trace id end to end.
   - Prometheus `/metrics` and `/health` on both services.
@@ -351,10 +374,10 @@ Redis Streams is the order log and Redis is the coordinator.
 
 | Where | What |
 |---|---|
-| `apps/matching-engine-service/test` | Unit tests: matcher, precision, validation, self-trade, depth, apply-commands, ownership |
-| `apps/matching-engine-service/test/int` | Against real Postgres and Redis, including spawned engine processes: starter bugs, concurrency against a replay, fencing, failover, real-time across instances, auth, rate limits, tracing, ops, replay check |
+| `apps/matching-engine-service/test` | Unit tests: matcher, precision, validation, self-trade, depth, apply-commands, ownership, random command streams against an independent price-time reference |
+| `apps/matching-engine-service/test/int` | Against real Postgres and Redis, including spawned engine processes: starter bugs, concurrency against a replay and the reference, fencing, failover, real-time across instances, auth, rate limits, tracing, ops, replay check |
 | `apps/settlement-service/test` | Unit tests: postings, idempotent handling of trade events; integration: redelivery, crash before `XACK`, concurrent trades, reconciliation |
-| `apps/frontend/lib` | Book resync reducer, decimals, safe redirect |
+| `apps/frontend/lib` | Book resync reducer, trade feed and order list merging, decimals, safe redirect |
 | `scripts/smoke.sh` | The whole compose stack, from a trade to both wallets, reconciliation, one trace id, 429s, forged headers, docs |
 | `e2e/browser-smoke.mjs` | Playwright: sign-up, a live order, the book, a forced resync, a reconnect, the wallet |
 | `scripts/chaos/run.mjs` | The chaos test above |
