@@ -109,15 +109,19 @@ function insertByPriceTimePriority(list: Order[], order: Order): Order[] {
 }
 
 export function sortByPriceTimePriority(list: Order[], side: Order['side']): Order[] {
-  const result = [...list];
-  result.sort((a, b) => {
+  const keyed = list.map((order) => ({
+    order,
+    price: toUnits(order.price, PRICE_SCALE),
+    seq: order.seq != null ? BigInt(order.seq) : null,
+  }));
+  keyed.sort((a, b) => {
     const priceDiff =
       side === 'buy'
-        ? compareUnits(toUnits(b.price, PRICE_SCALE), toUnits(a.price, PRICE_SCALE)) // bids: спадання ціни
-        : compareUnits(toUnits(a.price, PRICE_SCALE), toUnits(b.price, PRICE_SCALE)); // asks: зростання ціни
+        ? compareUnits(b.price, a.price) // bids: спадання ціни
+        : compareUnits(a.price, b.price); // asks: зростання ціни
     if (priceDiff !== 0) return priceDiff;
-    if (a.seq != null && b.seq != null) return compareUnits(BigInt(a.seq), BigInt(b.seq));
-    return a.createdAt.getTime() - b.createdAt.getTime();
+    if (a.seq !== null && b.seq !== null) return compareUnits(a.seq, b.seq);
+    return a.order.createdAt.getTime() - b.order.createdAt.getTime();
   });
-  return result;
+  return keyed.map(({ order }) => order);
 }

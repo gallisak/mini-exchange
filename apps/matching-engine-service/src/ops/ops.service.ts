@@ -5,6 +5,7 @@ import { RedisService } from '../redis/redis.service';
 import { InstrumentState } from '../orders/entities/instrument-state.entity';
 import { OutboxMessage } from '../outbox/outbox-message.entity';
 import { commandStreamKey } from '../orders/engine/order-command';
+import { StuckBook, stuckKey } from '../orders/engine/book-runner';
 import {
   InstrumentOwnershipService,
   instrumentLockKey,
@@ -12,6 +13,9 @@ import {
 
 const CHECK_TIMEOUT_MS = 1000;
 const LAG_SCAN_LIMIT = 10_000;
+const COUNT_AFTER = `
+return #redis.call('XRANGE', KEYS[1], '(' .. ARGV[1], '+', 'COUNT', ARGV[2])
+`;
 
 type CheckResult = 'up' | 'down';
 
@@ -60,16 +64,17 @@ export class OpsService {
       INSTRUMENTS.map(async (instrument) => {
         const state = states.get(instrument);
         const lastCommandId = state?.lastCommandId ?? '0-0';
-        const [owner, streamLength, pending] = await Promise.all([
+        const [owner, streamLength, behind, stuck] = await Promise.all([
           this.redis.client.get(instrumentLockKey(instrument)),
           this.redis.client.xlen(commandStreamKey(instrument)),
-          this.redis.client.xrange(
+          this.redis.client.eval(
+            COUNT_AFTER,
+            1,
             commandStreamKey(instrument),
-            `(${lastCommandId}`,
-            '+',
-            'COUNT',
+            lastCommandId,
             LAG_SCAN_LIMIT,
-          ),
+          ) as Promise<number>,
+          this.redis.client.get(stuckKey(instrument)),
         ]);
         return {
           instrument,
@@ -79,7 +84,8 @@ export class OpsService {
           bookSeq: Number(state?.bookSeq ?? 0),
           lastCommandId,
           commandStreamLength: streamLength,
-          commandsBehind: pending.length,
+          commandsBehind: behind,
+          stuck: stuck ? (JSON.parse(stuck) as StuckBook) : null,
         };
       }),
     );

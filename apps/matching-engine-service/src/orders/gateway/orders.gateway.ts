@@ -10,10 +10,13 @@ import {
 } from '@nestjs/websockets';
 import { isUUID } from 'class-validator';
 import Redis from 'ioredis';
+import proxyAddr from 'proxy-addr';
 import { Server, Socket } from 'socket.io';
 import { OrdersService } from '../orders.service';
 import { INSTRUMENTS } from '../../common/instruments';
-import { corsOrigins, requireEnv } from '../../common/env';
+import { corsOrigins, requireEnv, trustedProxies } from '../../common/env';
+import { RateLimitService } from '../../rate-limit/rate-limit.service';
+import { rateLimitPolicy } from '../../rate-limit/rate-limit.policies';
 import { RedisService, closeRedis } from '../../redis/redis.service';
 import {
   MARKET_CHANNEL_PREFIX,
@@ -46,6 +49,7 @@ export class OrdersGateway
   private subscriber?: Redis;
   private readonly expiries = new Map<string, NodeJS.Timeout>();
   private readonly snapshots = new Map<string, { windowStart: number; count: number }>();
+  private readonly trust = proxyAddr.compile(trustedProxies());
 
   @WebSocketServer()
   server: Server;
@@ -54,6 +58,7 @@ export class OrdersGateway
     private readonly orders: OrdersService,
     private readonly redis: RedisService,
     private readonly jwt: JwtService,
+    private readonly limiter: RateLimitService,
   ) {}
 
   afterInit(server: Server): void {
@@ -110,7 +115,10 @@ export class OrdersGateway
   @SubscribeMessage('subscribe')
   async subscribe(client: Socket, instrument: unknown) {
     if (typeof instrument !== 'string' || !INSTRUMENTS.includes(instrument)) return;
-    const retryAfterMs = this.snapshotRetryAfter(client.id);
+    const retryAfterMs = Math.max(
+      this.snapshotRetryAfter(client.id),
+      await this.addressRetryAfter(client),
+    );
     if (retryAfterMs > 0) {
       client.emit('rate_limited', { event: 'subscribe', retryAfterMs });
       return;
@@ -123,6 +131,18 @@ export class OrdersGateway
   async unsubscribe(client: Socket, instrument: unknown) {
     if (typeof instrument !== 'string' || !INSTRUMENTS.includes(instrument)) return;
     await client.leave(bookRoom(instrument));
+  }
+
+  private async addressRetryAfter(client: Socket): Promise<number> {
+    const policy = rateLimitPolicy('SNAPSHOT');
+    try {
+      if (!this.limiter.isAvailable()) return 0;
+      const address = proxyAddr(client.request, this.trust);
+      const result = await this.limiter.hit(`SNAPSHOT:${address}`, policy.limit, policy.windowMs);
+      return result.allowed ? 0 : result.retryAfterMs;
+    } catch {
+      return 0;
+    }
   }
 
   private snapshotRetryAfter(socketId: string): number {

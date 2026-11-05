@@ -6,6 +6,9 @@ import { consumerOptionsFromEnv } from '../consumer/consumer-options';
 import { tradeStreamKey } from '../consumer/trade-event';
 
 const CHECK_TIMEOUT_MS = 1000;
+const PENDING_SCAN_LIMIT = 1000;
+
+type PendingEntry = [id: string, consumer: string, idleMs: number, deliveries: number];
 
 type CheckResult = 'up' | 'down';
 
@@ -57,12 +60,17 @@ export class OpsService implements OnApplicationShutdown {
           | number
         )[][]).map(record);
         const group = groups.find((info) => info.name === this.options.group);
+        const pending = group
+          ? ((await this.redis.xpending(stream, this.options.group, '-', '+', PENDING_SCAN_LIMIT)) as PendingEntry[])
+          : [];
         return {
           stream,
           length: await this.redis.xlen(stream),
           pending: Number(group?.pending ?? 0),
           lag: group?.lag === null || group?.lag === undefined ? null : Number(group.lag),
           consumers: Number(group?.consumers ?? 0),
+          retrying: pending.filter(([, , , deliveries]) => deliveries > 1).length,
+          oldestPendingMs: pending.length > 0 ? Math.max(...pending.map(([, , idleMs]) => idleMs)) : null,
         };
       }),
     );

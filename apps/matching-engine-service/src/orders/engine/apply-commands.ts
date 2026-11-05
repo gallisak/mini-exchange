@@ -7,7 +7,6 @@ import {
   PRICE_SCALE,
   QUANTITY_INTEGER_DIGITS,
   QUANTITY_SCALE,
-  fromUnits,
   isPositiveDecimal,
 } from '../../common/decimal';
 import { OrderCommand, StreamCommand, streamTimestamp } from './order-command';
@@ -30,8 +29,6 @@ export interface ApplyResult {
   orders: Order[];
   trades: ExecutedTrade[];
 }
-
-const ZERO_QUANTITY = fromUnits(0n, QUANTITY_SCALE);
 
 export function applyCommands(
   instrument: string,
@@ -88,7 +85,7 @@ export function applyCommands(
       bids: current.bids.filter((o) => o.id !== resting.id),
       asks: current.asks.filter((o) => o.id !== resting.id),
     };
-    changed.set(resting.id, { ...resting, status: 'cancelled', remainingQuantity: ZERO_QUANTITY });
+    changed.set(resting.id, { ...resting, status: 'cancelled' });
   }
 
   return {

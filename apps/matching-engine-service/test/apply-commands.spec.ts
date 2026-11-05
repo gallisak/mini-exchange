@@ -103,8 +103,29 @@ describe('applyCommands', () => {
     expect(intruder.state.bookSeq).toBe(placed.state.bookSeq);
     expect(owner.book.asks).toHaveLength(0);
     expect(owner.orders).toMatchObject([
-      { id: oid('sell-1'), status: 'cancelled', remainingQuantity: '0.00000000' },
+      { id: oid('sell-1'), status: 'cancelled', remainingQuantity: '1.00000000' },
     ]);
+  });
+
+  it('keeps the filled part of a partially filled order it cancels', () => {
+    const result = applyCommands(
+      'ABC',
+      empty,
+      initial,
+      [
+        submit('1-0', 'sell-1', 'A', 'sell', '100.00', '5.00000000'),
+        submit('2-0', 'buy-1', 'B', 'buy', '100.00', '1.00000000'),
+        cancel('3-0', 'sell-1', 'A'),
+      ],
+      new Set(),
+    );
+
+    expect(result.orders.find((o) => o.id === oid('sell-1'))).toMatchObject({
+      status: 'cancelled',
+      quantity: '5.00000000',
+      remainingQuantity: '4.00000000',
+    });
+    expect(result.book.asks).toHaveLength(0);
   });
 
   it('treats a cancel that arrives after the order filled as a no-op', () => {

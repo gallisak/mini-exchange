@@ -29,6 +29,12 @@ export const tradesExecuted = new Counter({
   labelNames: ['instrument'],
 });
 
+export const bookBatchFailures = new Counter({
+  name: 'book_batch_failures_total',
+  help: 'Command batches this instance failed to commit, by instrument',
+  labelNames: ['instrument'],
+});
+
 export const outboxPublished = new Counter({
   name: 'outbox_published_total',
   help: 'Outbox messages relayed to Redis by this instance',

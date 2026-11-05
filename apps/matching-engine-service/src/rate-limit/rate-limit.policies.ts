@@ -1,4 +1,4 @@
-export type RateLimitName = 'ORDER' | 'AUTH' | 'PUBLIC';
+export type RateLimitName = 'ORDER' | 'AUTH' | 'PUBLIC' | 'SNAPSHOT';
 
 export interface RateLimitPolicy {
   limit: number;
@@ -11,6 +11,7 @@ const DEFAULTS: Record<RateLimitName, RateLimitPolicy> = {
   ORDER: { limit: 20, windowMs: 1000, by: 'user', failClosed: true },
   AUTH: { limit: 10, windowMs: 60_000, by: 'ip', failClosed: true },
   PUBLIC: { limit: 100, windowMs: 1000, by: 'ip', failClosed: false },
+  SNAPSHOT: { limit: 60, windowMs: 10_000, by: 'ip', failClosed: false },
 };
 
 const positive = (value: string | undefined, fallback: number) => {

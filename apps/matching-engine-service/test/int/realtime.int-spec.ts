@@ -140,10 +140,13 @@ describe('real-time order book', () => {
     await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
     const { seq } = await delta;
 
-    const heartbeat = await nextEvent<{ instrument: string; seq: number }>(socket, 'book_heartbeat');
+    const heartbeat = await nextEvent<{ instrument: string; seq: number; intervalMs: number }>(
+      socket,
+      'book_heartbeat',
+    );
 
     expect(seq).toBe(snapshot.seq + 1);
-    expect(heartbeat).toEqual({ instrument: 'ABC', seq });
+    expect(heartbeat).toEqual({ instrument: 'ABC', seq, intervalMs: Number(process.env.BOOK_HEARTBEAT_MS) });
   });
 
   it('stops sending a book to a client that unsubscribed from it', async () => {

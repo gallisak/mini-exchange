@@ -1,4 +1,5 @@
 import { INestApplication } from '@nestjs/common';
+import { LedgerService } from '../../src/ledger/ledger.service';
 import { randomUUID } from 'crypto';
 import request from 'supertest';
 import {
@@ -77,7 +78,30 @@ describe('settlement operations endpoints', () => {
       pending: 0,
       lag: 0,
       consumers: 1,
+      retrying: 0,
+      oldestPendingMs: null,
     });
+  });
+
+  it('shows trades that keep failing to settle and how long the oldest has waited', async () => {
+    const ledger = app.get(LedgerService);
+    jest.spyOn(ledger, 'settleTrade').mockRejectedValue(new Error('Connection terminated unexpectedly'));
+    const redis = redisClient();
+    await publishTrade(redis, trade());
+    await redis.quit();
+    const status = async () =>
+      (
+        await http()
+          .get('/ops/status')
+          .set('authorization', `Bearer ${accessToken(randomUUID(), 'admin')}`)
+          .expect(200)
+      ).body.streams.find((row: { stream: string }) => row.stream === TRADE_STREAM);
+
+    await eventually(async () => {
+      const row = await status();
+      expect(row.retrying).toBe(1);
+      expect(row.oldestPendingMs).toBeGreaterThan(0);
+    }, 10000);
   });
 
   it('forgets consumers that left nothing pending and have been idle for long', async () => {

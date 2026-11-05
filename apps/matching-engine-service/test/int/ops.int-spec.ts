@@ -71,6 +71,7 @@ describe('operations endpoints', () => {
           bookSeq: 1,
           commandStreamLength: 1,
           commandsBehind: 0,
+          stuck: null,
         }),
       );
     });

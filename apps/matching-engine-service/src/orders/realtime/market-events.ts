@@ -38,6 +38,7 @@ export interface TradeEvent {
 export interface BookHeartbeat {
   instrument: string;
   seq: number;
+  intervalMs: number;
 }
 
 export type MarketEvent =

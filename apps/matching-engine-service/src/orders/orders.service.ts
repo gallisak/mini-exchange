@@ -6,8 +6,8 @@ import {
   UnprocessableEntityException,
 } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { In, Repository } from 'typeorm';
-import { Order } from './entities/order.entity';
+import { In, Not, Repository } from 'typeorm';
+import { Order, OrderStatus } from './entities/order.entity';
 import { SubmitOrderDto } from './dto/submit-order.dto';
 import { CommandStreamService } from './engine/command-stream.service';
 import { InstrumentState } from './entities/instrument-state.entity';
@@ -19,6 +19,12 @@ import { currentTraceId } from '../observability/trace-context';
 import { ordersAccepted } from '../observability/metrics';
 
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
+const ACTIVE_STATUSES: OrderStatus[] = ['open', 'partially_filled'];
+
+function historyLimit(): number {
+  const value = Number(process.env.ORDER_HISTORY_LIMIT);
+  return Number.isInteger(value) && value > 0 ? value : 100;
+}
 const IDEMPOTENCY_MISMATCH = 'Idempotency-Key was already used for a different order';
 
 function fingerprintOf(order: Order): string {
@@ -121,14 +127,25 @@ export class OrdersService {
   }
 
   async listOwn(ownerId: string): Promise<Order[]> {
-    return this.orders.find({ where: { ownerId }, order: { createdAt: 'DESC' } });
+    const [active, finished] = await Promise.all([
+      this.orders.find({
+        where: { ownerId, status: In(ACTIVE_STATUSES) },
+        order: { createdAt: 'DESC' },
+      }),
+      this.orders.find({
+        where: { ownerId, status: Not(In(ACTIVE_STATUSES)) },
+        order: { createdAt: 'DESC' },
+        take: historyLimit(),
+      }),
+    ]);
+    return [...active, ...finished].sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime());
   }
 
   async getDepth(instrument: string): Promise<BookView> {
     return this.orders.manager.transaction('REPEATABLE READ', async (manager) => {
       const state = await manager.findOneBy(InstrumentState, { instrument });
       const open = await manager.find(Order, {
-        where: { instrument, status: In(['open', 'partially_filled']) },
+        where: { instrument, status: In(ACTIVE_STATUSES) },
       });
       return {
         instrument,

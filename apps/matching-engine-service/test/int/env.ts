@@ -14,6 +14,7 @@ const defaults: Record<string, string> = {
   ORDER_RATE_LIMIT: '100000',
   AUTH_RATE_LIMIT: '100000',
   PUBLIC_RATE_LIMIT: '100000',
+  SNAPSHOT_RATE_LIMIT: '100000',
 };
 
 for (const [key, value] of Object.entries(defaults)) {
