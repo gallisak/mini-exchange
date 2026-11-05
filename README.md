@@ -32,8 +32,10 @@ docker compose up -d --build
 | Settlement API, Swagger | http://localhost:3002, http://localhost:3002/docs |
 
 Compose starts Postgres and Redis, runs the migrations of both databases, then two matching engines
-behind nginx, settlement, the frontend and an nginx in front of it. Ports 3000, 3001, 3002, 5433
-and 6379 must be free. All of them listen on `127.0.0.1` only.
+behind nginx, settlement, the frontend and an nginx in front of it. Ports 3000, 3001 and 3002 must
+be free, and they listen on `127.0.0.1` only. Postgres and Redis are not published at all: they have
+no passwords, and the command stream trusts whoever can write to it, so only the containers reach
+them. Use `docker compose exec exchange-db psql -U exchange` or `docker compose exec redis redis-cli`.
 
 Register on http://localhost:3000/login; a new account starts with 100,000 USD and 1,000 of every
 instrument (`ABC`, `DEF`, `XYZ`). To open the operations panel, put your email into `ADMIN_EMAILS`
@@ -52,13 +54,17 @@ docker compose exec matching-engine-1 node dist/tools/replay-check.js
 docker compose logs -f matching-engine-1 settlement-service   # JSON logs with traceId
 ```
 
-Every service has a `.env.example`; compose uses those files for everything except secrets. On the
-first start a one-off `secrets` service generates random JWT secrets, the proxy key and the engine's
-internal key, one volume per service, and each service mounts and loads only its own keys before
-it starts. The placeholders in `.env.example` are for running a service outside compose. Secrets have
-no defaults in code: an engine refuses to start without `JWT_ACCESS_SECRET` and
-`JWT_REFRESH_SECRET`. `docker compose down -v` drops these volumes, so the next start issues new secrets
-and signs everyone out.
+`browser-smoke.mjs` needs an empty `ABC` book. Run it before `smoke.sh`, or a minute after it:
+`smoke.sh` uses up the sign-in limit of the address on purpose.
+
+Every service has a `.env.example`. Compose loads those files and overrides only the hosts, the
+instance ids, the instrument list and the service URLs in `docker-compose.yml`; secrets come
+separately. On the first start a one-off `secrets` service generates random JWT secrets, the proxy
+key and the internal keys of the engine and of settlement, one volume per service, and each service
+mounts and loads only its own keys before it starts. The placeholders in `.env.example` are for
+running a service outside compose. Secrets have no defaults in code: an engine refuses to start
+without `JWT_ACCESS_SECRET` and `JWT_REFRESH_SECRET`. `docker compose down -v` drops these volumes,
+so the next start issues new secrets and signs everyone out.
 
 ## Architecture and data path
 
@@ -208,7 +214,8 @@ Every query used for access checks and reconciliation has an index:
 
 | Table | Index | Used by |
 |---|---|---|
-| `orders` | `(ownerId, createdAt)` | a user's own orders, ownership check on cancel |
+| `orders` | primary key `id` | cancel, which looks an order up by its id and owner |
+| `orders` | `(ownerId, createdAt)` | a user's own orders |
 | `orders` | `(instrument, seq)` where open | loading a book, snapshots |
 | `trades` | unique `(instrument, seq)`, `(executedAt)` | trade feed, engine totals for reconciliation |
 | `outbox` | `(id)` where unpublished | the relay |
@@ -223,15 +230,18 @@ Every query used for access checks and reconciliation has an index:
   Postgres in one REPEATABLE READ transaction. After that it gets `book_delta` messages with
   `seq + 1`, `seq + 2`, … containing only the levels that changed. A level with quantity zero has
   left the book.
-- The owner announces the current `seq` every 2 s in `book_heartbeat`.
+- The owner announces the current `seq` every 2 s (`BOOK_HEARTBEAT_MS`) in `book_heartbeat`,
+  together with that interval.
 - `seq` lives in Postgres, so it does not restart on failover.
 
 The client side is a pure reducer (`apps/frontend/lib/book/reducer.ts`, unit tested):
 
 - deltas that arrive before the snapshot are buffered, and only those newer than the snapshot are
   applied;
-- a gap in `seq`, a heartbeat ahead of the book, or seven seconds without hearing anything mark the
-  book **stale** and request a new snapshot;
+- a gap in `seq`, a heartbeat ahead of the book, or silence for longer than three heartbeat
+  intervals (at least 7 s) mark the book **stale** and request a new snapshot;
+- a requested snapshot that has not arrived after 5 s is requested again; when the engine answers
+  `rate_limited`, the client retries after the time it was given and counts the 5 s from then;
 - a lost connection shows **reconnecting**, and the book is replaced by a fresh snapshot after
   reconnecting.
 
@@ -241,9 +251,9 @@ nginx.
 
 ## Problems found in the starter
 
-Each problem was first reproduced by a failing test in its own commit, then fixed in the next one.
-The `proof/*` branches keep those commits with their CI runs, so the red run is visible next to the
-fix.
+Each problem was first reproduced by a failing test in its own commit, then fixed in the commits
+after it. The `proof/*` branches keep those commits with their CI runs, so the red run is visible
+next to the fix.
 
 | # | Problem | How it was confirmed | Fix | Proof |
 |---|---|---|---|---|
@@ -260,8 +270,8 @@ fix.
 
 ### Found in a later review
 
-These were not in the starter; they came up in a review of the finished code. The tests named below
-fail without the fix.
+These were not in the starter; they came up in reviews of the finished code. Where a test is named,
+it fails without the fix.
 
 | Problem | How it was confirmed | Fix |
 |---|---|---|
@@ -272,6 +282,23 @@ fail without the fix.
 | **Two sign-ups with one email at once gave a 500**, and login skipped the hash check for unknown emails, so timing showed which emails had accounts. | `auth.int-spec.ts`, `auth-login.spec.ts` | 409 on the unique violation; a dummy hash is checked for unknown emails |
 | **`/trades/summary` was public.** Anyone could make the engine total every trade in a period, 100 times a second. | `trade-summary.int-spec.ts` | It needs the engine's internal key, which reconciliation sends |
 | **Compose ran with the published placeholder secrets** and exposed the APIs on every interface. Anyone who read the repository could sign a token for any user or as an admin, or pick their own address for the sign-in limit with the proxy key. | Reading `docker-compose.yml` and `.env.example` | Secrets generated per installation, ports on `127.0.0.1` |
+| **The engine's unit tests failed in CI.** Jest took the reference matcher helper for a test file and failed with "Your test suite must contain at least one test", so `npm test` exited with 1 although every test passed. | `npm test` exits with 1 | Only `*.spec.ts` files run as unit tests |
+| **Cancelling a partially filled order erased how much of it was filled.** A cancel set the remaining quantity to zero, so an order of 5 with 1 filled showed as "5 / 5 cancelled". | `apply-commands.spec.ts`: "keeps the filled part of a partially filled order it cancels", `cancel.int-spec.ts` | A cancel keeps the remaining quantity. A migration restores it for orders cancelled earlier from their trades |
+| **The WebSocket silently went anonymous.** If the frontend could not issue a socket token three times in a row, for example while an engine restarted, the socket connected without one and the user stopped getting order and wallet updates without any sign of it. | `ws-token.test.ts`, `browser-smoke.mjs`: the buyer's socket token fails three times first | The socket keeps asking for a token with a backoff of up to 5 s and connects only with one |
+| **The operations page reconciled the whole history every 5 s**, and the engine fetched up to 10,000 stream entries per instrument for each status just to count them. | `ops-polling.test.ts` | Reconciliation runs once a minute and on refresh; Redis counts the commands behind itself |
+| **A service that rejected a valid session signed the user out.** Any 401 from a service cleared the cookies, even right after the engine had renewed the session, and the operations page turned a 401 from settlement into a sign-out. | `upstream.test.ts` | A 401 after a successful renewal answers 502 and keeps the session; only the engine can deny the operations page |
+| **A stolen refresh token had 30 s to get past reuse detection.** The frontend handed the rotated pair to anyone who came with the old token within 30 s. | `session.test.ts` | The window is 5 s, enough for requests that raced the rotation |
+| **The order form reused its Idempotency-Key for a different instrument.** After a failed attempt, switching the instrument and submitting again sent the same key and got a 422. | `order-attempt.test.ts` | The key belongs to the exact order: instrument, side, price and quantity |
+| **nginx replayed sign-in and refresh requests.** `non_idempotent` let nginx resend a refresh that one engine had already received to the other engine after a timeout, which looked like a reused token and ended the session. | `scripts/test-gateway.sh` | `/auth/` is retried only when the request never reached an engine |
+| **`POST /trades/settle` could never be used in compose**: its internal key was not generated. | `scripts/test-secrets.sh` | The key is generated with the other secrets |
+| **Passwords longer than 72 bytes were cut by bcrypt**, so a longer password with the same first 72 bytes also signed in. | `auth-validation.spec.ts` | Sign-up and sign-in refuse passwords over 72 bytes |
+| **A heartbeat slower than 7 s made every client resync all the time**, because the client's silence limit was fixed while `BOOK_HEARTBEAT_MS` was configurable. The frontend also had its own hard-coded instrument list. | `reducer.test.ts` | Each heartbeat carries its interval and the client waits for three missed ones; the instrument list is set once in compose |
+| **The order list and the matcher did not scale.** `GET /orders` returned every order a user ever placed, and sorting the book parsed prices in every comparison. | `own-orders.int-spec.ts` | All active orders and the latest 100 finished ones (`ORDER_HISTORY_LIMIT`); prices are parsed once per sort |
+| **Work that kept failing was retried out of sight.** A batch the engine could never commit stopped its instrument, and settlement retried a trade it could never book, with nothing but error logs to show for it. | `stuck-book.int-spec.ts`, settlement `ops.int-spec.ts` | `/ops/status` and the operations page mark such a book as stuck, with its failed batches and last error, and show trades that are being retried and how long the oldest has waited. `book_batch_failures_total` counts the failures. Nothing is skipped |
+| **A rate-limited snapshot request made the book go stale.** The client kept counting the snapshot timeout while it waited to retry. | `reducer.test.ts` | The timeout counts from the retry |
+| **Reconnecting reset the snapshot limit.** It was counted per socket. | `platform.int-spec.ts`: "keeps limiting a client that reconnects" | Also 60 per 10 s per client address, counted in Redis and shared by the engines |
+| **Postgres and Redis were published on the host** without passwords, and the command stream trusts whoever writes to it, so any local process could place or cancel orders for any user. | Reading `docker-compose.yml` | They are reachable only from the containers |
+| **Updates missed before a late first connect were lost.** Orders, trades and the wallet reloaded only on a reconnect, so when the socket first connected late, for example while its token could not be issued, what happened meanwhile never showed up. | `browser-smoke.mjs`: the buyer's socket token fails three times first | They reload on every connect |
 
 ## Chaos test
 
@@ -356,17 +383,20 @@ Redis Streams is the order log and Redis is the coordinator.
   | Sign-in | 10 / min | address |
   | Public endpoints | 100 / s | address |
   | Book snapshots over WebSocket | 10 / 10 s | socket |
+  | Book snapshots over WebSocket | 60 / 10 s | address |
 
   The nginx gateways overwrite `X-Forwarded-For` so a client cannot pick its own address. The
   frontend passes the user's address with a shared key. Sign-in and orders answer 503 rather than
   skipping the limit while Redis is down.
 - **Secrets and internal calls.** Compose generates the secrets on first start, and each service
-  sees only its own. The engine's trade summary, used by reconciliation, needs an internal key.
+  sees only its own. The engine's trade summary, used by reconciliation, needs the engine's internal
+  key, and settlement's `POST /trades/settle` needs settlement's.
   Unknown emails still cost a password-hash check at sign-in, so timing does not reveal accounts.
 - **Observability.**
   - JSON logs with a trace id end to end.
   - Prometheus `/metrics` and `/health` on both services.
-  - `/ops/status` for admins: owners, fences, stream backlog, outbox, consumer lag, dead letters.
+  - `/ops/status` for admins: owners, fences, stream backlog, books that are stuck, outbox,
+    consumer lag, trades being retried, dead letters.
   - An operations page in the frontend for admins.
 - **API docs.** Swagger at `/docs` on both services.
 
@@ -374,17 +404,18 @@ Redis Streams is the order log and Redis is the coordinator.
 
 | Where | What |
 |---|---|
-| `apps/matching-engine-service/test` | Unit tests: matcher, precision, validation, self-trade, depth, apply-commands, ownership, random command streams against an independent price-time reference |
-| `apps/matching-engine-service/test/int` | Against real Postgres and Redis, including spawned engine processes: starter bugs, concurrency against a replay and the reference, fencing, failover, real-time across instances, auth, rate limits, tracing, ops, replay check |
-| `apps/settlement-service/test` | Unit tests: postings, idempotent handling of trade events; integration: redelivery, crash before `XACK`, concurrent trades, reconciliation |
-| `apps/frontend/lib` | Book resync reducer, trade feed and order list merging, decimals, safe redirect |
+| `apps/matching-engine-service/test` | Unit tests: matcher, precision, order and password validation, self-trade, depth, apply-commands, the order response, sign-in timing, ownership, random command streams against an independent price-time reference |
+| `apps/matching-engine-service/test/int` | Against real Postgres and Redis, including spawned engine processes: starter bugs, concurrency against a replay and the reference, cancelling, the own order list, fencing, a stuck book, failover, real-time across instances, auth, rate limits including snapshots per address, tracing, ops, replay check |
+| `apps/settlement-service/test` | Unit tests: postings, idempotent handling of trade events; integration: redelivery, crash before `XACK`, concurrent trades, reconciliation, ops including retried trades |
+| `apps/frontend/lib` | Book resync reducer, trade feed and order list merging, the socket token retry, the order form's key, the operations page polling, sharing a refresh and handling a service's 401, decimals, safe redirect |
 | `scripts/smoke.sh` | The whole compose stack, from a trade to both wallets, reconciliation, one trace id, 429s, forged headers, docs |
-| `e2e/browser-smoke.mjs` | Playwright: sign-up, a live order, the book, a forced resync, a reconnect, the wallet |
+| `e2e/browser-smoke.mjs` | Playwright: sign-up, live orders while the socket token fails at first, the book, a forced resync, a reconnect, the wallet |
 | `scripts/chaos/run.mjs` | The chaos test above |
+| `scripts/test-gateway.sh`, `scripts/test-secrets.sh` | nginx retries an order but not a sign-in an engine already received; every service gets its own secrets, kept across restarts |
 
 CI runs lint, typecheck, unit tests and build for every service. It also runs both integration
-suites against Postgres and Redis service containers, the compose smoke with the browser test, and
-the chaos test.
+suites against Postgres and Redis service containers, the gateway and secrets checks, the compose
+smoke with the browser test, and the chaos test.
 
 The starter came with two tests. `matcher.spec.ts` is unchanged and green. `self-trade.spec.ts` was
 rewritten because it tested nothing (problem 1).
@@ -402,6 +433,11 @@ rewritten because it tested nothing (problem 1).
 | `POST /auth/login` → 201 | 200, plus `/auth/refresh` and `/auth/logout` | Sessions |
 | Messages in Ukrainian | English | Language of the project |
 | Frontend on port 3000 directly | nginx (`web`) on port 3000 in front of it | Trustworthy client address |
+| A cancelled order had `remainingQuantity` 0 | It keeps the quantity that was not filled | Cancelling is in the remainder; the filled part stays visible |
+| `GET /orders` returned every order | Every active order and the latest 100 finished ones | Bounded response |
+| Any password length | At most 72 bytes | bcrypt compares only 72 bytes |
+| `book_heartbeat` `{instrument, seq}` | `{instrument, seq, intervalMs}` | Clients derive their silence limit from it |
+| Postgres on `127.0.0.1:5433`, Redis on `127.0.0.1:6379` | Not published | No passwords, and the command stream trusts its writers |
 
 ## Known limitations and what I would do differently
 
@@ -424,11 +460,18 @@ rewritten because it tested nothing (problem 1).
   event is lost. The money is right, and the client re-reads the wallet when it reconnects.
 - **Sessions.**
   - An access token stays valid until it expires (15 min) after logout.
-  - Two simultaneous refreshes with the same token end the session; the frontend serialises them.
+  - Two simultaneous refreshes with the same token end the session; the frontend serialises them
+    and hands the new pair to requests with the old token for 5 s.
 - **Rate limits.** They use fixed windows, so a burst of up to twice the limit is possible across a
   window boundary.
 - **Email collisions.** An email that would collide with another account after lowercasing stays as
   it was and needs a manual merge.
 - **Public endpoints.** `/metrics`, `/health` and `/docs` need no authentication.
+- **A failure that repeats blocks instead of skipping.** A batch that the engine can never commit
+  stops its instrument, and settlement retries a trade it can never book without a limit. Both are
+  marked in `/ops/status` and on the operations page. Skipping would lose an accepted order or a
+  trade, so a person has to look.
+- **Order history.** `GET /orders` returns the latest 100 finished orders; older ones need paging,
+  which is not built.
 - **`replay-check`** compares only what the engine has applied, in one consistent snapshot, so it
   can run against a live system. Commands still waiting are reported separately.
