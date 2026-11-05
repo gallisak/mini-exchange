@@ -1,6 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import Redis from 'ioredis';
 import request from 'supertest';
+import { WalletNotifier } from '../../src/notifications/wallet-notifier.service';
 import { balances, createApp, eventually, range, redisClient, resetState, settle, trade } from './harness';
 
 const OPENING = { USD: '100000.00', ABC: '1000.00000000', DEF: '1000.00000000', XYZ: '1000.00000000' };
@@ -71,23 +73,51 @@ describe('trade settlement', () => {
     expect((await balances(app, executed.buyerId)).USD).toBe('99979.00');
   });
 
-  it('announces the changed wallets of both sides once per trade', async () => {
+  it('announces the changed wallets of both sides on every delivery, so a retry repairs a lost one', async () => {
     const subscriber = redisClient();
     const announced: unknown[] = [];
     subscriber.on('message', (_channel: string, message: string) => announced.push(JSON.parse(message)));
     await subscriber.subscribe('wallets:updates');
     const executed = trade();
-
-    await settle(app, executed).expect(200);
-    await settle(app, executed).expect(200);
-
-    await eventually(async () => expect(announced).toHaveLength(2));
-    await new Promise((resolve) => setTimeout(resolve, 200));
-    await subscriber.quit();
-    expect(announced).toEqual([
+    const sides = [
       { ownerId: executed.buyerId, tradeId: executed.tradeId },
       { ownerId: executed.sellerId, tradeId: executed.tradeId },
-    ]);
+    ];
+
+    await settle(app, executed).expect(200);
+    await settle(app, executed).expect(200);
+
+    await eventually(async () => expect(announced).toHaveLength(4));
+    await subscriber.quit();
+    expect(announced).toEqual([...sides, ...sides]);
+  });
+
+  it('does not report a trade as settled while its wallets could not be announced', async () => {
+    const publisher = (app.get(WalletNotifier) as unknown as { redis: Redis }).redis;
+    const publish = publisher.publish.bind(publisher);
+    let failures = 0;
+    jest.spyOn(publisher, 'publish').mockImplementation(((channel: string, message: string) => {
+      if (failures < 1) {
+        failures += 1;
+        return Promise.reject(new Error('Connection is closed.'));
+      }
+      return publish(channel, message);
+    }) as never);
+    const subscriber = redisClient();
+    const announced: { ownerId: string }[] = [];
+    subscriber.on('message', (_channel: string, message: string) => announced.push(JSON.parse(message)));
+    await subscriber.subscribe('wallets:updates');
+    const executed = trade();
+
+    const first = await settle(app, executed);
+    const retry = await settle(app, executed);
+
+    await eventually(async () => expect(announced).toHaveLength(2));
+    await subscriber.quit();
+    expect(first.status).toBeGreaterThanOrEqual(500);
+    expect(retry.body).toEqual({ tradeId: executed.tradeId, status: 'duplicate' });
+    expect(announced.map((event) => event.ownerId)).toEqual([executed.buyerId, executed.sellerId]);
+    expect((await balances(app, executed.buyerId)).USD).toBe('99979.00');
   });
 
   it('rejects a trade id reused with different details', async () => {
