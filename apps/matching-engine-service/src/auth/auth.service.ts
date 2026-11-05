@@ -4,7 +4,7 @@ import { QueryFailedError, Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
-import { User, UserRole } from './entities/user.entity';
+import { User } from './entities/user.entity';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { requireEnv } from '../common/env';
@@ -22,19 +22,6 @@ const DUMMY_HASH = bcrypt.hashSync(randomUUID(), 10);
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 
-function adminEmails(): Set<string> {
-  return new Set(
-    (process.env.ADMIN_EMAILS ?? '')
-      .split(',')
-      .map((email) => email.trim().toLowerCase())
-      .filter((email) => email.length > 0),
-  );
-}
-
-function roleFor(email: string): UserRole {
-  return adminEmails().has(email.toLowerCase()) ? 'admin' : 'user';
-}
-
 @Injectable()
 export class AuthService {
   constructor(
@@ -49,7 +36,7 @@ export class AuthService {
     }
     const passwordHash = await bcrypt.hash(dto.password, 10);
     const user = await this.users
-      .save(this.users.create({ email: dto.email, passwordHash, role: roleFor(dto.email) }))
+      .save(this.users.create({ email: dto.email, passwordHash, role: 'user' }))
       .catch((error: unknown) => {
         if (
           error instanceof QueryFailedError &&
@@ -84,11 +71,10 @@ export class AuthService {
     if (!user) {
       throw new UnauthorizedException(INVALID_REFRESH);
     }
-    const role = roleFor(user.email);
-    const pair = this.signTokens({ ...user, role });
+    const pair = this.signTokens(user);
     const rotated = await this.users.update(
       { id: user.id, refreshTokenHash: tokenHash(refreshToken) },
-      { refreshTokenHash: tokenHash(pair.refreshToken), role },
+      { refreshTokenHash: tokenHash(pair.refreshToken) },
     );
     if (rotated.affected === 0) {
       await this.users.update({ id: user.id }, { refreshTokenHash: null });
@@ -102,18 +88,14 @@ export class AuthService {
   }
 
   private async issueTokens(user: User): Promise<TokenPair> {
-    const role = roleFor(user.email);
-    const pair = this.signTokens({ ...user, role });
-    await this.users.update(
-      { id: user.id },
-      { refreshTokenHash: tokenHash(pair.refreshToken), role },
-    );
+    const pair = this.signTokens(user);
+    await this.users.update({ id: user.id }, { refreshTokenHash: tokenHash(pair.refreshToken) });
     return pair;
   }
 
   private signTokens(user: User): TokenPair {
     const accessToken = this.jwt.sign(
-      { sub: user.id, email: user.email, role: user.role },
+      { sub: user.id, email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
       { secret: requireEnv('JWT_ACCESS_SECRET'), expiresIn: '15m' },
     );
     const refreshToken = this.jwt.sign(

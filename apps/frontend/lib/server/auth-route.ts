@@ -2,7 +2,12 @@ import { NextRequest, NextResponse } from 'next/server';
 import { TokenPair, claimsOf, storeTokens } from './session';
 import { upstream } from './upstream';
 
+const JSON_BODY = /^application\/json(\s*;|$)/i;
+
 export async function signIn(request: NextRequest, path: '/auth/login' | '/auth/register') {
+  if (!JSON_BODY.test(request.headers.get('content-type') ?? '')) {
+    return NextResponse.json({ message: 'Send the credentials as JSON' }, { status: 415 });
+  }
   const credentials = await request.json().catch(() => ({}));
   const result = await upstream(request, 'engine', path, {
     method: 'POST',

@@ -39,9 +39,11 @@ export function useOrders() {
     const onConnect = () => void load();
     socket.on('order', onOrder);
     socket.on('connect', onConnect);
+    socket.on('resync', onConnect);
     return () => {
       socket.off('order', onOrder);
       socket.off('connect', onConnect);
+      socket.off('resync', onConnect);
     };
   }, [socket, load]);
 

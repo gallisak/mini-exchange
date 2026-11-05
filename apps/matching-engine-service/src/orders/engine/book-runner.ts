@@ -55,6 +55,7 @@ export class BookRunner {
   private heartbeat?: NodeJS.Timeout;
   private state!: EngineState;
   private stuck?: StuckBook;
+  private reloadNeeded = false;
 
   constructor(
     readonly instrument: string,
@@ -117,7 +118,7 @@ export class BookRunner {
   }
 
   private announceSeq(): void {
-    if (!this.running) return;
+    if (!this.running || this.reloadNeeded || !this.options.leaseValid()) return;
     void this.options.publish?.({
       type: 'book_heartbeat',
       heartbeat: {
@@ -192,6 +193,10 @@ export class BookRunner {
     const { batchSize, blockMs, retryDelayMs } = this.options;
     while (this.running) {
       try {
+        if (this.reloadNeeded) {
+          await this.load();
+          this.reloadNeeded = false;
+        }
         const response = (await this.reader!.xread(
           'COUNT',
           batchSize,
@@ -213,12 +218,12 @@ export class BookRunner {
           setImmediate(() => this.options.onFenced(error));
           return;
         }
-        this.logger.error(`Batch failed, reloading state: ${(error as Error).message}`);
+        this.logger.error(
+          `${this.reloadNeeded ? 'Reload' : 'Batch'} failed, reloading state: ${(error as Error).message}`,
+        );
+        this.reloadNeeded = true;
         await this.failed(error as Error);
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        await this.load().catch((loadError: Error) =>
-          this.logger.error(`Reload failed: ${loadError.message}`),
-        );
       }
     }
   }

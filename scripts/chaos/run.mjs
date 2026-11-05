@@ -244,13 +244,14 @@ async function main() {
   await until(async () => (await http(`${ENGINE_URL}/health`)).status === 200, 120_000, 'the engine');
   await until(async () => (await http(`${SETTLEMENT_URL}/health`)).status === 200, 120_000, 'settlement');
   const run = Date.now();
-  admin = await register('chaos-admin@example.com').catch(async () => {
-    const { body } = await http(`${ENGINE_URL}/auth/login`, {
+  await register('chaos-admin@example.com').catch(() => undefined);
+  compose('exec', '-T', 'matching-engine-1', 'node', 'dist/tools/grant-admin.js', 'chaos-admin@example.com');
+  admin = (
+    await http(`${ENGINE_URL}/auth/login`, {
       method: 'POST',
       body: JSON.stringify({ email: 'chaos-admin@example.com', password: 'password123' }),
-    });
-    return body.accessToken;
-  });
+    })
+  ).body.accessToken;
   const tokens = await Promise.all(
     Array.from({ length: TRADERS }, (_, i) => register(`chaos-${run}-${i}@example.com`)),
   );

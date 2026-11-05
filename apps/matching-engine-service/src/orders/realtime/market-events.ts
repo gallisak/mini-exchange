@@ -45,7 +45,8 @@ export type MarketEvent =
   | { type: 'book_delta'; delta: BookDelta }
   | { type: 'book_heartbeat'; heartbeat: BookHeartbeat }
   | { type: 'trades'; trades: TradeEvent[] }
-  | { type: 'orders'; orders: OrderUpdate[] };
+  | { type: 'orders'; orders: OrderUpdate[] }
+  | { type: 'resync' };
 
 export interface WalletChanged {
   ownerId: string;

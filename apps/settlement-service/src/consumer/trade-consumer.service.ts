@@ -179,7 +179,7 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
     try {
       const trade = await parseTradeEvent(fields);
       tradeId = trade.tradeId;
-      result = await this.ledger.settleTrade(trade);
+      result = await this.ledger.settleAndAnnounce(trade);
     } catch (error) {
       if (error instanceof InvalidTradeEventError || error instanceof TradeConflictError) {
         await this.deadLetter(stream, id, fields, deliveries, error.message);

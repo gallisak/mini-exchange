@@ -55,8 +55,8 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
     clearInterval(this.renewTimer);
     await this.acquiring;
     for (const instrument of [...this.owned.keys()]) {
-      this.owned.delete(instrument);
       await this.engine.stopInstrument(instrument);
+      this.owned.delete(instrument);
       await this.lock
         .release(instrumentLockKey(instrument), this.ownerId)
         .catch((error: Error) =>

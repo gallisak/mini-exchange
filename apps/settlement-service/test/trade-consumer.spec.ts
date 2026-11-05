@@ -31,7 +31,7 @@ function consumer(settle: (trade: SettleTradeDto) => Promise<SettlementResult>) 
       calls.push({ command, args });
       return 1;
     };
-  const service = new TradeConsumerService({ settleTrade: settle } as unknown as LedgerService);
+  const service = new TradeConsumerService({ settleAndAnnounce: settle } as unknown as LedgerService);
   Object.assign(service as unknown as Record<string, unknown>, {
     client: { xack: record('xack'), xadd: record('xadd') },
   });

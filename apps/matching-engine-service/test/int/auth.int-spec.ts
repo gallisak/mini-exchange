@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793781500000-LowercaseEmails';
+import { setAdmin } from '../../src/tools/grant-admin';
 import { createApp, resetState } from './harness';
 
 const claims = (token: string) =>
@@ -111,6 +112,26 @@ describe('authentication sessions', () => {
     expect(claims(promoted.accessToken).role).toBe('admin');
     expect(claims(refreshed.accessToken).role).toBe('admin');
     expect(claims(demoted.accessToken).role).toBe('user');
+  });
+
+  it('grants and takes away the admin role through the operator tool', async () => {
+    await signUp('operator@example.com');
+    const dataSource = app.get(DataSource);
+    const role = async () =>
+      claims(
+        (
+          await http()
+            .post('/auth/login')
+            .send({ email: 'operator@example.com', password: 'password123' })
+            .expect(200)
+        ).body.accessToken,
+      ).role;
+
+    expect(await setAdmin(dataSource, ' Operator@Example.com ', true)).toBe(true);
+    expect(await role()).toBe('admin');
+    expect(await setAdmin(dataSource, 'operator@example.com', false)).toBe(true);
+    expect(await role()).toBe('user');
+    expect(await setAdmin(dataSource, 'nobody@example.com', true)).toBe(false);
   });
 
   it('lowercases stored emails that would otherwise no longer sign in, unless that would clash', async () => {

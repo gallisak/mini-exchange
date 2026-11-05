@@ -54,9 +54,11 @@ export function useTrades(instrument: string) {
     const onConnect = () => void load();
     socket.on('trade', onTrade);
     socket.on('connect', onConnect);
+    socket.on('resync', onConnect);
     return () => {
       socket.off('trade', onTrade);
       socket.off('connect', onConnect);
+      socket.off('resync', onConnect);
     };
   }, [socket, instrument, load]);
 

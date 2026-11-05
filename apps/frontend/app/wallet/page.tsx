@@ -45,9 +45,11 @@ function Wallet() {
     const onChange = () => void load();
     socket.on('wallet', onChange);
     socket.on('connect', onChange);
+    socket.on('resync', onChange);
     return () => {
       socket.off('wallet', onChange);
       socket.off('connect', onChange);
+      socket.off('resync', onChange);
     };
   }, [socket, load]);
 

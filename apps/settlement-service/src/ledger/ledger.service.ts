@@ -50,6 +50,12 @@ export class LedgerService {
     return result;
   }
 
+  async settleAndAnnounce(trade: SettleTradeDto): Promise<SettlementResult> {
+    const result = await this.record(trade);
+    await this.notifier.announce(trade.tradeId, [trade.buyerId, trade.sellerId]);
+    return result;
+  }
+
   private record(trade: SettleTradeDto): Promise<SettlementResult> {
     return this.dataSource.transaction(async (manager) => {
       const [transaction] = await manager

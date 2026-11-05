@@ -2,22 +2,21 @@ import { INestApplication } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import { randomUUID } from 'crypto';
 import request from 'supertest';
+import { DataSource } from 'typeorm';
+import { setAdmin } from '../../src/tools/grant-admin';
 import { createApp, eventually, listOrders, register, resetState, submit } from './harness';
 
 describe('operations endpoints', () => {
   describe('with every dependency up', () => {
     let app: INestApplication;
-    const adminEmails = process.env.ADMIN_EMAILS;
 
     beforeEach(async () => {
       await resetState();
-      process.env.ADMIN_EMAILS = 'ops@example.com';
       app = await createApp();
     });
 
     afterEach(async () => {
       await app.close();
-      process.env.ADMIN_EMAILS = adminEmails;
     });
 
     const http = () => request(app.getHttpServer());
@@ -46,12 +45,11 @@ describe('operations endpoints', () => {
 
     it('shows instrument ownership and backlog to admins only', async () => {
       const user = await register(app);
-      const admin = (
-        await http()
-          .post('/auth/register')
-          .send({ email: 'ops@example.com', password: 'password123' })
-          .expect(201)
-      ).body.accessToken as string;
+      const credentials = { email: 'ops@example.com', password: 'password123' };
+      await http().post('/auth/register').send(credentials).expect(201);
+      await setAdmin(app.get(DataSource), credentials.email, true);
+      const admin = (await http().post('/auth/login').send(credentials).expect(200)).body
+        .accessToken as string;
       await submit(app, user, { side: 'sell', price: '10.00', quantity: '1' }).expect(202);
       await eventually(async () => expect(await listOrders(app, user)).toHaveLength(1));
 

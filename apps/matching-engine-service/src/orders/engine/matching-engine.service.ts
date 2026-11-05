@@ -15,6 +15,7 @@ export interface InstrumentLease {
 @Injectable()
 export class MatchingEngineService implements OnModuleDestroy {
   private readonly runners = new Map<string, BookRunner>();
+  private readonly stopping = new Map<string, Promise<void>>();
 
   constructor(
     private readonly dataSource: DataSource,
@@ -54,9 +55,16 @@ export class MatchingEngineService implements OnModuleDestroy {
 
   async stopInstrument(instrument: string): Promise<void> {
     const runner = this.runners.get(instrument);
-    if (!runner) return;
+    if (!runner) {
+      await this.stopping.get(instrument);
+      return;
+    }
     this.runners.delete(instrument);
-    await runner.stop();
+    const stopped = runner.stop().finally(() => {
+      if (this.stopping.get(instrument) === stopped) this.stopping.delete(instrument);
+    });
+    this.stopping.set(instrument, stopped);
+    await stopped;
   }
 
   async onModuleDestroy(): Promise<void> {

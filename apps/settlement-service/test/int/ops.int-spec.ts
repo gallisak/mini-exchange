@@ -85,7 +85,7 @@ describe('settlement operations endpoints', () => {
 
   it('shows trades that keep failing to settle and how long the oldest has waited', async () => {
     const ledger = app.get(LedgerService);
-    jest.spyOn(ledger, 'settleTrade').mockRejectedValue(new Error('Connection terminated unexpectedly'));
+    jest.spyOn(ledger, 'settleAndAnnounce').mockRejectedValue(new Error('Connection terminated unexpectedly'));
     const redis = redisClient();
     await publishTrade(redis, trade());
     await redis.quit();

@@ -72,17 +72,34 @@ export class OrdersGateway
       next();
     });
 
-    this.subscriber = this.redis.createConnection();
-    this.subscriber.on('pmessage', (_pattern: string, _channel: string, message: string) =>
+    const subscriber = this.redis.createConnection();
+    this.subscriber = subscriber;
+    const subscribe = () =>
+      Promise.all([
+        subscriber.psubscribe(`${MARKET_CHANNEL_PREFIX}*`),
+        subscriber.subscribe(WALLET_CHANNEL),
+      ]);
+    let connectedBefore = false;
+    subscriber.on('ready', () => {
+      if (!connectedBefore) {
+        connectedBefore = true;
+        return;
+      }
+      subscribe().then(
+        () => {
+          this.logger.warn('Real-time subscription restored, telling clients to reload');
+          server.emit('resync');
+        },
+        (error: Error) => this.logger.error(`Could not resubscribe to real-time events: ${error.message}`),
+      );
+    });
+    subscriber.on('pmessage', (_pattern: string, _channel: string, message: string) =>
       this.fanOutMarket(message),
     );
-    this.subscriber.on('message', (channel: string, message: string) => {
+    subscriber.on('message', (channel: string, message: string) => {
       if (channel === WALLET_CHANNEL) this.fanOutWallet(message);
     });
-    Promise.all([
-      this.subscriber.psubscribe(`${MARKET_CHANNEL_PREFIX}*`),
-      this.subscriber.subscribe(WALLET_CHANNEL),
-    ]).catch((error: Error) =>
+    subscribe().catch((error: Error) =>
       this.logger.error(`Could not subscribe to real-time events: ${error.message}`),
     );
   }
@@ -120,7 +137,7 @@ export class OrdersGateway
       await this.addressRetryAfter(client),
     );
     if (retryAfterMs > 0) {
-      client.emit('rate_limited', { event: 'subscribe', retryAfterMs });
+      client.emit('rate_limited', { event: 'subscribe', instrument, retryAfterMs });
       return;
     }
     await client.join(bookRoom(instrument));
@@ -174,6 +191,9 @@ export class OrdersGateway
 
   private fanOutMarket(message: string): void {
     const event = parse<MarketEvent>(message);
+    if (event?.type === 'resync') {
+      this.server.emit('resync');
+    }
     if (event?.type === 'book_delta') {
       this.server.to(bookRoom(event.delta.instrument)).emit('book_delta', event.delta);
     }
