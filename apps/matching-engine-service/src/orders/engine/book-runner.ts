@@ -50,11 +50,21 @@ export class BookRunner {
     this.logger = new Logger(`BookRunner:${instrument}`);
   }
 
+  get fence(): bigint {
+    return this.options.fence;
+  }
+
   async start(): Promise<void> {
     await this.claimFence();
     await this.load();
-    this.reader = this.options.redis.createConnection();
-    this.readerId = (await this.reader.client('ID')) as number;
+    const reader = this.options.redis.createConnection();
+    try {
+      this.readerId = (await reader.client('ID')) as number;
+    } catch (error) {
+      await closeRedis(reader);
+      throw error;
+    }
+    this.reader = reader;
     this.running = true;
     this.loop = this.run();
     if (this.options.publish && this.options.heartbeatMs) {

@@ -28,7 +28,9 @@ export class MatchingEngineService implements OnModuleDestroy {
   }
 
   async startInstrument(instrument: string, lease: InstrumentLease): Promise<void> {
-    if (this.runners.has(instrument)) return;
+    const existing = this.runners.get(instrument);
+    if (existing?.fence === lease.fence) return;
+    if (existing) await this.stopInstrument(instrument);
     const runner = new BookRunner(instrument, {
       dataSource: this.dataSource,
       redis: this.redis,

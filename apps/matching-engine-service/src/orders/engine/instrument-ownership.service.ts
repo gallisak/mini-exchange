@@ -110,6 +110,11 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
           isValid: () => this.isLeaseValid(instrument, token),
           onFenced: (error) => void this.stepDown(instrument, token, error),
         });
+        if (this.owned.get(instrument)?.token !== token) {
+          await this.engine.stopInstrument(instrument);
+          this.logger.warn(`${this.ownerId} lost ${instrument} while loading its book`);
+          continue;
+        }
         this.logger.log(`${this.ownerId} owns ${instrument} with token ${token}`);
       } catch (error) {
         this.owned.delete(instrument);

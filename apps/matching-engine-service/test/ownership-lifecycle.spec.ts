@@ -1,6 +1,10 @@
 import { InstrumentOwnershipService } from '../src/orders/engine/instrument-ownership.service';
 import { RedisLockService } from '../src/locks/redis-lock.service';
-import { MatchingEngineService } from '../src/orders/engine/matching-engine.service';
+import {
+  InstrumentLease,
+  MatchingEngineService,
+} from '../src/orders/engine/matching-engine.service';
+import { FencedOutError } from '../src/orders/engine/fenced-out.error';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -79,6 +83,58 @@ describe('instrument ownership lifecycle', () => {
     expect(calls.started).toEqual(['ABC']);
     expect(calls.stopped).toEqual(['ABC']);
     expect(calls.released).toEqual(['lock:instrument:ABC']);
+  });
+
+  it('does not keep a book running after losing the lease while it was starting', async () => {
+    let holder: 'self' | 'other' | null = null;
+    let token = 0n;
+    let slowStart = true;
+    const lock = {
+      acquire: async (key: string) => {
+        if (!key.endsWith(':ABC') || holder !== null) return null;
+        holder = 'self';
+        return ++token;
+      },
+      renew: async (key: string) => !key.endsWith(':ABC') || holder === 'self',
+      release: async () => {
+        holder = null;
+        return true;
+      },
+      raiseFence: async () => undefined,
+    } as unknown as RedisLockService;
+    const runners = new Map<string, InstrumentLease>();
+    const engine = {
+      startInstrument: async (instrument: string, lease: InstrumentLease) => {
+        if (slowStart) {
+          holder = 'other';
+          await sleep(300);
+        }
+        if (runners.has(instrument)) return;
+        runners.set(instrument, lease);
+      },
+      stopInstrument: async (instrument: string) => {
+        runners.delete(instrument);
+      },
+    } as unknown as MatchingEngineService;
+    const service = new InstrumentOwnershipService(lock, engine);
+
+    await service.onApplicationBootstrap();
+    slowStart = false;
+    holder = null;
+    await sleep(200);
+    const stale = [...runners.values()].find((lease) => !lease.isValid());
+    if (stale) {
+      runners.delete('ABC');
+      stale.onFenced(new FencedOutError('ABC', stale.fence, null));
+      await sleep(200);
+    }
+    const owned = service.ownedInstruments();
+    const running = [...runners.keys()];
+    await service.onModuleDestroy();
+
+    expect(owned).toEqual(['ABC']);
+    expect(running).toEqual(['ABC']);
+    expect(stale).toBeUndefined();
   });
 
   it('starts even when Redis is unreachable at boot and keeps trying', async () => {

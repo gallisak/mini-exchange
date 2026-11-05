@@ -16,6 +16,7 @@ import {
   resetState,
   submit,
 } from './harness';
+import { asReference, crossedPairsBetweenOwners, referenceMatch } from '../reference-matcher';
 
 function seededRandom(seed: number) {
   let state = seed;
@@ -44,7 +45,7 @@ describe('concurrent order flow', () => {
     await app.close();
   });
 
-  it('ends in the same trades and book as a replay of the command stream, in arrival order', async () => {
+  it('ends in the same trades and book as a replay and as an independent price-time reference, in arrival order', async () => {
     const users = await Promise.all(range(5).map(() => register(app)));
     const random = seededRandom(42);
     const orders = range(200).map(() => ({
@@ -65,13 +66,15 @@ describe('concurrent order flow', () => {
       expect(own.some((order) => order.id === marker.body.orderId)).toBe(true);
     }, 15000);
 
+    const stream = await readCommandStream('ABC');
     const replay = applyCommands(
       'ABC',
       { bids: [], asks: [] },
       { lastCommandId: '0-0', orderSeq: 0n, tradeSeq: 0n, bookSeq: 0n },
-      await readCommandStream('ABC'),
+      stream,
       new Set(),
     );
+    const reference = referenceMatch(stream);
     const dataSource = app.get(DataSource);
     const trades = await dataSource
       .getRepository(TradeRecord)
@@ -89,6 +92,16 @@ describe('concurrent order flow', () => {
     expect(current.asks.map((o) => [o.id, o.remainingQuantity])).toEqual(
       replay.book.asks.map((o) => [o.id, o.remainingQuantity]),
     );
+
+    const actual = asReference(trades, current.bids, current.asks);
+    expect(actual.trades).toEqual(reference.trades);
+    expect(actual.bids.map((o) => [o.id, o.remaining])).toEqual(
+      reference.bids.map((o) => [o.id, o.remaining]),
+    );
+    expect(actual.asks.map((o) => [o.id, o.remaining])).toEqual(
+      reference.asks.map((o) => [o.id, o.remaining]),
+    );
+    expect(crossedPairsBetweenOwners(actual)).toEqual([]);
 
     const acceptedIds = [...responses, marker].map((response) => response.body.orderId);
     expect(new Set(acceptedIds).size).toBe(201);
