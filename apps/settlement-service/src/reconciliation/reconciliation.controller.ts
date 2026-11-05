@@ -13,8 +13,12 @@ export class ReconciliationController {
   constructor(private readonly reconciliation: ReconciliationService) {}
 
   @Get()
-  reconcile(@Query() query: ReconciliationQueryDto) {
-    const period = this.reconciliation.defaultPeriod(query.to ? new Date(query.to) : undefined);
-    return this.reconciliation.reconcile(query.from ? new Date(query.from) : period.from, period.to);
+  async reconcile(@Query() query: ReconciliationQueryDto) {
+    const to = query.to ? new Date(query.to) : undefined;
+    if (!query.from) return this.reconciliation.reconcileSinceCheckpoint(to);
+    return this.reconciliation.reconcile(
+      new Date(query.from),
+      (await this.reconciliation.defaultPeriod(to)).to,
+    );
   }
 }

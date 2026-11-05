@@ -1,11 +1,23 @@
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
-import { Body, Controller, HttpCode, HttpStatus, Post, Request, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiExcludeEndpoint, ApiTags } from '@nestjs/swagger';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  HttpStatus,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Request,
+  UseGuards,
+} from '@nestjs/common';
 import { RateLimit, RateLimitGuard } from '../rate-limit/rate-limit.guard';
 import { AuthService } from './auth.service';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { RefreshDto } from './dto/refresh.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
+import { InternalKeyGuard } from './guards/internal-key.guard';
 import { AuthenticatedUser } from './strategies/jwt.strategy';
 
 @ApiTags('auth')
@@ -39,6 +51,14 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   wsTicket(@Request() req: { user: AuthenticatedUser }) {
     return this.auth.wsTicket(req.user.userId, req.user.expiresAt);
+  }
+
+  @Get('admins/:id')
+  @ApiExcludeEndpoint()
+  @RateLimit('PUBLIC')
+  @UseGuards(InternalKeyGuard)
+  async admin(@Param('id', ParseUUIDPipe) id: string) {
+    return { admin: await this.auth.isAdmin(id) };
   }
 
   @Post('logout')

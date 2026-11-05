@@ -157,9 +157,10 @@ move again.
 **Reconciliation** checks that every ledger transaction balances, every balance equals its entries,
 every trade has the right four entries, and that the engine's trade count, quantity and
 `Σ price × quantity` per instrument equal the ledger's count, quantity and USD moved. It looks at
-one period, by default the 24 hours (`RECONCILIATION_WINDOW_HOURS`) that end a minute ago: the
-trades executed in it, the ledger transactions created in it, and the accounts they touched. Pass
-`from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
+one period: the trades executed in it, the ledger transactions created in it, and the accounts
+they touched. A run without `from` starts where the last matching run ended and stops a minute ago,
+so a trade that never got settled keeps showing up until it is fixed, while a clean history is not
+checked again. Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
 
 ```bash
 docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/reconciliation/reconcile.js
@@ -280,7 +281,7 @@ Redis Streams is the order log and Redis is the coordinator.
 | `GET /orders/book` with a token, raw orders | Public, aggregated levels with `seq`, no owners | Public depth, no data leak |
 | WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, and private `order` and `wallet` | Sequence numbers and resync |
 | `POST /auth/login` → 201 | 200, plus `/auth/refresh` and `/auth/logout` | Sessions |
-| WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token |
+| WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token. To roll out, start the engines with `WS_ACCEPT_ACCESS_TOKENS=true`, update the frontend (it falls back to the access token while the engine has no tickets), then drop the setting |
 | `GET /orders` returned every order | Every active order and the latest 100 finished ones | Bounded response |
 | Any password length | At most 72 bytes | bcrypt compares only 72 bytes |
 | Messages in Ukrainian | English | Language of the project |

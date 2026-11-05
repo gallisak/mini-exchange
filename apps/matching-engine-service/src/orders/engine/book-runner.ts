@@ -47,6 +47,10 @@ export function stuckKey(instrument: string): string {
   return `book:stuck:${instrument}`;
 }
 
+export function publishedKey(instrument: string): string {
+  return `book:published:${instrument}`;
+}
+
 export interface StuckBook {
   since: string;
   failures: number;
@@ -83,10 +87,6 @@ export class BookRunner {
     if (this.options.publish && this.options.heartbeatMs) {
       this.heartbeat = setInterval(() => this.announceSeq(), this.options.heartbeatMs);
     }
-    void this.publish({
-      type: 'resync',
-      resync: { instruments: [this.instrument], owners: [], allOwners: true },
-    });
   }
 
   async stop(): Promise<void> {
@@ -190,6 +190,27 @@ export class BookRunner {
     this.logger.log(
       `Loaded ${open.length} open orders, resuming after command ${this.state.lastCommandId}`,
     );
+    await this.announceUnpublished();
+  }
+
+  private async announceUnpublished(): Promise<void> {
+    const key = publishedKey(this.instrument);
+    const published = await this.options.redis.client.get(key).catch(() => null);
+    const bookSeq = this.state.bookSeq;
+    if (bookSeq === 0n) return;
+    if (published !== null && /^\d+$/.test(published) && BigInt(published) >= bookSeq) return;
+    this.logger.warn(`Changes up to book seq ${bookSeq} may not have been published, telling clients to reload`);
+    await this.publish({
+      type: 'resync',
+      resync: { instruments: [this.instrument], owners: [], allOwners: true },
+    });
+    await this.markPublished(bookSeq);
+  }
+
+  private async markPublished(bookSeq: bigint): Promise<void> {
+    await this.options.redis.client
+      .set(publishedKey(this.instrument), bookSeq.toString())
+      .catch(() => undefined);
   }
 
   private async run(): Promise<void> {
@@ -341,5 +362,6 @@ export class BookRunner {
       );
     }
     await Promise.all(updates);
+    if (result.state.bookSeq !== previousSeq) await this.markPublished(result.state.bookSeq);
   }
 }

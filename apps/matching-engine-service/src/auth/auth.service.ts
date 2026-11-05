@@ -21,7 +21,7 @@ const INVALID_REFRESH = 'Refresh token is invalid or was already used';
 const EMAIL_TAKEN = 'Email is already registered';
 const UNIQUE_VIOLATION = '23505';
 const DUMMY_HASH = bcrypt.hashSync(randomUUID(), 10);
-const ROTATION_RETRY_MS = 60_000;
+const ROTATION_RETRY_MS = 10 * 60_000;
 export const WS_AUDIENCE = 'ws';
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
@@ -35,7 +35,10 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto): Promise<TokenPair> {
-    const existing = await this.users.findOne({ where: { email: dto.email } });
+    const existing = await this.users
+      .createQueryBuilder('user')
+      .where('lower(user.email) = :email', { email: dto.email })
+      .getExists();
     if (existing) {
       throw new ConflictException(EMAIL_TAKEN);
     }
@@ -69,6 +72,11 @@ export class AuthService {
       throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
     return this.issueTokens(user);
+  }
+
+  async isAdmin(userId: string): Promise<boolean> {
+    const user = await this.users.findOne({ select: { id: true, role: true }, where: { id: userId } });
+    return user?.role === 'admin';
   }
 
   wsTicket(userId: string, until: number): { ticket: string } {
@@ -153,8 +161,9 @@ export class AuthService {
       lock: { mode: 'pessimistic_write' },
     });
     if (!successor || successor.usedAt || successor.revokedAt) return null;
-    const pair = this.signTokens(user, successor.id, successor.familyId);
-    await manager.update(RefreshSession, { id: successor.id }, { tokenHash: tokenHash(pair.refreshToken) });
+    const issuedAt = Math.floor(successor.createdAt.getTime() / 1000);
+    const pair = this.signTokens(user, successor.id, successor.familyId, issuedAt);
+    if (successor.tokenHash !== tokenHash(pair.refreshToken)) return null;
     return pair;
   }
 
@@ -168,23 +177,25 @@ export class AuthService {
     familyId: string,
     id: string = randomUUID(),
   ): Promise<TokenPair> {
-    const pair = this.signTokens(user, id, familyId);
+    const issuedAt = Math.floor(Date.now() / 1000);
+    const pair = this.signTokens(user, id, familyId, issuedAt);
     await manager.insert(RefreshSession, {
       id,
       userId: user.id,
       familyId,
       tokenHash: tokenHash(pair.refreshToken),
+      createdAt: new Date(issuedAt * 1000),
     });
     return pair;
   }
 
-  private signTokens(user: User, sessionId: string, familyId: string): TokenPair {
+  private signTokens(user: User, sessionId: string, familyId: string, issuedAt: number): TokenPair {
     const accessToken = this.jwt.sign(
       { sub: user.id, sid: familyId, email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
       { secret: requireEnv('JWT_ACCESS_SECRET'), expiresIn: '15m' },
     );
     const refreshToken = this.jwt.sign(
-      { sub: user.id, jti: sessionId },
+      { sub: user.id, jti: sessionId, iat: issuedAt },
       { secret: requireEnv('JWT_REFRESH_SECRET'), expiresIn: '7d' },
     );
     return { accessToken, refreshToken };

@@ -17,6 +17,7 @@ export interface InstrumentLease {
 export class MatchingEngineService implements OnModuleDestroy {
   private readonly runners = new Map<string, BookRunner>();
   private readonly stopping = new Map<string, Promise<void>>();
+  private readonly heartbeatMs = intEnv('BOOK_HEARTBEAT_MS', 2000, 0);
 
   constructor(
     private readonly dataSource: DataSource,
@@ -48,7 +49,7 @@ export class MatchingEngineService implements OnModuleDestroy {
       fence: lease.fence,
       leaseValid: lease.isValid,
       publish: (event) => this.market.publish(instrument, event),
-      heartbeatMs: intEnv('BOOK_HEARTBEAT_MS', 2000),
+      heartbeatMs: this.heartbeatMs,
       onFenced: (error) => {
         if (this.runners.get(instrument) === runner) this.runners.delete(instrument);
         void this.track(instrument, runner);

@@ -57,6 +57,9 @@ export class OrdersGateway
   private readonly expiries = new Map<string, NodeJS.Timeout>();
   private readonly snapshots = new Map<string, { windowStart: number; count: number }>();
   private readonly trust = proxyAddr.compile(trustedProxies());
+  private readonly snapshotLimit = intEnv('WS_SNAPSHOT_LIMIT', 10);
+  private readonly snapshotWindowMs = intEnv('WS_SNAPSHOT_WINDOW_MS', 10_000);
+  private readonly acceptAccessTokens = process.env.WS_ACCEPT_ACCESS_TOKENS === 'true';
 
   @WebSocketServer()
   server: Server;
@@ -174,8 +177,8 @@ export class OrdersGateway
   }
 
   private snapshotRetryAfter(socketId: string): number {
-    const limit = intEnv('WS_SNAPSHOT_LIMIT', 10);
-    const windowMs = intEnv('WS_SNAPSHOT_WINDOW_MS', 10_000);
+    const limit = this.snapshotLimit;
+    const windowMs = this.snapshotWindowMs;
     const now = Date.now();
     const usage = this.snapshots.get(socketId);
     if (!usage || now - usage.windowStart >= windowMs) {
@@ -188,6 +191,12 @@ export class OrdersGateway
 
   private identityFrom(token: unknown): Identity | null {
     if (typeof token !== 'string') return null;
+    return (
+      this.ticketIdentity(token) ?? (this.acceptAccessTokens ? this.accessTokenIdentity(token) : null)
+    );
+  }
+
+  private ticketIdentity(token: string): Identity | null {
     try {
       const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; until?: unknown }>(token, {
         secret: requireEnv('JWT_ACCESS_SECRET'),
@@ -196,6 +205,21 @@ export class OrdersGateway
       if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) return null;
       if (typeof payload.exp !== 'number' || typeof payload.until !== 'number') return null;
       return { userId: payload.sub, expiresAt: payload.until * 1000 };
+    } catch {
+      return null;
+    }
+  }
+
+  private accessTokenIdentity(token: string): Identity | null {
+    try {
+      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; aud?: unknown }>(token, {
+        secret: requireEnv('JWT_ACCESS_SECRET'),
+      });
+      if (payload.aud !== undefined || typeof payload.sub !== 'string' || !isUUID(payload.sub)) {
+        return null;
+      }
+      if (typeof payload.exp !== 'number') return null;
+      return { userId: payload.sub, expiresAt: payload.exp * 1000 };
     } catch {
       return null;
     }

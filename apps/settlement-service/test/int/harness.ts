@@ -33,7 +33,7 @@ export function redisClient(): Redis {
 export async function resetState(): Promise<void> {
   const dataSource = await new DataSource(buildDataSourceOptions()).initialize();
   await dataSource.query(
-    `TRUNCATE "ledger_entries", "ledger_transactions", "accounts", "settled_trades" RESTART IDENTITY CASCADE`,
+    `TRUNCATE "ledger_entries", "ledger_transactions", "accounts", "settled_trades", "reconciliation_checkpoints" RESTART IDENTITY CASCADE`,
   );
   await dataSource.destroy();
 

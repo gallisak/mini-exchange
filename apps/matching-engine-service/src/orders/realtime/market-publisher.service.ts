@@ -3,6 +3,7 @@ import { RedisService } from '../../redis/redis.service';
 import { MarketEvent, marketChannel } from './market-events';
 
 const RESYNC_RETRY_MS = 1000;
+const PUBLISH_TIMEOUT_MS = 1000;
 const RESYNC_CHANNEL = marketChannel('resync');
 
 @Injectable()
@@ -10,17 +11,19 @@ export class MarketPublisherService implements OnModuleDestroy {
   private readonly logger = new Logger(MarketPublisherService.name);
   private readonly lost = { instruments: new Set<string>(), owners: new Set<string>(), allOwners: false };
   private retry?: NodeJS.Timeout;
+  private destroyed = false;
 
   constructor(private readonly redis: RedisService) {}
 
   onModuleDestroy(): void {
+    this.destroyed = true;
     clearTimeout(this.retry);
     this.retry = undefined;
   }
 
   async publish(instrument: string, event: MarketEvent): Promise<void> {
     try {
-      await this.redis.client.publish(marketChannel(instrument), JSON.stringify(event));
+      await this.withTimeout(this.redis.client.publish(marketChannel(instrument), JSON.stringify(event)));
     } catch (error) {
       this.remember(instrument, event);
       this.logger.warn(
@@ -41,10 +44,27 @@ export class MarketPublisherService implements OnModuleDestroy {
     } else {
       this.lost.instruments.add(instrument);
     }
-    this.retry ??= setTimeout(() => {
+    if (this.destroyed || this.retry) return;
+    this.retry = setTimeout(() => {
       this.retry = undefined;
       void this.announceLost();
     }, RESYNC_RETRY_MS);
+    this.retry.unref?.();
+  }
+
+  private async withTimeout<T>(command: Promise<T>): Promise<T> {
+    let timer: NodeJS.Timeout | undefined;
+    const timeout = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`Redis did not answer within ${PUBLISH_TIMEOUT_MS} ms`)),
+        PUBLISH_TIMEOUT_MS,
+      );
+    });
+    try {
+      return await Promise.race([command, timeout]);
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   private async announceLost(): Promise<void> {
@@ -61,8 +81,8 @@ export class MarketPublisherService implements OnModuleDestroy {
     instruments.clear();
     owners.clear();
     this.lost.allOwners = false;
-    await this.redis.client
-      .publish(RESYNC_CHANNEL, JSON.stringify(event))
-      .catch(() => this.remember('', event));
+    await this.withTimeout(this.redis.client.publish(RESYNC_CHANNEL, JSON.stringify(event))).catch(() =>
+      this.remember('', event),
+    );
   }
 }

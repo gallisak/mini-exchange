@@ -5,7 +5,7 @@ export const ACCESS_COOKIE = 'mx_access';
 export const REFRESH_COOKIE = 'mx_refresh';
 const REFRESH_MAX_AGE = 7 * 24 * 60 * 60;
 export const REFRESH_REUSE_WINDOW_MS = 5_000;
-export const ROTATION_RETRY_MS = 60_000;
+export const ROTATION_RETRY_MS = 10 * 60_000;
 
 export interface TokenPair {
   accessToken: string;
@@ -15,6 +15,7 @@ export interface TokenPair {
 export interface SessionTokens {
   refreshToken: string;
   accessToken?: string;
+  client?: string;
 }
 
 export type Rotation =
@@ -77,7 +78,8 @@ export function isFresh(token: string | undefined): token is string {
 const refreshes = new Map<string, Promise<Rotation>>();
 const attempts = new Map<string, string>();
 
-const sessionKey = ({ refreshToken, accessToken }: SessionTokens) => `${refreshToken} ${accessToken ?? ''}`;
+const sessionKey = ({ refreshToken, accessToken, client }: SessionTokens) =>
+  JSON.stringify([refreshToken, accessToken ?? '', client ?? '']);
 
 export function refreshOnce(
   tokens: SessionTokens,
@@ -91,15 +93,14 @@ export function refreshOnce(
   const outcome = rotate(tokens.refreshToken, attempt).catch((): Rotation => ({ kind: 'unavailable' }));
   refreshes.set(key, outcome);
   void outcome.then((result) => {
-    if (result.kind === 'unavailable') {
-      refreshes.delete(key);
+    if (result.kind === 'invalid') attempts.delete(key);
+    else {
       setTimeout(() => {
         if (attempts.get(key) === attempt) attempts.delete(key);
       }, ROTATION_RETRY_MS).unref?.();
-      return;
     }
-    attempts.delete(key);
-    setTimeout(() => refreshes.delete(key), REFRESH_REUSE_WINDOW_MS).unref?.();
+    if (result.kind === 'unavailable') refreshes.delete(key);
+    else setTimeout(() => refreshes.delete(key), REFRESH_REUSE_WINDOW_MS).unref?.();
   });
   return outcome;
 }

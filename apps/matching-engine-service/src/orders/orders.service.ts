@@ -22,9 +22,6 @@ import { intEnv } from '../common/env';
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
 const ACTIVE_STATUSES: OrderStatus[] = ['open', 'partially_filled'];
 
-function historyLimit(): number {
-  return intEnv('ORDER_HISTORY_LIMIT', 100);
-}
 const IDEMPOTENCY_MISMATCH = 'Idempotency-Key was already used for a different order';
 
 function fingerprintOf(order: Order): string {
@@ -53,6 +50,8 @@ export interface CancelAccepted {
 
 @Injectable()
 export class OrdersService {
+  private readonly historyLimit = intEnv('ORDER_HISTORY_LIMIT', 100);
+
   constructor(
     @InjectRepository(Order) private readonly orders: Repository<Order>,
     private readonly commands: CommandStreamService,
@@ -135,7 +134,7 @@ export class OrdersService {
       this.orders.find({
         where: { ownerId, status: Not(In(ACTIVE_STATUSES)) },
         order: { createdAt: 'DESC' },
-        take: historyLimit(),
+        take: this.historyLimit,
       }),
     ]);
     return [...active, ...finished].sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime());

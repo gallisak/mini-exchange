@@ -1,6 +1,6 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -10,12 +10,25 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ApiError, api } from '@/lib/client/api';
-import { Attempt, attemptFor, isUnknownOutcome, unconfirmed } from '@/lib/client/order-attempt';
+import {
+  Attempt,
+  afterFailure,
+  attemptFor,
+  loadAttempt,
+  saveAttempt,
+} from '@/lib/client/order-attempt';
 import { cn } from '@/lib/utils';
 
 const PRICE = /^\d{1,16}(\.\d{1,2})?$/;
 const QUANTITY = /^\d{1,10}(\.\d{1,8})?$/;
 const positive = (value: string) => /[1-9]/.test(value);
+const sessionStore = () => {
+  try {
+    return window.sessionStorage;
+  } catch {
+    return null;
+  }
+};
 
 export function OrderForm({ instrument }: { instrument: string }) {
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
@@ -23,6 +36,16 @@ export function OrderForm({ instrument }: { instrument: string }) {
   const [quantity, setQuantity] = useState('');
   const [busy, setBusy] = useState(false);
   const [attempt, setAttempt] = useState<Attempt | null>(null);
+  const [restored, setRestored] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAttempt(loadAttempt(sessionStore(), instrument));
+    setRestored(instrument);
+  }, [instrument]);
+
+  useEffect(() => {
+    if (restored === instrument) saveAttempt(sessionStore(), instrument, attempt);
+  }, [attempt, restored, instrument]);
 
   const priceError =
     price && !(PRICE.test(price) && positive(price)) ? 'Up to 2 decimals, above zero' : null;
@@ -30,7 +53,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
     quantity && !(QUANTITY.test(quantity) && positive(quantity))
       ? 'Up to 8 decimals, above zero'
       : null;
-  const pending = attempt?.unconfirmed ? attempt.draft : null;
+  const pending = attempt?.unconfirmed && attempt.draft.instrument === instrument ? attempt.draft : null;
   const ready = pending || (price && quantity && !priceError && !quantityError);
   const describe = (order: Attempt['draft']) =>
     `${order.side === 'buy' ? 'Buy' : 'Sell'} ${order.quantity} ${order.instrument} @ ${order.price}`;
@@ -51,9 +74,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
       setAttempt(null);
       setQuantity('');
     } catch (failure) {
-      if (failure instanceof ApiError && isUnknownOutcome(failure.status)) {
-        setAttempt(unconfirmed(current));
-      }
+      setAttempt(afterFailure(current, failure instanceof ApiError ? failure.status : 0));
       toast.error((failure as Error).message);
     } finally {
       setBusy(false);

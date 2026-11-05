@@ -33,14 +33,15 @@ function isTotals(value: unknown): value is EngineInstrumentTotals {
 
 @Injectable()
 export class EngineClient {
+  private readonly timeoutMs = intEnv('ENGINE_TIMEOUT_MS', 30_000);
+
   async tradeTotals(from: Date, to: Date): Promise<EngineInstrumentTotals[]> {
-    const timeoutMs = intEnv('ENGINE_TIMEOUT_MS', 5000);
     const url = new URL('/trades/summary', process.env.ENGINE_URL ?? 'http://localhost:3001');
     url.searchParams.set('from', from.toISOString());
     url.searchParams.set('to', to.toISOString());
     const response = await fetch(url, {
       headers: { 'x-internal-key': process.env.ENGINE_INTERNAL_KEY ?? '' },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: AbortSignal.timeout(this.timeoutMs),
     });
     if (!response.ok) {
       throw new Error(`Engine answered ${response.status} for the trade summary`);

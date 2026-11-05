@@ -4,8 +4,10 @@ import { LEDGER_SCALE, PRICE_SCALE, QUANTITY_SCALE, fromUnits, toUnits } from '.
 import { CASH_ASSET } from '../ledger/postings';
 import { EngineClient, EngineInstrumentTotals } from './engine-client';
 import { intEnv } from '../common/env';
+import { ReconciliationCheckpoint } from './reconciliation-checkpoint.entity';
 
 const ISSUE_LIMIT = 100;
+const CHECKPOINT = 'default';
 
 export type ReconciliationStatus = 'ok' | 'mismatch' | 'incomplete';
 
@@ -62,16 +64,37 @@ const EMPTY_LEDGER_TOTALS: LedgerTradeTotals = {
 
 @Injectable()
 export class ReconciliationService {
+  private readonly lagMs = intEnv('RECONCILIATION_LAG_MS', 60_000, 0);
+
   constructor(
     private readonly dataSource: DataSource,
     private readonly engine: EngineClient,
   ) {}
 
-  defaultPeriod(to?: Date): { from: Date; to: Date } {
-    const lagMs = intEnv('RECONCILIATION_LAG_MS', 60_000, 0);
-    const windowMs = intEnv('RECONCILIATION_WINDOW_HOURS', 24) * 3_600_000;
-    const end = to ?? new Date(Date.now() - lagMs);
-    return { from: new Date(end.getTime() - windowMs), to: end };
+  async defaultPeriod(to?: Date): Promise<{ from: Date; to: Date }> {
+    const end = to ?? new Date(Date.now() - this.lagMs);
+    const checkpoint = await this.dataSource
+      .getRepository(ReconciliationCheckpoint)
+      .findOneBy({ name: CHECKPOINT });
+    const from =
+      checkpoint && checkpoint.reconciledUntil.getTime() < end.getTime()
+        ? checkpoint.reconciledUntil
+        : new Date(0);
+    return { from, to: end };
+  }
+
+  async reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
+    const period = await this.defaultPeriod(to);
+    const report = await this.reconcile(period.from, period.to);
+    if (report.status === 'ok') {
+      await this.dataSource.query(
+        `INSERT INTO "reconciliation_checkpoints" ("name", "reconciledUntil") VALUES ($1, $2)
+         ON CONFLICT ("name") DO UPDATE
+           SET "reconciledUntil" = GREATEST("reconciliation_checkpoints"."reconciledUntil", EXCLUDED."reconciledUntil")`,
+        [CHECKPOINT, period.to],
+      );
+    }
+    return report;
   }
 
   async reconcile(from: Date, to: Date): Promise<ReconciliationReport> {

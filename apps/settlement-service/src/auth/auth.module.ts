@@ -1,12 +1,12 @@
 import { Global, Module } from '@nestjs/common';
 import { PassportModule } from '@nestjs/passport';
 import { JwtStrategy } from './jwt.strategy';
-import { RoleChanges } from './role-changes.service';
+import { AdminDirectory } from './admin-directory.service';
 
 @Global()
 @Module({
   imports: [PassportModule],
-  providers: [JwtStrategy, RoleChanges],
-  exports: [RoleChanges],
+  providers: [JwtStrategy, AdminDirectory],
+  exports: [AdminDirectory],
 })
 export class AuthModule {}

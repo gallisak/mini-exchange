@@ -1,27 +1,32 @@
 import 'reflect-metadata';
-import Redis from 'ioredis';
 import { parseArgs } from 'util';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../database/data-source';
 import { User } from '../auth/entities/user.entity';
-import { intEnv } from '../common/env';
-
-const ROLE_CHANGE_MEMORY_MS = 60 * 60 * 1000;
-
-export function roleChangedKey(userId: string): string {
-  return `auth:role-changed:${userId}`;
-}
 
 export async function setAdmin(
   dataSource: DataSource,
   email: string,
   admin: boolean,
-  redis?: Redis,
 ): Promise<boolean> {
   const users = dataSource.getRepository(User);
-  const user = await users.findOneBy({ email: email.trim().toLowerCase() });
+  const wanted = email.trim();
+  let user = await users.findOneBy({ email: wanted });
+  if (!user) {
+    const candidates = await users
+      .createQueryBuilder('user')
+      .where('lower(user.email) = lower(:email)', { email: wanted })
+      .getMany();
+    if (candidates.length > 1) {
+      throw new Error(
+        `${wanted} matches more than one account when case is ignored: ${candidates
+          .map((candidate) => candidate.email)
+          .join(', ')}. Give the email exactly as stored`,
+      );
+    }
+    [user] = candidates;
+  }
   if (!user) return false;
-  await redis?.set(roleChangedKey(user.id), String(Date.now()), 'PX', ROLE_CHANGE_MEMORY_MS);
   await users.update({ id: user.id }, { role: admin ? 'admin' : 'user' });
   return true;
 }
@@ -37,13 +42,8 @@ async function main(): Promise<number> {
     return 2;
   }
   const dataSource = await new DataSource(buildDataSourceOptions()).initialize();
-  const redis = new Redis({
-    host: process.env.REDIS_HOST ?? 'localhost',
-    port: intEnv('REDIS_PORT', 6379),
-    maxRetriesPerRequest: 1,
-  });
   try {
-    if (!(await setAdmin(dataSource, email, !values.revoke, redis))) {
+    if (!(await setAdmin(dataSource, email, !values.revoke))) {
       process.stderr.write(`No account is registered with ${email}\n`);
       return 1;
     }
@@ -54,7 +54,6 @@ async function main(): Promise<number> {
     );
     return 0;
   } finally {
-    redis.disconnect();
     await dataSource.destroy();
   }
 }

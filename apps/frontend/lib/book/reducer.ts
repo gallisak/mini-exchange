@@ -32,6 +32,7 @@ export interface BookState {
   lastHeardAt: number;
   silenceLimitMs: number;
   resyncs: number;
+  olderSnapshots: number;
 }
 
 export type BookAction =
@@ -63,6 +64,7 @@ export function initialBook(instrument: string, at = 0): BookState {
     lastHeardAt: at,
     silenceLimitMs: SILENCE_LIMIT_MS,
     resyncs: 0,
+    olderSnapshots: 0,
   };
 }
 
@@ -141,7 +143,10 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
 
     case 'snapshot': {
       if (action.snapshot.instrument !== state.instrument) return state;
-      if (state.seq !== null && action.snapshot.seq < state.seq) return state;
+      if (state.seq !== null && action.snapshot.seq < state.seq) {
+        if (!state.awaitingSnapshot) return state;
+        if (state.olderSnapshots === 0) return { ...state, olderSnapshots: 1 };
+      }
       let next: BookState = {
         ...state,
         status: 'live',
@@ -152,6 +157,7 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
         awaitingSnapshot: false,
         requestedAt: null,
         lastHeardAt: action.at,
+        olderSnapshots: 0,
       };
       const buffered = [...state.pending]
         .filter((delta) => delta.seq > action.snapshot.seq)

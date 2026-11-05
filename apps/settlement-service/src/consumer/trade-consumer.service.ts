@@ -106,7 +106,6 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
     let failure: Error | undefined;
     for (const [stream, entries] of response ?? []) {
       for (const [id, raw] of entries) {
-        if (!this.running) return;
         await this.handle(stream, id, fieldsOf(raw), 1).catch((error: Error) => {
           failure ??= error;
           this.logger.warn(error.message);
