@@ -166,7 +166,7 @@ docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist
 | Table | Index | Used by |
 |---|---|---|
 | `orders` | primary key `id` | cancel, which looks an order up by id and owner |
-| `orders` | `(ownerId, createdAt)`, `(ownerId, status)` | a user's own orders |
+| `orders` | `(ownerId, createdAt)`, and the same where active | a user's finished and active orders |
 | `orders` | `(instrument, seq)` where open | loading a book, snapshots |
 | `trades` | unique `(instrument, seq)`, `(executedAt)` | trade feed, engine totals |
 | `outbox` | `(id)` where unpublished | the relay |
@@ -186,7 +186,7 @@ it. The `proof/*` branches keep those commits with their CI runs.
 | 2 | **Concurrent orders on one book.** Matching ran in request handlers on a shared in-memory book: orders arriving together were lost or double-filled, cancelled orders came back, a cancel naming another instrument left the order matchable, filled orders stayed open in the database, the book was lost on restart, and a retried request created a second order. | `starter-bugs.int-spec.ts`: one test per symptom, all failing before the fix | Command stream per instrument with a single writer, batch commits, required `Idempotency-Key` | `proof/command-log` |
 | 3 | **IDOR on cancel.** `DELETE /orders/:id` cancelled any user's order. | "does not let a user cancel someone else's order" | Only the owner can cancel; another user's order gives 404 | `proof/command-log` |
 | 4 | **The lock.** It was not wired into order processing, had no TTL, so a killed owner held its instrument forever, released with a non-atomic `GET` then `DEL`, and every replica got the same `INSTANCE_ID`. | `failover.int-spec.ts`, `ownership-identity.spec.ts` | Lease with TTL and renewal in Lua, per-process identity, shutdown hooks, fencing token | `proof/ownership` |
-| 5 | **Silent stale client.** Book messages had no sequence number and `broadcastDepth` was never called, so a subscriber never saw updates and could not tell. | `realtime.int-spec.ts` | A snapshot and numbered deltas plus a heartbeat with the current `seq`. The client marks the book `stale` on a gap, a heartbeat that differs or silence, and fetches a new snapshot; the page shows `live`, `reconnecting` or `stale` | `proof/realtime` |
+| 5 | **Silent stale client.** Book messages had no sequence number and `broadcastDepth` was never called, so a subscriber never saw updates and could not tell. | `realtime.int-spec.ts` | A snapshot and numbered deltas plus a heartbeat with the current `seq`. The client marks the book `stale` on a gap, a heartbeat ahead of it or silence, and fetches a new snapshot; the page shows `live`, `reconnecting` or `stale` | `proof/realtime` |
 | 6 | **Floating-point money.** `0.001` became zero and large values lost digits. | `matcher-precision.spec.ts`, `order-validation.spec.ts` | Decimal strings in the API, BigInt fixed-point matching | `proof/matcher-core` |
 | 7 | **Counterparty leak.** `POST /orders` returned trades with both user ids. | "returns only the order id and status" | Returns `{orderId, status}` | `proof/matcher-core` |
 | 8 | **Did not start cleanly.** A lint error broke the frontend build, `dist/main` was missing, an entity column had no type, and `synchronize: true` fails when two engines start together. | Compose smoke in CI | Fixes plus migrations run by a one-off `migrate` service | `proof/startup` |

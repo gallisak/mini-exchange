@@ -25,6 +25,7 @@ import {
   WalletChanged,
 } from '../realtime/market-events';
 
+const SUBSCRIBE_RETRY_MS = 1000;
 const bookRoom = (instrument: string) => `book:${instrument}`;
 const userRoom = (userId: string) => `user:${userId}`;
 
@@ -47,6 +48,8 @@ export class OrdersGateway
 {
   private readonly logger = new Logger(OrdersGateway.name);
   private subscriber?: Redis;
+  private subscribeRetry?: NodeJS.Timeout;
+  private closing = false;
   private readonly expiries = new Map<string, NodeJS.Timeout>();
   private readonly snapshots = new Map<string, { windowStart: number; count: number }>();
   private readonly trust = proxyAddr.compile(trustedProxies());
@@ -72,39 +75,40 @@ export class OrdersGateway
       next();
     });
 
-    const subscriber = this.redis.createConnection();
+    const subscriber = this.redis.createConnection({ autoResubscribe: false });
     this.subscriber = subscriber;
-    const subscribe = () =>
+    let subscribedBefore = false;
+    const subscribe = () => {
+      clearTimeout(this.subscribeRetry);
       Promise.all([
         subscriber.psubscribe(`${MARKET_CHANNEL_PREFIX}*`),
         subscriber.subscribe(WALLET_CHANNEL),
-      ]);
-    let connectedBefore = false;
-    subscriber.on('ready', () => {
-      if (!connectedBefore) {
-        connectedBefore = true;
-        return;
-      }
-      subscribe().then(
+      ]).then(
         () => {
-          this.logger.warn('Real-time subscription restored, telling clients to reload');
-          server.emit('resync');
+          if (subscribedBefore) {
+            this.logger.warn('Real-time subscription restored, telling clients to reload');
+            server.emit('resync');
+          }
+          subscribedBefore = true;
         },
-        (error: Error) => this.logger.error(`Could not resubscribe to real-time events: ${error.message}`),
+        (error: Error) => {
+          this.logger.error(`Could not subscribe to real-time events, retrying: ${error.message}`);
+          if (!this.closing) this.subscribeRetry = setTimeout(subscribe, SUBSCRIBE_RETRY_MS);
+        },
       );
-    });
+    };
+    subscriber.on('ready', subscribe);
     subscriber.on('pmessage', (_pattern: string, _channel: string, message: string) =>
       this.fanOutMarket(message),
     );
     subscriber.on('message', (channel: string, message: string) => {
       if (channel === WALLET_CHANNEL) this.fanOutWallet(message);
     });
-    subscribe().catch((error: Error) =>
-      this.logger.error(`Could not subscribe to real-time events: ${error.message}`),
-    );
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.closing = true;
+    clearTimeout(this.subscribeRetry);
     this.expiries.forEach((timer) => clearTimeout(timer));
     this.expiries.clear();
     await closeRedis(this.subscriber);
@@ -192,7 +196,11 @@ export class OrdersGateway
   private fanOutMarket(message: string): void {
     const event = parse<MarketEvent>(message);
     if (event?.type === 'resync') {
-      this.server.emit('resync');
+      const rooms = [
+        ...event.resync.instruments.map(bookRoom),
+        ...event.resync.owners.map(userRoom),
+      ];
+      if (rooms.length > 0) this.server.to(rooms).emit('resync');
     }
     if (event?.type === 'book_delta') {
       this.server.to(bookRoom(event.delta.instrument)).emit('book_delta', event.delta);

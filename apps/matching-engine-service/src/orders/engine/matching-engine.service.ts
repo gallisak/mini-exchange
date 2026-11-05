@@ -32,6 +32,7 @@ export class MatchingEngineService implements OnModuleDestroy {
     const existing = this.runners.get(instrument);
     if (existing?.fence === lease.fence) return;
     if (existing) await this.stopInstrument(instrument);
+    await this.stopping.get(instrument);
     const runner = new BookRunner(instrument, {
       dataSource: this.dataSource,
       redis: this.redis,
@@ -45,7 +46,7 @@ export class MatchingEngineService implements OnModuleDestroy {
       heartbeatMs: Number(process.env.BOOK_HEARTBEAT_MS ?? 2000),
       onFenced: (error) => {
         if (this.runners.get(instrument) === runner) this.runners.delete(instrument);
-        void runner.stop();
+        void this.track(instrument, runner);
         lease.onFenced(error);
       },
     });
@@ -60,14 +61,22 @@ export class MatchingEngineService implements OnModuleDestroy {
       return;
     }
     this.runners.delete(instrument);
-    const stopped = runner.stop().finally(() => {
-      if (this.stopping.get(instrument) === stopped) this.stopping.delete(instrument);
-    });
+    await this.track(instrument, runner);
+  }
+
+  private track(instrument: string, runner: BookRunner): Promise<void> {
+    const previous = this.stopping.get(instrument);
+    const stopped: Promise<void> = Promise.all([previous, runner.stop()])
+      .then(() => undefined)
+      .finally(() => {
+        if (this.stopping.get(instrument) === stopped) this.stopping.delete(instrument);
+      });
     this.stopping.set(instrument, stopped);
-    await stopped;
+    return stopped;
   }
 
   async onModuleDestroy(): Promise<void> {
     await Promise.all([...this.runners.keys()].map((instrument) => this.stopInstrument(instrument)));
+    await Promise.all([...this.stopping.values()]);
   }
 }

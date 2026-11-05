@@ -3,6 +3,7 @@ import Redis from 'ioredis';
 import { INSTRUMENTS } from '../common/instruments';
 import { LedgerService } from '../ledger/ledger.service';
 import { TradeConflictError } from '../ledger/trade-conflict.error';
+import { SettleTradeDto } from '../trades/dto/settle-trade.dto';
 import { ConsumerOptions, consumerOptionsFromEnv } from './consumer-options';
 import {
   InvalidTradeEventError,
@@ -106,16 +107,22 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
       ...this.streams,
       ...this.streams.map(() => '>'),
     )) as [stream: string, entries: StreamEntry[]][] | null;
+    let failure: Error | undefined;
     for (const [stream, entries] of response ?? []) {
       for (const [id, raw] of entries) {
         if (!this.running) return;
-        await this.handle(stream, id, fieldsOf(raw), 1);
+        await this.handle(stream, id, fieldsOf(raw), 1).catch((error: Error) => {
+          failure ??= error;
+          this.logger.warn(error.message);
+        });
       }
     }
+    if (failure) throw failure;
   }
 
   private async reclaim(): Promise<void> {
     const { group, consumer, retryIdleMs, batchSize } = this.options;
+    let failure: Error | undefined;
     for (const stream of this.streams) {
       const pending = (await this.client!.xpending(
         stream,
@@ -133,11 +140,16 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
           | null
         )[];
         for (const entry of claimed) {
-          if (entry) await this.handle(stream, entry[0], fieldsOf(entry[1]), deliveries + 1);
+          if (!entry) continue;
+          await this.handle(stream, entry[0], fieldsOf(entry[1]), deliveries + 1).catch((error: Error) => {
+            failure ??= error;
+            this.logger.warn(error.message);
+          });
         }
       }
       await this.forgetIdleConsumers(stream);
     }
+    if (failure) throw failure;
   }
 
   private async forgetIdleConsumers(stream: string): Promise<void> {
@@ -174,12 +186,11 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
     fields: Record<string, string>,
     deliveries: number,
   ): Promise<void> {
-    let tradeId: string;
+    let trade: SettleTradeDto;
     let result: string;
     try {
-      const trade = await parseTradeEvent(fields);
-      tradeId = trade.tradeId;
-      result = await this.ledger.settleAndAnnounce(trade);
+      trade = await parseTradeEvent(fields);
+      result = await this.ledger.settle(trade);
     } catch (error) {
       if (error instanceof InvalidTradeEventError || error instanceof TradeConflictError) {
         await this.deadLetter(stream, id, fields, deliveries, error.message);
@@ -188,9 +199,15 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
       tradeEvents.inc({ result: 'failed' });
       throw new SettlementFailedError(stream, id, error as Error);
     }
-    await this.client!.xack(stream, this.options.group, id);
     tradeEvents.inc({ result });
-    this.logger.log(`Trade ${tradeId} ${result} from ${stream} ${id}`);
+    try {
+      await this.ledger.announce(trade);
+    } catch (error) {
+      tradeEvents.inc({ result: 'announce_failed' });
+      throw new SettlementFailedError(stream, id, error as Error);
+    }
+    await this.client!.xack(stream, this.options.group, id);
+    this.logger.log(`Trade ${trade.tradeId} ${result} from ${stream} ${id}`);
   }
 
   private async deadLetter(
