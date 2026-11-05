@@ -51,12 +51,12 @@ export function useTrades(instrument: string) {
       setTrades((current) => mergeTrades(current ?? [], [trade], KEEP));
       if (skipped) void load();
     };
-    const onReconnect = () => void load();
+    const onConnect = () => void load();
     socket.on('trade', onTrade);
-    socket.io.on('reconnect', onReconnect);
+    socket.on('connect', onConnect);
     return () => {
       socket.off('trade', onTrade);
-      socket.io.off('reconnect', onReconnect);
+      socket.off('connect', onConnect);
     };
   }, [socket, instrument, load]);
 

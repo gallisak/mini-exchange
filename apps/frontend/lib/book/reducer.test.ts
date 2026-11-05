@@ -150,6 +150,19 @@ describe('order book resync', () => {
     expect(recent.status).toBe('live');
   });
 
+  it('waits for three missed heartbeats when the engine announces a slower heartbeat', () => {
+    const slow = bookReducer(live(5), { type: 'heartbeat', seq: 5, intervalMs: 5_000, at: 0 });
+
+    expect(bookReducer(slow, { type: 'tick', at: 14_000 }).status).toBe('live');
+    expect(bookReducer(slow, { type: 'tick', at: 15_001 }).status).toBe('stale');
+  });
+
+  it('never waits less than the default silence limit', () => {
+    const fast = bookReducer(live(5), { type: 'heartbeat', seq: 5, intervalMs: 500, at: 0 });
+
+    expect(bookReducer(fast, { type: 'tick', at: SILENCE_LIMIT_MS - 1 }).status).toBe('live');
+  });
+
   it('asks again when a requested snapshot never arrives, even while deltas keep coming', () => {
     let state = bookReducer(live(5), { type: 'delta', delta: delta(7, [ask('1.00', '9')]), at: 1 });
     state = bookReducer(state, { type: 'snapshotRequested', at: 2 });
@@ -162,6 +175,19 @@ describe('order book resync', () => {
     state = bookReducer(state, { type: 'tick', at: 2 + SNAPSHOT_TIMEOUT_MS + 1 });
     expect(state.status).toBe('stale');
     expect(needsSnapshot(state)).toBe(true);
+  });
+
+  it('waits for a rate-limited snapshot request to be retried before giving up on it', () => {
+    let state = bookReducer(live(5), { type: 'delta', delta: delta(7, [ask('1.00', '9')]), at: 1 });
+    state = bookReducer(state, { type: 'snapshotRequested', at: 0 });
+    state = bookReducer(state, { type: 'snapshotDelayed', retryAfterMs: 8_000, at: 100 });
+
+    expect(needsSnapshot(bookReducer(state, { type: 'tick', at: 8_100 + SNAPSHOT_TIMEOUT_MS - 1 }))).toBe(
+      false,
+    );
+    expect(needsSnapshot(bookReducer(state, { type: 'tick', at: 8_100 + SNAPSHOT_TIMEOUT_MS + 1 }))).toBe(
+      true,
+    );
   });
 
   it('asks again when the snapshot after connecting never arrives', () => {

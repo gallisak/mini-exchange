@@ -9,6 +9,7 @@ import { Input } from '@/components/ui/input';
 import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { api } from '@/lib/client/api';
+import { Attempt, attemptFor } from '@/lib/client/order-attempt';
 import { cn } from '@/lib/utils';
 
 const PRICE = /^\d{1,16}(\.\d{1,2})?$/;
@@ -20,7 +21,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
   const [price, setPrice] = useState('');
   const [quantity, setQuantity] = useState('');
   const [busy, setBusy] = useState(false);
-  const [attemptKey, setAttemptKey] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState<Attempt | null>(null);
 
   const priceError =
     price && !(PRICE.test(price) && positive(price)) ? 'Up to 2 decimals, above zero' : null;
@@ -33,17 +34,17 @@ export function OrderForm({ instrument }: { instrument: string }) {
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (!ready) return;
-    const key = attemptKey ?? crypto.randomUUID();
-    setAttemptKey(key);
+    const current = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
+    setAttempt(current);
     setBusy(true);
     try {
       await api('/api/orders', {
         method: 'POST',
-        headers: { 'idempotency-key': key },
+        headers: { 'idempotency-key': current.key },
         body: JSON.stringify({ instrument, side, price, quantity }),
       });
       toast.success(`${side === 'buy' ? 'Buy' : 'Sell'} ${quantity} ${instrument} @ ${price} accepted`);
-      setAttemptKey(null);
+      setAttempt(null);
       setQuantity('');
     } catch (failure) {
       toast.error((failure as Error).message);
@@ -53,7 +54,6 @@ export function OrderForm({ instrument }: { instrument: string }) {
   }
 
   const edit = (setter: (value: string) => void) => (event: React.ChangeEvent<HTMLInputElement>) => {
-    setAttemptKey(null);
     setter(event.target.value.trim());
   };
 
@@ -67,10 +67,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
         <form onSubmit={onSubmit} className="space-y-4">
           <Tabs
             value={side}
-            onValueChange={(value) => {
-              setAttemptKey(null);
-              setSide(value as 'buy' | 'sell');
-            }}
+            onValueChange={(value) => setSide(value as 'buy' | 'sell')}
           >
             <TabsList className="grid w-full grid-cols-2">
               <TabsTrigger value="buy" className="data-[state=active]:text-buy">

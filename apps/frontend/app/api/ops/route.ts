@@ -8,22 +8,11 @@ const part = ({ status, body }: UpstreamResult) =>
 
 export function GET(request: NextRequest) {
   return withSession(request, async (token) => {
-    const [engine, settlement, reconciliation] = await Promise.all([
+    const [engine, settlement] = await Promise.all([
       upstream(request, 'engine', '/ops/status', {}, token),
       upstream(request, 'settlement', '/ops/status', {}, token),
-      upstream(request, 'settlement', '/admin/reconciliation', {}, token),
     ]);
-    const denied = [engine, settlement, reconciliation].find(
-      (result) => result.status === 401 || result.status === 403,
-    );
-    if (denied) return denied;
-    return {
-      status: 200,
-      body: {
-        engine: part(engine),
-        settlement: part(settlement),
-        reconciliation: part(reconciliation),
-      },
-    };
+    if (engine.status === 401 || engine.status === 403) return engine;
+    return { status: 200, body: { engine: part(engine), settlement: part(settlement) } };
   });
 }

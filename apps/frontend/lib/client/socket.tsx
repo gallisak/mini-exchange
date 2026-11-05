@@ -3,22 +3,10 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { Socket, io } from 'socket.io-client';
 import { UNAUTHORIZED_EVENT } from './api';
+import { waitForToken } from './ws-token';
 import { useSession } from './session';
 
 const SocketContext = createContext<Socket | null>(null);
-
-async function handshakeToken(): Promise<string | null> {
-  for (let attempt = 0; attempt < 3; attempt += 1) {
-    const response = await fetch('/api/ws-token', { cache: 'no-store' }).catch(() => null);
-    if (response?.status === 401) {
-      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
-      return null;
-    }
-    if (response?.ok) return ((await response.json()) as { token: string | null }).token;
-    await new Promise((resolve) => setTimeout(resolve, 1_000 * (attempt + 1)));
-  }
-  return null;
-}
 
 export function SocketProvider({ children }: { children: React.ReactNode }) {
   const { user, loading } = useSession();
@@ -28,11 +16,19 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (loading) return;
     const signedIn = Boolean(userId);
+    let closed = false;
     const connection = io(process.env.NEXT_PUBLIC_WS_URL ?? 'ws://localhost:3001', {
       transports: ['websocket'],
       auth: (deliver) => {
         if (!signedIn) return deliver({});
-        void handshakeToken().then((token) => deliver(token ? { token } : {}));
+        void waitForToken({
+          fetchToken: () => fetch('/api/ws-token', { cache: 'no-store' }),
+          sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
+          cancelled: () => closed,
+        }).then((outcome) => {
+          if (outcome.kind === 'token') return deliver({ token: outcome.token });
+          if (outcome.kind === 'signedOut') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+        });
       },
     });
     let retry: ReturnType<typeof setTimeout> | undefined;
@@ -46,6 +42,7 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
     });
     setSocket(connection);
     return () => {
+      closed = true;
       clearTimeout(retry);
       connection.removeAllListeners();
       connection.disconnect();

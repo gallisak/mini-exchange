@@ -16,6 +16,8 @@ import {
 import { ErrorState, LoadingRows } from '@/components/states';
 import { RequireSession } from '@/components/require-session';
 import { api } from '@/lib/client/api';
+import { formatTime } from '@/lib/client/format';
+import { RECONCILE_REFRESH_MS, STATUS_REFRESH_MS, startOpsPolling } from '@/lib/client/ops-polling';
 
 interface Part<T> {
   ok: boolean;
@@ -35,13 +37,22 @@ interface EngineStatus {
     bookSeq: number;
     commandStreamLength: number;
     commandsBehind: number;
+    stuck: { since: string; failures: number; error: string } | null;
   }[];
 }
 
 interface SettlementStatus {
   group: string;
   deadLetters: number;
-  streams: { stream: string; length: number; pending: number; lag: number | null; consumers: number }[];
+  streams: {
+    stream: string;
+    length: number;
+    pending: number;
+    lag: number | null;
+    consumers: number;
+    retrying: number;
+    oldestPendingMs: number | null;
+  }[];
 }
 
 interface Reconciliation {
@@ -60,10 +71,8 @@ interface Reconciliation {
 interface OpsReport {
   engine: Part<EngineStatus>;
   settlement: Part<SettlementStatus>;
-  reconciliation: Part<Reconciliation>;
 }
 
-const REFRESH_MS = 5_000;
 
 function Unavailable({ part }: { part: Part<unknown> }) {
   return <ErrorState message={part.error?.message ?? `Unavailable (${part.status})`} />;
@@ -71,6 +80,7 @@ function Unavailable({ part }: { part: Part<unknown> }) {
 
 function Ops() {
   const [report, setReport] = useState<OpsReport | null>(null);
+  const [reconciliation, setReconciliation] = useState<Part<Reconciliation> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useCallback(async () => {
@@ -82,16 +92,32 @@ function Ops() {
     }
   }, []);
 
-  useEffect(() => {
+  const reconcile = useCallback(async () => {
+    try {
+      setReconciliation({ ok: true, data: await api<Reconciliation>('/api/ops/reconciliation') });
+    } catch (failure) {
+      setReconciliation({ ok: false, error: { message: (failure as Error).message } });
+    }
+  }, []);
+
+  const refresh = useCallback(() => {
     void load();
-    const timer = setInterval(() => void load(), REFRESH_MS);
-    return () => clearInterval(timer);
-  }, [load]);
+    void reconcile();
+  }, [load, reconcile]);
+
+  useEffect(
+    () =>
+      startOpsPolling(
+        () => void load(),
+        () => void reconcile(),
+      ),
+    [load, reconcile],
+  );
 
   if (error && !report) return <ErrorState message={error} onRetry={load} />;
   if (!report) return <LoadingRows rows={8} />;
-  const { engine, settlement, reconciliation } = report;
-  const issues = reconciliation.data
+  const { engine, settlement } = report;
+  const issues = reconciliation?.data
     ? Object.entries(reconciliation.data.ledger).filter(([, rows]) => rows.length > 0)
     : [];
 
@@ -101,11 +127,11 @@ function Ops() {
         <div>
           <h1 className="text-2xl font-semibold tracking-tight">Operations</h1>
           <p className="text-sm text-muted-foreground">
-            Instrument ownership, the order and settlement queues, and reconciliation. Refreshes
-            every {REFRESH_MS / 1000} s.
+            Instrument ownership and the order and settlement queues refresh every{' '}
+            {STATUS_REFRESH_MS / 1000} s, reconciliation every {RECONCILE_REFRESH_MS / 1000} s.
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={() => void load()}>
+        <Button variant="outline" size="sm" onClick={refresh}>
           <RefreshCw className="mr-2 h-4 w-4" />
           Refresh
         </Button>
@@ -133,6 +159,7 @@ function Ops() {
                   <TableHead className="text-right">Book seq</TableHead>
                   <TableHead className="text-right">Commands</TableHead>
                   <TableHead className="text-right">Behind</TableHead>
+                  <TableHead>State</TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
@@ -149,6 +176,15 @@ function Ops() {
                       <Badge variant={row.commandsBehind > 0 ? 'destructive' : 'secondary'}>
                         {row.commandsBehind}
                       </Badge>
+                    </TableCell>
+                    <TableCell>
+                      {row.stuck ? (
+                        <Badge variant="destructive" title={row.stuck.error} data-testid="book-stuck">
+                          stuck since {formatTime(row.stuck.since)}, {row.stuck.failures} failed batches
+                        </Badge>
+                      ) : (
+                        <Badge variant="secondary">ok</Badge>
+                      )}
                     </TableCell>
                   </TableRow>
                 ))}
@@ -180,6 +216,8 @@ function Ops() {
                     <TableHead className="text-right">Lag</TableHead>
                     <TableHead className="text-right">Pending</TableHead>
                     <TableHead className="text-right">Consumers</TableHead>
+                    <TableHead className="text-right">Retrying</TableHead>
+                    <TableHead className="text-right">Oldest</TableHead>
                   </TableRow>
                 </TableHeader>
                 <TableBody>
@@ -194,6 +232,14 @@ function Ops() {
                         </Badge>
                       </TableCell>
                       <TableCell className="text-right font-mono">{row.consumers}</TableCell>
+                      <TableCell className="text-right">
+                        <Badge variant={row.retrying > 0 ? 'destructive' : 'secondary'}>
+                          {row.retrying}
+                        </Badge>
+                      </TableCell>
+                      <TableCell className="text-right font-mono">
+                        {row.oldestPendingMs === null ? '—' : `${Math.round(row.oldestPendingMs / 1000)} s`}
+                      </TableCell>
                     </TableRow>
                   ))}
                 </TableBody>
@@ -208,7 +254,7 @@ function Ops() {
               <CardTitle className="text-base">Reconciliation</CardTitle>
               <CardDescription>Engine trades against ledger postings</CardDescription>
             </div>
-            {reconciliation.data && (
+            {reconciliation?.data && (
               <Badge
                 variant={reconciliation.data.status === 'ok' ? 'secondary' : 'destructive'}
                 className="gap-1"
@@ -224,7 +270,9 @@ function Ops() {
             )}
           </CardHeader>
           <CardContent className="space-y-4">
-            {!reconciliation.ok || !reconciliation.data ? (
+            {reconciliation === null ? (
+              <LoadingRows rows={3} />
+            ) : !reconciliation.ok || !reconciliation.data ? (
               <Unavailable part={reconciliation} />
             ) : (
               <>

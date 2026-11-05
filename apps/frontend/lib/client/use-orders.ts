@@ -36,12 +36,12 @@ export function useOrders() {
       }
       setOrders((current) => (current ? mergeOrders(current, [order]) : current));
     };
-    const onReconnect = () => void load();
+    const onConnect = () => void load();
     socket.on('order', onOrder);
-    socket.io.on('reconnect', onReconnect);
+    socket.on('connect', onConnect);
     return () => {
       socket.off('order', onOrder);
-      socket.io.off('reconnect', onReconnect);
+      socket.off('connect', onConnect);
     };
   }, [socket, load]);
 

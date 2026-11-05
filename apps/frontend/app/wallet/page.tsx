@@ -44,10 +44,10 @@ function Wallet() {
     if (!socket) return;
     const onChange = () => void load();
     socket.on('wallet', onChange);
-    socket.io.on('reconnect', onChange);
+    socket.on('connect', onChange);
     return () => {
       socket.off('wallet', onChange);
-      socket.io.off('reconnect', onChange);
+      socket.off('connect', onChange);
     };
   }, [socket, load]);
 

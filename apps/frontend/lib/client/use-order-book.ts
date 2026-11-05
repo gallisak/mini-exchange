@@ -19,14 +19,20 @@ export function useOrderBook(instrument: string): BookState {
     const onSnapshot = (snapshot: Snapshot) =>
       dispatch({ type: 'snapshot', snapshot, at: Date.now() });
     const onDelta = (delta: Delta) => dispatch({ type: 'delta', delta, at: Date.now() });
-    const onHeartbeat = (heartbeat: { instrument: string; seq: number }) => {
+    const onHeartbeat = (heartbeat: { instrument: string; seq: number; intervalMs?: number }) => {
       if (heartbeat.instrument === instrument) {
-        dispatch({ type: 'heartbeat', seq: heartbeat.seq, at: Date.now() });
+        dispatch({
+          type: 'heartbeat',
+          seq: heartbeat.seq,
+          intervalMs: heartbeat.intervalMs,
+          at: Date.now(),
+        });
       }
     };
     const onDisconnect = () => dispatch({ type: 'disconnected' });
     const retries: ReturnType<typeof setTimeout>[] = [];
     const onRateLimited = ({ retryAfterMs }: { retryAfterMs: number }) => {
+      dispatch({ type: 'snapshotDelayed', retryAfterMs, at: Date.now() });
       retries.push(setTimeout(() => socket.emit('subscribe', instrument), retryAfterMs));
     };
 

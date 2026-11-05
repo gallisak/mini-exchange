@@ -4,7 +4,7 @@ export const ACCESS_COOKIE = 'mx_access';
 export const REFRESH_COOKIE = 'mx_refresh';
 const ACCESS_MAX_AGE = 15 * 60;
 const REFRESH_MAX_AGE = 7 * 24 * 60 * 60;
-const REFRESH_REUSE_WINDOW_MS = 30_000;
+export const REFRESH_REUSE_WINDOW_MS = 5_000;
 
 export interface TokenPair {
   accessToken: string;

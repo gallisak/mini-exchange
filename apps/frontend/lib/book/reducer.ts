@@ -30,6 +30,7 @@ export interface BookState {
   awaitingSnapshot: boolean;
   requestedAt: number | null;
   lastHeardAt: number;
+  silenceLimitMs: number;
   resyncs: number;
 }
 
@@ -37,13 +38,15 @@ export type BookAction =
   | { type: 'connected'; at: number }
   | { type: 'disconnected' }
   | { type: 'snapshotRequested'; at: number }
+  | { type: 'snapshotDelayed'; retryAfterMs: number; at: number }
   | { type: 'snapshot'; snapshot: Snapshot; at: number }
   | { type: 'delta'; delta: Delta; at: number }
-  | { type: 'heartbeat'; seq: number; at: number }
+  | { type: 'heartbeat'; seq: number; intervalMs?: number; at: number }
   | { type: 'tick'; at: number };
 
 export const SILENCE_LIMIT_MS = 7_000;
 export const SNAPSHOT_TIMEOUT_MS = 5_000;
+const MISSED_HEARTBEATS = 3;
 const PENDING_LIMIT = 1_000;
 
 export function initialBook(instrument: string, at = 0): BookState {
@@ -57,6 +60,7 @@ export function initialBook(instrument: string, at = 0): BookState {
     awaitingSnapshot: false,
     requestedAt: null,
     lastHeardAt: at,
+    silenceLimitMs: SILENCE_LIMIT_MS,
     resyncs: 0,
   };
 }
@@ -95,6 +99,12 @@ function stale(state: BookState): BookState {
   return { ...state, status: 'stale', awaitingSnapshot: false, requestedAt: null };
 }
 
+function silenceLimitFor(intervalMs: number | undefined): number {
+  return typeof intervalMs === 'number' && Number.isFinite(intervalMs) && intervalMs > 0
+    ? Math.max(SILENCE_LIMIT_MS, intervalMs * MISSED_HEARTBEATS)
+    : SILENCE_LIMIT_MS;
+}
+
 export function needsSnapshot(state: BookState): boolean {
   return state.status === 'stale' && !state.awaitingSnapshot;
 }
@@ -122,6 +132,11 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
         resyncs: state.resyncs + 1,
         lastHeardAt: action.at,
       };
+
+    case 'snapshotDelayed':
+      return state.awaitingSnapshot
+        ? { ...state, requestedAt: action.at + Math.max(0, action.retryAfterMs) }
+        : state;
 
     case 'snapshot': {
       if (action.snapshot.instrument !== state.instrument) return state;
@@ -159,7 +174,11 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
     }
 
     case 'heartbeat': {
-      const heard = { ...state, lastHeardAt: action.at };
+      const heard = {
+        ...state,
+        lastHeardAt: action.at,
+        silenceLimitMs: silenceLimitFor(action.intervalMs),
+      };
       if (state.status === 'live' && state.seq !== null && action.seq > state.seq) {
         return stale(heard);
       }
@@ -174,7 +193,7 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
       ) {
         return stale(state);
       }
-      return state.status === 'live' && action.at - state.lastHeardAt > SILENCE_LIMIT_MS
+      return state.status === 'live' && action.at - state.lastHeardAt > state.silenceLimitMs
         ? stale(state)
         : state;
   }

@@ -12,7 +12,7 @@ import { INSTRUMENTS, Instrument } from '@/lib/client/types';
 
 export function useInstrument(): Instrument {
   const value = useSearchParams().get('instrument');
-  return (INSTRUMENTS as readonly string[]).includes(value ?? '') ? (value as Instrument) : 'ABC';
+  return value !== null && INSTRUMENTS.includes(value) ? value : INSTRUMENTS[0];
 }
 
 export function InstrumentSelect() {
