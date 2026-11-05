@@ -96,6 +96,23 @@ try {
   log('the buyer wallet shows the 3 ABC bought');
   await shot(buyer, 'wallet');
 
+  const resyncs = async () =>
+    Number(((await market.getByText(/^Sequence \d+/).textContent()).match(/resynced (\d+)×/) ?? [0, 0])[1]);
+  const resyncsBefore = await resyncs();
+  const reloads = [
+    seller.waitForRequest((request) => new URL(request.url()).pathname === '/api/orders' && request.method() === 'GET'),
+    buyer.waitForRequest((request) => new URL(request.url()).pathname === '/api/wallet'),
+    market.waitForRequest((request) => new URL(request.url()).pathname === '/api/market/trades'),
+  ];
+  compose('exec', '-T', 'redis', 'redis-cli', 'CLIENT', 'KILL', 'TYPE', 'pubsub');
+  await Promise.all(reloads);
+  for (const deadline = Date.now() + 10_000; (await resyncs()) <= resyncsBefore; ) {
+    if (Date.now() > deadline) throw new Error('the book did not resync after the subscription was lost');
+    await market.waitForTimeout(200);
+  }
+  await waitStatus(market, 'live');
+  log('after the engines lost their Redis subscription, the orders, wallet, trades and book reloaded');
+
   await buyer.goto(`${BASE}/ops`);
   await buyer.getByText('Admins only').waitFor();
   log('the operations panel is closed to a regular user');

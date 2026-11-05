@@ -212,6 +212,40 @@ describe('order book resync', () => {
     expect(state.seq).toBe(9);
   });
 
+  it('keeps the newer book when a snapshot it no longer waits for arrives late', () => {
+    let state = live(5);
+    state = bookReducer(state, { type: 'delta', delta: delta(6, [ask('100.50', '1')]), at: 1 });
+    state = bookReducer(state, { type: 'delta', delta: delta(7, [ask('100.25', '1')]), at: 2 });
+
+    const late = bookReducer(state, { type: 'snapshot', snapshot: snapshot(6), at: 3 });
+
+    expect(late.seq).toBe(7);
+    expect(late.asks).toEqual(state.asks);
+    expect(late.status).toBe('live');
+  });
+
+  it('marks the book stale when a heartbeat is behind it, since the engine lost changes it showed', () => {
+    const state = bookReducer(live(5), { type: 'heartbeat', seq: 3, at: 2_000 });
+
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
+  });
+
+  it('stays live on a heartbeat sent just before the commit its snapshot already shows', () => {
+    const raced = bookReducer(live(5), { type: 'heartbeat', seq: 4, at: 100 });
+    const persisting = bookReducer(raced, { type: 'heartbeat', seq: 4, at: 2_100 });
+
+    expect(raced.status).toBe('live');
+    expect(persisting.status).toBe('stale');
+  });
+
+  it('asks for a fresh snapshot when the engine says updates may have been lost', () => {
+    const state = bookReducer(live(5), { type: 'resync' });
+
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
+  });
+
   it('ignores messages for another instrument', () => {
     const state = live(5);
 

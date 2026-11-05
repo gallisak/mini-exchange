@@ -59,7 +59,7 @@ describe('trade event consumer', () => {
     expect(calls[0].args).toEqual([STREAM, 'settlement', '1-0']);
   });
 
-  it('acknowledges a redelivered trade the ledger already settled without moving money again', async () => {
+  it('acknowledges a redelivered trade the ledger reports as a duplicate', async () => {
     let settlements = 0;
     const { handle, commands } = consumer(async () => (++settlements === 1 ? 'settled' : 'duplicate'));
 

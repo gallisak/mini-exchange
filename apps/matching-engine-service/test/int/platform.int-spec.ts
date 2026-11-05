@@ -115,9 +115,11 @@ describe('platform protections', () => {
       const port = (app.getHttpServer().address() as AddressInfo).port;
       const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
       const snapshots: unknown[] = [];
-      const limited: { retryAfterMs: number }[] = [];
+      const limited: { retryAfterMs: number; instrument?: string }[] = [];
       socket.on('book_snapshot', (snapshot: unknown) => snapshots.push(snapshot));
-      socket.on('rate_limited', (notice: { retryAfterMs: number }) => limited.push(notice));
+      socket.on('rate_limited', (notice: { retryAfterMs: number; instrument?: string }) =>
+        limited.push(notice),
+      );
       try {
         await new Promise((resolve) => socket.once('connected', resolve));
         for (let attempt = 0; attempt < 10; attempt += 1) socket.emit('subscribe', 'ABC');
@@ -129,6 +131,7 @@ describe('platform protections', () => {
       expect(snapshots).toHaveLength(3);
       expect(limited).toHaveLength(7);
       expect(limited[0].retryAfterMs).toBeGreaterThan(0);
+      expect(limited.every((notice) => notice.instrument === 'ABC')).toBe(true);
     });
   });
 

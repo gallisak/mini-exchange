@@ -84,30 +84,33 @@ describe('authentication sessions', () => {
     await http().post('/auth/logout').expect(401);
   });
 
-  it('gives the admin role only to configured emails', async () => {
-    const admin = await signUp('OPS@example.com');
-    const user = await signUp();
+  it('does not make whoever registers an email from the configuration an admin', async () => {
+    const squatter = await signUp('OPS@example.com');
 
-    expect(claims(admin.accessToken).role).toBe('admin');
-    expect(claims(user.accessToken).role).toBe('user');
+    expect(claims(squatter.accessToken).role).toBe('user');
   });
 
-  it('follows ADMIN_EMAILS on every sign-in, granting and taking away the role', async () => {
-    await signUp('boss@example.com');
+  it('signs tokens with the role stored for the account, on sign-in and on refresh', async () => {
+    const session = await signUp('promoted@example.com');
+    const dataSource = app.get(DataSource);
     const login = async () =>
-      claims(
-        (
-          await http()
-            .post('/auth/login')
-            .send({ email: 'boss@example.com', password: 'password123' })
-            .expect(200)
-        ).body.accessToken,
-      ).role;
+      (
+        await http()
+          .post('/auth/login')
+          .send({ email: 'promoted@example.com', password: 'password123' })
+          .expect(200)
+      ).body;
 
-    process.env.ADMIN_EMAILS = 'someone-else@example.com';
-    expect(await login()).toBe('user');
-    process.env.ADMIN_EMAILS = 'BOSS@example.com';
-    expect(await login()).toBe('admin');
+    await dataSource.query(`UPDATE users SET role = 'admin' WHERE email = 'promoted@example.com'`);
+    const promoted = await login();
+    const refreshed = (await refresh(promoted.refreshToken).expect(200)).body;
+    await dataSource.query(`UPDATE users SET role = 'user' WHERE email = 'promoted@example.com'`);
+    const demoted = await login();
+
+    expect(claims(session.accessToken).role).toBe('user');
+    expect(claims(promoted.accessToken).role).toBe('admin');
+    expect(claims(refreshed.accessToken).role).toBe('admin');
+    expect(claims(demoted.accessToken).role).toBe('user');
   });
 
   it('lowercases stored emails that would otherwise no longer sign in, unless that would clash', async () => {

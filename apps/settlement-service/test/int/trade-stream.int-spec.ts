@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import Redis from 'ioredis';
 import { LedgerService } from '../../src/ledger/ledger.service';
+import { WALLET_CHANNEL, WalletNotifier } from '../../src/notifications/wallet-notifier.service';
 import {
   DEAD_LETTER_STREAM,
   GROUP,
@@ -120,6 +121,43 @@ describe('trade stream consumer', () => {
     const dead = (await redis.xrange(DEAD_LETTER_STREAM, '-', '+')) as [string, string[]][];
     expect(dead).toHaveLength(2);
     expect(dead[0][1].slice(0, 4)).toEqual(['stream', TRADE_STREAM, 'id', malformed]);
+  });
+
+  it('announces a settled trade to both wallets even when the first announcement could not be published', async () => {
+    app = await createApp();
+    const publisher = (app.get(WalletNotifier) as unknown as { redis: Redis }).redis;
+    const publish = publisher.publish.bind(publisher);
+    let failures = 0;
+    jest.spyOn(publisher, 'publish').mockImplementation(((channel: string, message: string) => {
+      if (failures < 1) {
+        failures += 1;
+        return Promise.reject(new Error('Connection is closed.'));
+      }
+      return publish(channel, message);
+    }) as never);
+    const subscriber = redisClient();
+    const announced: { ownerId: string; tradeId: string }[] = [];
+    subscriber.on('message', (_channel: string, message: string) => announced.push(JSON.parse(message)));
+    await subscriber.subscribe(WALLET_CHANNEL);
+    const executed = trade();
+
+    try {
+      await publishTrade(redis, executed);
+
+      await eventually(async () => {
+        expect(announced).toEqual(
+          expect.arrayContaining([
+            { ownerId: executed.buyerId, tradeId: executed.tradeId },
+            { ownerId: executed.sellerId, tradeId: executed.tradeId },
+          ]),
+        );
+      }, 10000);
+      await settledAll(1);
+    } finally {
+      await subscriber.quit();
+    }
+    expect(failures).toBe(1);
+    expect((await balances(app, executed.buyerId)).USD).toBe('99979.00');
   });
 
   it('dead-letters a trade id reused with different details', async () => {
