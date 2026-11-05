@@ -39,4 +39,57 @@ describe('publishing market events', () => {
       { type: 'resync', resync: { instruments: [], owners: ['owner-1'] } },
     ]);
   });
+
+  const delta = {
+    type: 'book_delta',
+    delta: { instrument: 'ABC', seq: 1, changes: [] },
+  } as MarketEvent;
+
+  it('gives up on a publish that never answers and tells its subscribers to reload', async () => {
+    const published: string[] = [];
+    let hanging = true;
+    const redis = {
+      client: {
+        publish: (_channel: string, message: string) => {
+          if (hanging) {
+            hanging = false;
+            return new Promise(() => undefined);
+          }
+          published.push(message);
+          return Promise.resolve(1);
+        },
+      },
+    } as unknown as RedisService;
+    publisher = new MarketPublisherService(redis);
+    const startedAt = Date.now();
+
+    await publisher.publish('ABC', delta);
+
+    expect(Date.now() - startedAt).toBeLessThan(2_000);
+    await sleep(1_500);
+    expect(published.map((message) => JSON.parse(message))).toEqual([
+      { type: 'resync', resync: { instruments: ['ABC'], owners: [] } },
+    ]);
+  }, 10_000);
+
+  it('leaves no timer behind once it was shut down', async () => {
+    jest.useFakeTimers();
+    try {
+      const redis = {
+        client: {
+          publish: async () => {
+            throw new Error('Connection is closed.');
+          },
+        },
+      } as unknown as RedisService;
+      publisher = new MarketPublisherService(redis);
+      publisher.onModuleDestroy();
+
+      await publisher.publish('ABC', delta);
+
+      expect(jest.getTimerCount()).toBe(0);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });

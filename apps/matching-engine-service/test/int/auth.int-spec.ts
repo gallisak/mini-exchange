@@ -6,6 +6,8 @@ import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793
 import { setAdmin } from '../../src/tools/grant-admin';
 import { createApp, resetState } from './harness';
 
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
 const claims = (token: string) =>
   JSON.parse(Buffer.from(token.split('.')[1], 'base64url').toString()) as Record<string, unknown>;
 
@@ -248,14 +250,15 @@ describe('authentication sessions', () => {
 
   it('signs in an account whose email differs from another one only in case', async () => {
     const dataSource = app.get(DataSource);
-    const first = await signUp('clash@example.com');
-    await dataSource.query(`UPDATE users SET email = 'Clash@Example.com' WHERE email = 'clash@example.com'`);
+    const first = await signUp('clash-a@example.com');
     const second = (
       await http()
         .post('/auth/register')
-        .send({ email: 'clash@example.com', password: 'another-password' })
+        .send({ email: 'clash-b@example.com', password: 'another-password' })
         .expect(201)
     ).body;
+    await dataSource.query(`UPDATE users SET email = 'Clash@Example.com' WHERE email = 'clash-a@example.com'`);
+    await dataSource.query(`UPDATE users SET email = 'clash@example.com' WHERE email = 'clash-b@example.com'`);
 
     const firstAgain = await login('Clash@Example.com');
     const secondAgain = await login('clash@example.com', 'another-password');
@@ -266,6 +269,64 @@ describe('authentication sessions', () => {
       .post('/auth/login')
       .send({ email: 'clash@example.com', password: 'wrong-password' })
       .expect(401);
+  });
+
+  it('refuses to register an email that an older account has in another case', async () => {
+    await signUp('legacy@example.com');
+    await app
+      .get(DataSource)
+      .query(`UPDATE users SET email = 'Legacy@Example.com' WHERE email = 'legacy@example.com'`);
+
+    await http()
+      .post('/auth/register')
+      .send({ email: 'legacy@example.com', password: 'password123' })
+      .expect(409);
+  });
+
+  it('grants the admin role to the account with exactly that email when several differ only in case', async () => {
+    const dataSource = app.get(DataSource);
+    await signUp('boss-a@example.com');
+    await signUp('boss-b@example.com');
+    await dataSource.query(`UPDATE users SET email = 'Boss@Example.com' WHERE email = 'boss-a@example.com'`);
+    await dataSource.query(`UPDATE users SET email = 'BOSS@example.com' WHERE email = 'boss-b@example.com'`);
+
+    expect(await setAdmin(dataSource, 'Boss@Example.com', true)).toBe(true);
+
+    const roles: { email: string; role: string }[] = await dataSource.query(
+      `SELECT email, role FROM users WHERE lower(email) = 'boss@example.com'`,
+    );
+    expect(roles.sort((a, b) => (a.email < b.email ? -1 : 1))).toEqual([
+      { email: 'BOSS@example.com', role: 'user' },
+      { email: 'Boss@Example.com', role: 'admin' },
+    ]);
+    await expect(setAdmin(dataSource, 'boss@example.com', true)).rejects.toThrow(/more than one/);
+  });
+
+  it('tells another service whether an account is an admin, given the internal key', async () => {
+    const admin = await signUp('lookup@example.com');
+    await setAdmin(app.get(DataSource), 'lookup@example.com', true);
+    const user = await signUp();
+    const lookup = (token: string) =>
+      http()
+        .get(`/auth/admins/${claims(token).sub}`)
+        .set('x-internal-key', process.env.ENGINE_INTERNAL_KEY as string);
+
+    expect((await lookup(admin.accessToken).expect(200)).body).toEqual({ admin: true });
+    expect((await lookup(user.accessToken).expect(200)).body).toEqual({ admin: false });
+    await http().get(`/auth/admins/${claims(user.accessToken).sub}`).expect(401);
+  });
+
+  it('keeps the pair a retried rotation gave out when the original request arrives late', async () => {
+    const session = await signUp();
+    const attempt = randomUUID();
+    await refresh(session.refreshToken, attempt).expect(200);
+    await sleep(1100);
+    const retried = await refresh(session.refreshToken, attempt).expect(200);
+    await sleep(1100);
+
+    await refresh(session.refreshToken, attempt).expect(200);
+
+    await refresh(retried.body.refreshToken).expect(200);
   });
 
   it('issues a short-lived ticket for the real-time connection that the API does not accept', async () => {

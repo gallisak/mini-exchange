@@ -171,4 +171,27 @@ describe('trade stream consumer', () => {
     expect(await redis.xlen(DEAD_LETTER_STREAM)).toBe(1);
     expect((await balances(app, executed.buyerId)).USD).toBe('99979.00');
   });
+
+  it('settles the events it already read before it shuts down', async () => {
+    app = await createApp();
+    const ledger = app.get(LedgerService);
+    const settleTrade = ledger.settle.bind(ledger);
+    let started = 0;
+    jest.spyOn(ledger, 'settle').mockImplementation(async (executed) => {
+      started += 1;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      return settleTrade(executed);
+    });
+    const batch = redis.multi();
+    for (let i = 0; i < 3; i++) {
+      batch.xadd(TRADE_STREAM, '*', 'type', 'trade.executed', 'payload', JSON.stringify(trade()));
+    }
+    await batch.exec();
+    await eventually(async () => expect(started).toBeGreaterThan(0));
+
+    await app.close();
+    app = undefined;
+
+    expect(await groupState(redis)).toEqual({ pending: 0, read: 3 });
+  });
 });

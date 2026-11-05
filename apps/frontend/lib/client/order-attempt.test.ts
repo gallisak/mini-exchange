@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { attemptFor, isUnknownOutcome, unconfirmed } from './order-attempt';
+import { afterFailure, attemptFor, isUnknownOutcome, loadAttempt, saveAttempt, unconfirmed } from './order-attempt';
 
 const draft = { instrument: 'ABC', side: 'buy' as const, price: '10.00', quantity: '1' };
 let n = 0;
@@ -32,5 +32,55 @@ describe('Idempotency-Key of an order attempt', () => {
   it('treats a lost connection, a timeout or a server error as an unknown outcome, and a refusal as a known one', () => {
     expect([0, 408, 500, 502, 503, 504].every(isUnknownOutcome)).toBe(true);
     expect([400, 401, 403, 409, 422, 429].some(isUnknownOutcome)).toBe(false);
+  });
+
+  it('remembers an attempt with an unknown outcome across a page reload', () => {
+    const items = new Map<string, string>();
+    const storage = {
+      getItem: (key: string) => items.get(key) ?? null,
+      setItem: (key: string, value: string) => void items.set(key, value),
+      removeItem: (key: string) => void items.delete(key),
+    };
+    const sent = unconfirmed(attemptFor(null, draft, newKey));
+
+    saveAttempt(storage, 'ABC', sent);
+    expect(loadAttempt(storage, 'ABC')).toEqual(sent);
+    expect(loadAttempt(storage, 'DEF')).toBeNull();
+
+    saveAttempt(storage, 'ABC', null);
+    expect(loadAttempt(storage, 'ABC')).toBeNull();
+  });
+
+  it('keeps working when the browser refuses storage', () => {
+    const broken = {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      setItem: () => {
+        throw new Error('denied');
+      },
+      removeItem: () => {
+        throw new Error('denied');
+      },
+    };
+
+    expect(() => saveAttempt(broken, 'ABC', unconfirmed(attemptFor(null, draft, newKey)))).not.toThrow();
+    expect(loadAttempt(broken, 'ABC')).toBeNull();
+  });
+
+  it('stops holding the form once the exchange gave a clear answer to the resent order', () => {
+    const sent = unconfirmed(attemptFor(null, draft, newKey));
+
+    expect(afterFailure(sent, 422).unconfirmed).toBe(false);
+    expect(afterFailure(sent, 503).unconfirmed).toBe(true);
+  });
+
+  it('keeps an unconfirmed order to its own instrument', () => {
+    const sent = unconfirmed(attemptFor(null, draft, newKey));
+
+    const other = attemptFor(sent, { ...draft, instrument: 'DEF' }, newKey);
+
+    expect(other.key).not.toBe(sent.key);
+    expect(other.unconfirmed).toBeFalsy();
   });
 });

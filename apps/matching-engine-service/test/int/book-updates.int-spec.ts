@@ -112,7 +112,8 @@ describe('a running book', () => {
     expect(published).toEqual(expect.arrayContaining(['trades', 'orders', 'book_delta']));
   });
 
-  it('tells every client to reload when it takes a book over, since the last owner may not have published', async () => {
+  it('tells every client to reload when it takes a book over whose last changes were never published', async () => {
+    await dataSource.getRepository(InstrumentState).insert({ instrument: 'ABC', bookSeq: '3' });
     const events: MarketEvent[] = [];
     runner = new BookRunner('ABC', options({ fence: 2n, publish: async (event) => void events.push(event) }));
 
@@ -146,5 +147,49 @@ describe('a running book', () => {
     runner = undefined;
 
     expect(Date.now() - startedAt).toBeLessThan(1000);
+  });
+
+  it('does not make clients reload when the previous owner published everything it committed', async () => {
+    runner = new BookRunner('ABC', options({ publish: async () => undefined }));
+    await runner.start();
+    await place(uuidV5('published'), 'seller', 'sell');
+    await eventually(async () =>
+      expect(
+        (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
+      ).toBe('1'),
+    );
+    await runner.stop();
+    const events: MarketEvent[] = [];
+
+    runner = new BookRunner('ABC', options({ fence: 2n, publish: async (event) => void events.push(event) }));
+    await runner.start();
+    await sleep(500);
+
+    expect(events.filter((event) => event.type === 'resync')).toEqual([]);
+  });
+
+  it('tells every client to reload after a batch whose commit may have gone through', async () => {
+    const events: MarketEvent[] = [];
+    const transaction = dataSource.transaction.bind(dataSource) as (...args: unknown[]) => Promise<unknown>;
+    let failedAt: number | undefined;
+    jest.spyOn(dataSource, 'transaction').mockImplementation((async (...args: unknown[]) => {
+      const result = await transaction(...args);
+      if (failedAt === undefined) {
+        failedAt = events.length;
+        throw new Error('Connection terminated unexpectedly');
+      }
+      return result;
+    }) as never);
+    runner = new BookRunner('ABC', options({ publish: async (event) => void events.push(event) }));
+    await runner.start();
+
+    await place(uuidV5('ambiguous'), 'seller', 'sell');
+
+    await eventually(async () =>
+      expect(events.slice(failedAt ?? events.length)).toContainEqual({
+        type: 'resync',
+        resync: { instruments: ['ABC'], owners: [], allOwners: true },
+      }),
+    );
   });
 });

@@ -1,6 +1,8 @@
 import { INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import { createHmac, randomUUID } from 'crypto';
+import { createServer } from 'http';
+import { AddressInfo } from 'net';
 import Redis from 'ioredis';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
@@ -137,4 +139,23 @@ export async function groupState(redis: Redis, stream = TRADE_STREAM) {
     })
     .find((info) => info.name === GROUP);
   return group ? { pending: Number(group.pending), read: Number(group['entries-read']) } : null;
+}
+
+export async function startAdminDirectory() {
+  const revoked = new Set<string>();
+  const server = createServer((req, res) => {
+    const match = /^\/auth\/admins\/([^/?]+)$/.exec(req.url ?? '');
+    if (!match || req.headers['x-internal-key'] !== process.env.ENGINE_INTERNAL_KEY) {
+      res.writeHead(404).end();
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ admin: !revoked.has(match[1]) }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    url: `http://127.0.0.1:${(server.address() as AddressInfo).port}`,
+    revoked,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
 }

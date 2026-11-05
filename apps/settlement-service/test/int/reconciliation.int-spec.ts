@@ -27,13 +27,18 @@ const ENGINE_IN_PERIOD: EngineRow[] = [
 describe('reconciliation', () => {
   let app: INestApplication;
   let engine: Server;
-  let engineRows: EngineRow[] | 'down' | 'malformed';
+  let engineRows: EngineRow[] | 'down' | 'malformed' | ((from: Date) => EngineRow[]);
   let engineQueries: URLSearchParams[];
   let engineUrl: string;
 
   beforeAll(async () => {
     engine = createServer((req, res) => {
       const url = new URL(req.url ?? '/', 'http://engine');
+      if (url.pathname.startsWith('/auth/admins/')) {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(JSON.stringify({ admin: true }));
+        return;
+      }
       engineQueries.push(url.searchParams);
       if (engineRows === 'down' || url.pathname !== '/trades/summary') {
         res.writeHead(503).end();
@@ -49,7 +54,9 @@ describe('reconciliation', () => {
           instruments:
             engineRows === 'malformed'
               ? [{ instrument: 'ABC', count: '2', quantity: 'lots' }]
-              : engineRows,
+              : typeof engineRows === 'function'
+                ? engineRows(new Date(url.searchParams.get('from') as string))
+                : engineRows,
         }),
       );
     });
@@ -303,12 +310,26 @@ describe('reconciliation', () => {
     expect(response.body.engineError).toBe('Engine returned a malformed trade summary');
   });
 
-  it('checks the last day by default and stops short of the most recent trades', async () => {
-    const response = await reconcile({}).expect(200);
+  it('starts each default run where the last matching one ended, short of the most recent trades', async () => {
+    const first = await reconcile({}).expect(200);
+    const second = await reconcile({}).expect(200);
 
-    const { from, to } = response.body.period;
-    expect(new Date(to).getTime() - new Date(from).getTime()).toBe(24 * 3_600_000);
-    expect(Date.now() - new Date(to).getTime()).toBeGreaterThanOrEqual(60000);
+    expect(first.body.status).toBe('ok');
+    expect(second.body.period.from).toBe(first.body.period.to);
+    expect(Date.now() - new Date(second.body.period.to).getTime()).toBeGreaterThanOrEqual(60000);
+  });
+
+  it('keeps showing a trade the ledger never settled, however long ago it was executed', async () => {
+    const executedAt = new Date(Date.now() - 30 * 3_600_000);
+    engineRows = (from) =>
+      from <= executedAt
+        ? [{ instrument: 'ABC', count: 1, quantity: '1.00000000', notional: '10.0000000000' }]
+        : [];
+
+    const first = await reconcile({}).expect(200);
+    const second = await reconcile({}).expect(200);
+
+    expect([first.body.status, second.body.status]).toEqual(['mismatch', 'mismatch']);
   });
 
   it('checks only the ledger activity of the period it was asked about', async () => {

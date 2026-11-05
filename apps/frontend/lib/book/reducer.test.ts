@@ -238,6 +238,20 @@ describe('order book resync', () => {
     expect(older.awaitingSnapshot).toBe(true);
   });
 
+  it('follows the engine when its sequence went back, once a second snapshot confirms it', () => {
+    let state = bookReducer(live(7), { type: 'resync' });
+    state = bookReducer(state, { type: 'snapshotRequested', at: 1 });
+    state = bookReducer(state, { type: 'snapshot', snapshot: snapshot(2), at: 2 });
+    expect(state.seq).toBe(7);
+
+    state = bookReducer(state, { type: 'tick', at: 2 + SNAPSHOT_TIMEOUT_MS });
+    state = bookReducer(state, { type: 'snapshotRequested', at: 3 + SNAPSHOT_TIMEOUT_MS });
+    state = bookReducer(state, { type: 'snapshot', snapshot: snapshot(2), at: 4 + SNAPSHOT_TIMEOUT_MS });
+
+    expect(state.status).toBe('live');
+    expect(state.seq).toBe(2);
+  });
+
   it('stays live on a heartbeat behind the book, however late it arrives', () => {
     const soon = bookReducer(live(5), { type: 'heartbeat', seq: 4, at: 100 });
     const late = bookReducer(soon, { type: 'heartbeat', seq: 4, at: 5_000 });

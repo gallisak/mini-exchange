@@ -47,6 +47,38 @@ describe('sharing one refresh between requests', () => {
     expect(rotate).toHaveBeenCalledTimes(3);
   });
 
+  it('does not share a rotation with another client, even when it brings the same cookies', async () => {
+    const rotate = vi.fn(async () => rotated(1));
+
+    await refreshOnce({ refreshToken: 'copied', accessToken: 'access-e', client: '203.0.113.5 Firefox' }, rotate);
+    await refreshOnce({ refreshToken: 'copied', accessToken: 'access-e', client: '198.51.100.7 curl' }, rotate);
+
+    expect(rotate).toHaveBeenCalledTimes(2);
+  });
+
+  it('keeps the attempt of a rotation for a later request that still brings the old cookies', async () => {
+    const rotate = vi.fn(async (_token: string, _attempt: string) => rotated(1));
+    await refreshOnce({ refreshToken: 'kept', accessToken: 'access-f' }, rotate);
+
+    await vi.advanceTimersByTimeAsync(REFRESH_REUSE_WINDOW_MS + 1_000);
+    await refreshOnce({ refreshToken: 'kept', accessToken: 'access-f' }, rotate);
+
+    const [first, second] = rotate.mock.calls.map(([, attempt]) => attempt);
+    expect(second).toBe(first);
+  });
+
+  it('keeps the attempt of a lost rotation for minutes, not just one', async () => {
+    const outcomes: Rotation[] = [{ kind: 'unavailable' }, rotated(1)];
+    const rotate = vi.fn(async (_token: string, _attempt: string) => outcomes.shift() as Rotation);
+    await refreshOnce({ refreshToken: 'slow', accessToken: 'access-g' }, rotate);
+
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    await refreshOnce({ refreshToken: 'slow', accessToken: 'access-g' }, rotate);
+
+    const [first, second] = rotate.mock.calls.map(([, attempt]) => attempt);
+    expect(second).toBe(first);
+  });
+
   it('retries a rotation whose answer was lost as the same attempt', async () => {
     const outcomes: Rotation[] = [{ kind: 'unavailable' }, rotated(1)];
     const rotate = vi.fn(async (_token: string, _attempt: string) => outcomes.shift() as Rotation);

@@ -219,4 +219,19 @@ describe('private real-time updates', () => {
       expect(bobResyncs).toEqual(expect.arrayContaining([{ instrument: 'ABC' }, { orders: true }]));
     });
   });
+
+  it('accepts an access token for the connection only while a rollout asks it to', async () => {
+    await app.close();
+    process.env.WS_ACCEPT_ACCESS_TOKENS = 'true';
+    try {
+      app = await createApp();
+      await app.listen(0);
+      url = `http://127.0.0.1:${(app.getHttpServer().address() as AddressInfo).port}`;
+      const alice = await register(app);
+
+      await expect(connect(alice.token)).resolves.toBeDefined();
+    } finally {
+      delete process.env.WS_ACCEPT_ACCESS_TOKENS;
+    }
+  });
 });

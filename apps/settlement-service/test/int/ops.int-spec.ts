@@ -13,11 +13,22 @@ import {
   redisClient,
   resetState,
   settle,
+  startAdminDirectory,
   trade,
 } from './harness';
 
 describe('settlement operations endpoints', () => {
   let app: INestApplication;
+  let directory: Awaited<ReturnType<typeof startAdminDirectory>>;
+
+  beforeAll(async () => {
+    directory = await startAdminDirectory();
+    process.env.ENGINE_URL = directory.url;
+  });
+
+  afterAll(async () => {
+    await directory.close();
+  });
 
   beforeEach(async () => {
     await resetState();
@@ -116,14 +127,12 @@ describe('settlement operations endpoints', () => {
     await redis.quit();
   });
 
-  it('stops honouring an admin token issued before the role was taken away', async () => {
+  it('stops honouring an admin token as soon as the engine no longer has the account as an admin', async () => {
     const admin = randomUUID();
     const token = accessToken(admin, 'admin');
     await http().get('/ops/status').set('authorization', `Bearer ${token}`).expect(200);
-    const redis = redisClient();
 
-    await redis.set(`auth:role-changed:${admin}`, String(Date.now()));
-    await redis.quit();
+    directory.revoked.add(admin);
 
     await http().get('/ops/status').set('authorization', `Bearer ${token}`).expect(403);
   });
