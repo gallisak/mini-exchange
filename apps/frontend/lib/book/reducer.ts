@@ -28,7 +28,10 @@ export interface BookState {
   asks: Level[];
   pending: Delta[];
   awaitingSnapshot: boolean;
+  requestedAt: number | null;
   lastHeardAt: number;
+  snapshotAt: number | null;
+  silenceLimitMs: number;
   resyncs: number;
 }
 
@@ -36,12 +39,17 @@ export type BookAction =
   | { type: 'connected'; at: number }
   | { type: 'disconnected' }
   | { type: 'snapshotRequested'; at: number }
+  | { type: 'snapshotDelayed'; retryAfterMs: number; at: number }
   | { type: 'snapshot'; snapshot: Snapshot; at: number }
   | { type: 'delta'; delta: Delta; at: number }
-  | { type: 'heartbeat'; seq: number; at: number }
+  | { type: 'heartbeat'; seq: number; intervalMs?: number; at: number }
+  | { type: 'resync' }
   | { type: 'tick'; at: number };
 
 export const SILENCE_LIMIT_MS = 7_000;
+export const SNAPSHOT_TIMEOUT_MS = 5_000;
+export const HEARTBEAT_RACE_MS = 1_000;
+const MISSED_HEARTBEATS = 3;
 const PENDING_LIMIT = 1_000;
 
 export function initialBook(instrument: string, at = 0): BookState {
@@ -53,7 +61,10 @@ export function initialBook(instrument: string, at = 0): BookState {
     asks: [],
     pending: [],
     awaitingSnapshot: false,
+    requestedAt: null,
     lastHeardAt: at,
+    snapshotAt: null,
+    silenceLimitMs: SILENCE_LIMIT_MS,
     resyncs: 0,
   };
 }
@@ -89,7 +100,13 @@ function applyChanges(state: BookState, delta: Delta): BookState {
 }
 
 function stale(state: BookState): BookState {
-  return { ...state, status: 'stale', awaitingSnapshot: false };
+  return { ...state, status: 'stale', awaitingSnapshot: false, requestedAt: null };
+}
+
+function silenceLimitFor(intervalMs: number | undefined): number {
+  return typeof intervalMs === 'number' && Number.isFinite(intervalMs) && intervalMs > 0
+    ? Math.max(SILENCE_LIMIT_MS, intervalMs * MISSED_HEARTBEATS)
+    : SILENCE_LIMIT_MS;
 }
 
 export function needsSnapshot(state: BookState): boolean {
@@ -103,18 +120,31 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
         ...state,
         status: state.seq === null ? 'connecting' : 'reconnecting',
         awaitingSnapshot: true,
+        requestedAt: action.at,
         pending: [],
         lastHeardAt: action.at,
       };
 
     case 'disconnected':
-      return { ...state, status: 'reconnecting', awaitingSnapshot: false };
+      return { ...state, status: 'reconnecting', awaitingSnapshot: false, requestedAt: null };
 
     case 'snapshotRequested':
-      return { ...state, awaitingSnapshot: true, resyncs: state.resyncs + 1, lastHeardAt: action.at };
+      return {
+        ...state,
+        awaitingSnapshot: true,
+        requestedAt: action.at,
+        resyncs: state.resyncs + 1,
+        lastHeardAt: action.at,
+      };
+
+    case 'snapshotDelayed':
+      return state.awaitingSnapshot
+        ? { ...state, requestedAt: action.at + Math.max(0, action.retryAfterMs) }
+        : state;
 
     case 'snapshot': {
       if (action.snapshot.instrument !== state.instrument) return state;
+      if (!state.awaitingSnapshot && state.seq !== null && action.snapshot.seq < state.seq) return state;
       let next: BookState = {
         ...state,
         status: 'live',
@@ -123,7 +153,9 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
         asks: sortLevels(action.snapshot.asks, 'sell'),
         pending: [],
         awaitingSnapshot: false,
+        requestedAt: null,
         lastHeardAt: action.at,
+        snapshotAt: action.at,
       };
       const buffered = [...state.pending]
         .filter((delta) => delta.seq > action.snapshot.seq)
@@ -148,15 +180,31 @@ export function bookReducer(state: BookState, action: BookAction): BookState {
     }
 
     case 'heartbeat': {
-      const heard = { ...state, lastHeardAt: action.at };
-      if (state.status === 'live' && state.seq !== null && action.seq > state.seq) {
-        return stale(heard);
-      }
-      return heard;
+      const heard = {
+        ...state,
+        lastHeardAt: action.at,
+        silenceLimitMs: silenceLimitFor(action.intervalMs),
+      };
+      if (state.status !== 'live' || state.seq === null || action.seq === state.seq) return heard;
+      const racedSnapshot =
+        action.seq < state.seq &&
+        state.snapshotAt !== null &&
+        action.at - state.snapshotAt < HEARTBEAT_RACE_MS;
+      return racedSnapshot ? heard : stale(heard);
     }
 
+    case 'resync':
+      return state.status === 'live' ? stale(state) : state;
+
     case 'tick':
-      return state.status === 'live' && action.at - state.lastHeardAt > SILENCE_LIMIT_MS
+      if (
+        state.awaitingSnapshot &&
+        state.requestedAt !== null &&
+        action.at - state.requestedAt > SNAPSHOT_TIMEOUT_MS
+      ) {
+        return stale(state);
+      }
+      return state.status === 'live' && action.at - state.lastHeardAt > state.silenceLimitMs
         ? stale(state)
         : state;
   }

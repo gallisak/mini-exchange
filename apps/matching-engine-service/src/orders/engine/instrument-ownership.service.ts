@@ -55,8 +55,8 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
     clearInterval(this.renewTimer);
     await this.acquiring;
     for (const instrument of [...this.owned.keys()]) {
-      this.owned.delete(instrument);
       await this.engine.stopInstrument(instrument);
+      this.owned.delete(instrument);
       await this.lock
         .release(instrumentLockKey(instrument), this.ownerId)
         .catch((error: Error) =>
@@ -110,6 +110,11 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
           isValid: () => this.isLeaseValid(instrument, token),
           onFenced: (error) => void this.stepDown(instrument, token, error),
         });
+        if (this.owned.get(instrument)?.token !== token) {
+          await this.engine.stopInstrument(instrument);
+          this.logger.warn(`${this.ownerId} lost ${instrument} while loading its book`);
+          continue;
+        }
         this.logger.log(`${this.ownerId} owns ${instrument} with token ${token}`);
       } catch (error) {
         this.owned.delete(instrument);

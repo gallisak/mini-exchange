@@ -3,6 +3,7 @@ import {
   BookState,
   Delta,
   SILENCE_LIMIT_MS,
+  SNAPSHOT_TIMEOUT_MS,
   Snapshot,
   bookReducer,
   initialBook,
@@ -149,6 +150,54 @@ describe('order book resync', () => {
     expect(recent.status).toBe('live');
   });
 
+  it('waits for three missed heartbeats when the engine announces a slower heartbeat', () => {
+    const slow = bookReducer(live(5), { type: 'heartbeat', seq: 5, intervalMs: 5_000, at: 0 });
+
+    expect(bookReducer(slow, { type: 'tick', at: 14_000 }).status).toBe('live');
+    expect(bookReducer(slow, { type: 'tick', at: 15_001 }).status).toBe('stale');
+  });
+
+  it('never waits less than the default silence limit', () => {
+    const fast = bookReducer(live(5), { type: 'heartbeat', seq: 5, intervalMs: 500, at: 0 });
+
+    expect(bookReducer(fast, { type: 'tick', at: SILENCE_LIMIT_MS - 1 }).status).toBe('live');
+  });
+
+  it('asks again when a requested snapshot never arrives, even while deltas keep coming', () => {
+    let state = bookReducer(live(5), { type: 'delta', delta: delta(7, [ask('1.00', '9')]), at: 1 });
+    state = bookReducer(state, { type: 'snapshotRequested', at: 2 });
+    state = bookReducer(state, { type: 'delta', delta: delta(8, [ask('2.00', '1')]), at: 1_000 });
+    state = bookReducer(state, { type: 'delta', delta: delta(9, [ask('3.00', '1')]), at: 4_000 });
+
+    expect(needsSnapshot(bookReducer(state, { type: 'tick', at: 2 + SNAPSHOT_TIMEOUT_MS - 1 }))).toBe(
+      false,
+    );
+    state = bookReducer(state, { type: 'tick', at: 2 + SNAPSHOT_TIMEOUT_MS + 1 });
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
+  });
+
+  it('waits for a rate-limited snapshot request to be retried before giving up on it', () => {
+    let state = bookReducer(live(5), { type: 'delta', delta: delta(7, [ask('1.00', '9')]), at: 1 });
+    state = bookReducer(state, { type: 'snapshotRequested', at: 0 });
+    state = bookReducer(state, { type: 'snapshotDelayed', retryAfterMs: 8_000, at: 100 });
+
+    expect(needsSnapshot(bookReducer(state, { type: 'tick', at: 8_100 + SNAPSHOT_TIMEOUT_MS - 1 }))).toBe(
+      false,
+    );
+    expect(needsSnapshot(bookReducer(state, { type: 'tick', at: 8_100 + SNAPSHOT_TIMEOUT_MS + 1 }))).toBe(
+      true,
+    );
+  });
+
+  it('asks again when the snapshot after connecting never arrives', () => {
+    let state = bookReducer(initialBook('ABC'), { type: 'connected', at: 0 });
+    state = bookReducer(state, { type: 'tick', at: SNAPSHOT_TIMEOUT_MS + 1 });
+
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
+  });
+
   it('shows reconnecting on a lost connection and asks for a fresh snapshot once back', () => {
     let state = bookReducer(live(5), { type: 'disconnected' });
     expect(state.status).toBe('reconnecting');
@@ -161,6 +210,40 @@ describe('order book resync', () => {
     state = bookReducer(state, { type: 'snapshot', snapshot: snapshot(8), at: 12 });
     expect(state.status).toBe('live');
     expect(state.seq).toBe(9);
+  });
+
+  it('keeps the newer book when a snapshot it no longer waits for arrives late', () => {
+    let state = live(5);
+    state = bookReducer(state, { type: 'delta', delta: delta(6, [ask('100.50', '1')]), at: 1 });
+    state = bookReducer(state, { type: 'delta', delta: delta(7, [ask('100.25', '1')]), at: 2 });
+
+    const late = bookReducer(state, { type: 'snapshot', snapshot: snapshot(6), at: 3 });
+
+    expect(late.seq).toBe(7);
+    expect(late.asks).toEqual(state.asks);
+    expect(late.status).toBe('live');
+  });
+
+  it('marks the book stale when a heartbeat is behind it, since the engine lost changes it showed', () => {
+    const state = bookReducer(live(5), { type: 'heartbeat', seq: 3, at: 2_000 });
+
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
+  });
+
+  it('stays live on a heartbeat sent just before the commit its snapshot already shows', () => {
+    const raced = bookReducer(live(5), { type: 'heartbeat', seq: 4, at: 100 });
+    const persisting = bookReducer(raced, { type: 'heartbeat', seq: 4, at: 2_100 });
+
+    expect(raced.status).toBe('live');
+    expect(persisting.status).toBe('stale');
+  });
+
+  it('asks for a fresh snapshot when the engine says updates may have been lost', () => {
+    const state = bookReducer(live(5), { type: 'resync' });
+
+    expect(state.status).toBe('stale');
+    expect(needsSnapshot(state)).toBe(true);
   });
 
   it('ignores messages for another instrument', () => {

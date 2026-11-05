@@ -1,5 +1,8 @@
-export const INSTRUMENTS = ['ABC', 'DEF', 'XYZ'] as const;
-export type Instrument = (typeof INSTRUMENTS)[number];
+export const INSTRUMENTS: readonly string[] = (process.env.NEXT_PUBLIC_INSTRUMENTS ?? 'ABC,DEF,XYZ')
+  .split(',')
+  .map((instrument) => instrument.trim())
+  .filter((instrument) => instrument.length > 0);
+export type Instrument = string;
 
 export interface User {
   id: string;

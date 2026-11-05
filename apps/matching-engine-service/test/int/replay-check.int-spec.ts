@@ -91,4 +91,17 @@ describe('offline replay check', () => {
 
     expect(result.problems).toContainEqual(expect.stringMatching(/open orders, replay leaves/));
   });
+
+  it('notices a finished order stored with another outcome than the replay gives', async () => {
+    await trade();
+    await app
+      .get(DataSource)
+      .query(
+        `UPDATE orders SET status = 'cancelled' WHERE id = (SELECT id FROM orders WHERE status = 'filled' LIMIT 1)`,
+      );
+
+    const result = await replayInstrument(app.get(DataSource), redis, 'ABC');
+
+    expect(result.problems).toContainEqual(expect.stringMatching(/^order .* differs from the replay$/));
+  });
 });

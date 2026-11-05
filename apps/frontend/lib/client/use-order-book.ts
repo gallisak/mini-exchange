@@ -19,14 +19,28 @@ export function useOrderBook(instrument: string): BookState {
     const onSnapshot = (snapshot: Snapshot) =>
       dispatch({ type: 'snapshot', snapshot, at: Date.now() });
     const onDelta = (delta: Delta) => dispatch({ type: 'delta', delta, at: Date.now() });
-    const onHeartbeat = (heartbeat: { instrument: string; seq: number }) => {
+    const onHeartbeat = (heartbeat: { instrument: string; seq: number; intervalMs?: number }) => {
       if (heartbeat.instrument === instrument) {
-        dispatch({ type: 'heartbeat', seq: heartbeat.seq, at: Date.now() });
+        dispatch({
+          type: 'heartbeat',
+          seq: heartbeat.seq,
+          intervalMs: heartbeat.intervalMs,
+          at: Date.now(),
+        });
       }
     };
     const onDisconnect = () => dispatch({ type: 'disconnected' });
     const retries: ReturnType<typeof setTimeout>[] = [];
-    const onRateLimited = ({ retryAfterMs }: { retryAfterMs: number }) => {
+    const onResync = () => dispatch({ type: 'resync' });
+    const onRateLimited = ({
+      retryAfterMs,
+      instrument: limited,
+    }: {
+      retryAfterMs: number;
+      instrument?: string;
+    }) => {
+      if (limited !== undefined && limited !== instrument) return;
+      dispatch({ type: 'snapshotDelayed', retryAfterMs, at: Date.now() });
       retries.push(setTimeout(() => socket.emit('subscribe', instrument), retryAfterMs));
     };
 
@@ -36,6 +50,7 @@ export function useOrderBook(instrument: string): BookState {
     socket.on('book_heartbeat', onHeartbeat);
     socket.on('disconnect', onDisconnect);
     socket.on('rate_limited', onRateLimited);
+    socket.on('resync', onResync);
     if (socket.connected) subscribe();
     const ticker = setInterval(() => dispatch({ type: 'tick', at: Date.now() }), TICK_MS);
 
@@ -43,6 +58,7 @@ export function useOrderBook(instrument: string): BookState {
       clearInterval(ticker);
       retries.forEach(clearTimeout);
       socket.off('rate_limited', onRateLimited);
+      socket.off('resync', onResync);
       socket.off('connect', subscribe);
       socket.off('book_snapshot', onSnapshot);
       socket.off('book_delta', onDelta);

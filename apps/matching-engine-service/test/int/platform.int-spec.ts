@@ -115,9 +115,11 @@ describe('platform protections', () => {
       const port = (app.getHttpServer().address() as AddressInfo).port;
       const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'] });
       const snapshots: unknown[] = [];
-      const limited: { retryAfterMs: number }[] = [];
+      const limited: { retryAfterMs: number; instrument?: string }[] = [];
       socket.on('book_snapshot', (snapshot: unknown) => snapshots.push(snapshot));
-      socket.on('rate_limited', (notice: { retryAfterMs: number }) => limited.push(notice));
+      socket.on('rate_limited', (notice: { retryAfterMs: number; instrument?: string }) =>
+        limited.push(notice),
+      );
       try {
         await new Promise((resolve) => socket.once('connected', resolve));
         for (let attempt = 0; attempt < 10; attempt += 1) socket.emit('subscribe', 'ABC');
@@ -129,6 +131,47 @@ describe('platform protections', () => {
       expect(snapshots).toHaveLength(3);
       expect(limited).toHaveLength(7);
       expect(limited[0].retryAfterMs).toBeGreaterThan(0);
+      expect(limited.every((notice) => notice.instrument === 'ABC')).toBe(true);
+    });
+  });
+
+  describe('WebSocket snapshots per address', () => {
+    let app: INestApplication;
+    let restore: () => void;
+    const sockets: ReturnType<typeof io>[] = [];
+
+    beforeEach(async () => {
+      await resetState();
+      restore = withEnv({ SNAPSHOT_RATE_LIMIT: '4', SNAPSHOT_RATE_WINDOW_MS: '60000' });
+      app = await createApp();
+      await app.listen(0);
+    });
+
+    afterEach(async () => {
+      sockets.splice(0).forEach((socket) => socket.disconnect());
+      await app.close();
+      restore();
+    });
+
+    it('keeps limiting a client that reconnects to get a fresh allowance', async () => {
+      const port = (app.getHttpServer().address() as AddressInfo).port;
+      const answers: string[] = [];
+
+      for (let attempt = 0; attempt < 6; attempt += 1) {
+        const socket = io(`http://127.0.0.1:${port}`, { transports: ['websocket'], forceNew: true });
+        sockets.push(socket);
+        await new Promise((resolve) => socket.once('connected', resolve));
+        answers.push(
+          await new Promise<string>((resolve) => {
+            socket.once('book_snapshot', () => resolve('snapshot'));
+            socket.once('rate_limited', () => resolve('rate_limited'));
+            socket.emit('subscribe', 'ABC');
+          }),
+        );
+        socket.disconnect();
+      }
+
+      expect(answers).toEqual(['snapshot', 'snapshot', 'snapshot', 'snapshot', 'rate_limited', 'rate_limited']);
     });
   });
 

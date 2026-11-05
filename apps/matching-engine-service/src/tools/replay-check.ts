@@ -1,6 +1,6 @@
 import 'reflect-metadata';
 import Redis from 'ioredis';
-import { DataSource, In } from 'typeorm';
+import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../database/data-source';
 import { INSTRUMENTS } from '../common/instruments';
 import { applyCommands } from '../orders/engine/apply-commands';
@@ -11,6 +11,7 @@ import { TradeRecord } from '../orders/entities/trade-record.entity';
 import { PRICE_SCALE, QUANTITY_SCALE, toUnits } from '../common/decimal';
 
 const PAGE = 1_000;
+const OPEN: string[] = ['open', 'partially_filled'];
 
 export interface InstrumentReplay {
   instrument: string;
@@ -49,13 +50,12 @@ export async function replayInstrument(
   redis: Redis,
   instrument: string,
 ): Promise<InstrumentReplay> {
-  const { state, trades, open } = await dataSource.transaction('REPEATABLE READ', async (manager) => ({
+  const { state, trades, orders } = await dataSource.transaction('REPEATABLE READ', async (manager) => ({
     state: await manager.findOneBy(InstrumentState, { instrument }),
     trades: await manager.find(TradeRecord, { where: { instrument }, order: { seq: 'ASC' } }),
-    open: await manager.find(Order, {
-      where: { instrument, status: In(['open', 'partially_filled']) },
-    }),
+    orders: await manager.find(Order, { where: { instrument } }),
   }));
+  const open = orders.filter((order) => OPEN.includes(order.status));
   const appliedUpTo = state?.lastCommandId ?? '0-0';
   const stream = await readStream(redis, instrument);
   const commands = stream.filter((entry) => streamOrder(entry.id, appliedUpTo) <= 0);
@@ -99,6 +99,21 @@ export async function replayInstrument(
     const remaining = resting.get(order.id);
     if (remaining === undefined || !sameAmount(remaining, order.remainingQuantity, QUANTITY_SCALE)) {
       if (problems.length < 20) problems.push(`open order ${order.id} differs from the replay`);
+    }
+  }
+
+  const replayed = new Map(replay.orders.map((order) => [order.id, order]));
+  if (orders.length !== replayed.size) {
+    problems.push(`stored ${orders.length} orders, replay accepted ${replayed.size}`);
+  }
+  for (const order of orders) {
+    const expected = replayed.get(order.id);
+    if (
+      expected &&
+      (expected.status !== order.status ||
+        !sameAmount(expected.remainingQuantity, order.remainingQuantity, QUANTITY_SCALE))
+    ) {
+      if (problems.length < 20) problems.push(`order ${order.id} differs from the replay`);
     }
   }
 

@@ -11,7 +11,7 @@ import { EngineState, ExecutedTrade, applyCommands, isValidSubmit } from './appl
 import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
 import { FencedOutError } from './fenced-out.error';
 import { runWithTrace } from '../../observability/trace-context';
-import { tradesExecuted } from '../../observability/metrics';
+import { bookBatchFailures, tradesExecuted } from '../../observability/metrics';
 import { diffBooks } from '../depth';
 import { publicTrade } from '../../trades/public-trade';
 import { MarketEvent } from '../realtime/market-events';
@@ -34,6 +34,18 @@ export interface BookRunnerOptions {
 
 type StreamEntry = [id: string, fields: string[]];
 
+const STUCK_TTL_MS = 30_000;
+
+export function stuckKey(instrument: string): string {
+  return `book:stuck:${instrument}`;
+}
+
+export interface StuckBook {
+  since: string;
+  failures: number;
+  error: string;
+}
+
 export class BookRunner {
   private readonly logger: Logger;
   private reader?: Redis;
@@ -42,6 +54,8 @@ export class BookRunner {
   private loop?: Promise<void>;
   private heartbeat?: NodeJS.Timeout;
   private state!: EngineState;
+  private stuck?: StuckBook;
+  private reloadNeeded = false;
 
   constructor(
     readonly instrument: string,
@@ -50,11 +64,21 @@ export class BookRunner {
     this.logger = new Logger(`BookRunner:${instrument}`);
   }
 
+  get fence(): bigint {
+    return this.options.fence;
+  }
+
   async start(): Promise<void> {
     await this.claimFence();
     await this.load();
-    this.reader = this.options.redis.createConnection();
-    this.readerId = (await this.reader.client('ID')) as number;
+    const reader = this.options.redis.createConnection();
+    try {
+      this.readerId = (await reader.client('ID')) as number;
+    } catch (error) {
+      await closeRedis(reader);
+      throw error;
+    }
+    this.reader = reader;
     this.running = true;
     this.loop = this.run();
     if (this.options.publish && this.options.heartbeatMs) {
@@ -94,10 +118,14 @@ export class BookRunner {
   }
 
   private announceSeq(): void {
-    if (!this.running) return;
+    if (!this.running || this.reloadNeeded || !this.options.leaseValid()) return;
     void this.options.publish?.({
       type: 'book_heartbeat',
-      heartbeat: { instrument: this.instrument, seq: Number(this.state.bookSeq) },
+      heartbeat: {
+        instrument: this.instrument,
+        seq: Number(this.state.bookSeq),
+        intervalMs: this.options.heartbeatMs ?? 0,
+      },
     });
   }
 
@@ -165,6 +193,10 @@ export class BookRunner {
     const { batchSize, blockMs, retryDelayMs } = this.options;
     while (this.running) {
       try {
+        if (this.reloadNeeded) {
+          await this.load();
+          this.reloadNeeded = false;
+        }
         const response = (await this.reader!.xread(
           'COUNT',
           batchSize,
@@ -177,6 +209,7 @@ export class BookRunner {
         if (!response) continue;
         const entries = response[0][1];
         await this.process(entries.map(([id, fields]) => ({ id, command: decodeCommand(fields) })));
+        await this.recovered();
       } catch (error) {
         if (!this.running) return;
         if (error instanceof FencedOutError) {
@@ -185,13 +218,33 @@ export class BookRunner {
           setImmediate(() => this.options.onFenced(error));
           return;
         }
-        this.logger.error(`Batch failed, reloading state: ${(error as Error).message}`);
-        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
-        await this.load().catch((loadError: Error) =>
-          this.logger.error(`Reload failed: ${loadError.message}`),
+        this.logger.error(
+          `${this.reloadNeeded ? 'Reload' : 'Batch'} failed, reloading state: ${(error as Error).message}`,
         );
+        this.reloadNeeded = true;
+        await this.failed(error as Error);
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       }
     }
+  }
+
+  private async failed(error: Error): Promise<void> {
+    bookBatchFailures.inc({ instrument: this.instrument });
+    this.stuck = {
+      since: this.stuck?.since ?? new Date().toISOString(),
+      failures: (this.stuck?.failures ?? 0) + 1,
+      error: error.message.slice(0, 500),
+    };
+    await this.options.redis.client
+      .set(stuckKey(this.instrument), JSON.stringify(this.stuck), 'PX', STUCK_TTL_MS)
+      .catch(() => undefined);
+  }
+
+  private async recovered(): Promise<void> {
+    if (!this.stuck) return;
+    this.logger.log(`Batch committed again after ${this.stuck.failures} failed attempts`);
+    this.stuck = undefined;
+    await this.options.redis.client.del(stuckKey(this.instrument)).catch(() => undefined);
   }
 
   private async process(commands: StreamCommand[]): Promise<void> {

@@ -4,6 +4,7 @@ import Redis from 'ioredis';
 import { AddressInfo } from 'net';
 import { Socket, io } from 'socket.io-client';
 import { WALLET_CHANNEL } from '../../src/orders/realtime/market-events';
+import { RedisService } from '../../src/redis/redis.service';
 import { TestUser, createApp, eventually, register, resetState, submit } from './harness';
 
 interface OrderEvent {
@@ -118,5 +119,34 @@ describe('private real-time updates', () => {
 
     await eventually(async () => expect(aliceClient.events.wallets).toEqual([{ tradeId: 'trade-1' }]));
     expect(bobClient.events.wallets).toEqual([]);
+  });
+
+  it('tells connected clients to reload after an update could not be published', async () => {
+    const alice = await register(app);
+    const { socket } = await connect(alice);
+    const resyncs: unknown[] = [];
+    socket.on('resync', () => resyncs.push(true));
+    jest
+      .spyOn(app.get(RedisService).client, 'publish')
+      .mockRejectedValueOnce(new Error('Connection is closed.'));
+
+    await submit(app, alice, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
+
+    await eventually(async () => expect(resyncs.length).toBeGreaterThanOrEqual(1));
+  });
+
+  it('tells connected clients to reload once its Redis subscription was down, since updates may be lost', async () => {
+    const alice = await register(app);
+    const { socket, events } = await connect(alice);
+    const resyncs: unknown[] = [];
+    socket.on('resync', () => resyncs.push(true));
+    const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT) });
+
+    await redis.client('KILL', 'TYPE', 'pubsub');
+    await redis.quit();
+
+    await eventually(async () => expect(resyncs).toHaveLength(1));
+    await submit(app, alice, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
+    await eventually(async () => expect(events.orders).toHaveLength(1));
   });
 });

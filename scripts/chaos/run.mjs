@@ -119,6 +119,24 @@ async function opsStatus() {
 
 const serviceOf = (owner) => (owner?.startsWith('engine-2') ? 'matching-engine-2' : 'matching-engine-1');
 
+let probeToken;
+function probe(instrument, owner) {
+  const key = randomUUID();
+  const request = {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${probeToken}`, 'idempotency-key': key },
+    body: JSON.stringify({ instrument, side: 'buy', price: '1.00', quantity: '1' }),
+  };
+  const script = `fetch('http://localhost:3001/orders', ${JSON.stringify(request)})
+    .then(async (r) => { process.stdout.write(await r.text()); process.exit(r.status === 202 ? 0 : 1); })
+    .catch(() => process.exit(1));`;
+  const { orderId } = JSON.parse(compose('exec', '-T', serviceOf(owner), 'node', '-e', script));
+  accepted.set(orderId, key);
+  return orderId;
+}
+
+const stored = (orderId) => psql(`SELECT count(*) FROM orders WHERE id = '${orderId}'`) === '1';
+
 async function measureTakeover(instrument, previousOwner, limitMs, disrupt) {
   const disruptedAt = Date.now();
   disrupt();
@@ -128,10 +146,8 @@ async function measureTakeover(instrument, previousOwner, limitMs, disrupt) {
   }, 30_000, `a new owner of ${instrument}`);
   const owner = takenOver.owner;
   const ownerAfterMs = Date.now() - disruptedAt;
-  await until(async () => {
-    const row = (await opsStatus())[instrument];
-    return row.lastCommandId !== takenOver.lastCommandId && row.owner === owner;
-  }, 30_000, `${instrument} to process commands again`);
+  const orderId = await until(async () => probe(instrument, owner), 30_000, `a probe order on ${instrument}`);
+  await until(async () => stored(orderId), 30_000, `${instrument} to process commands again`);
   const resumedAfterMs = Date.now() - disruptedAt;
   return { instrument, from: previousOwner, to: owner, ownerAfterMs, resumedAfterMs, limitMs, ok: resumedAfterMs <= limitMs };
 }
@@ -228,16 +244,18 @@ async function main() {
   await until(async () => (await http(`${ENGINE_URL}/health`)).status === 200, 120_000, 'the engine');
   await until(async () => (await http(`${SETTLEMENT_URL}/health`)).status === 200, 120_000, 'settlement');
   const run = Date.now();
-  admin = await register('chaos-admin@example.com').catch(async () => {
-    const { body } = await http(`${ENGINE_URL}/auth/login`, {
+  await register('chaos-admin@example.com').catch(() => undefined);
+  compose('exec', '-T', 'matching-engine-1', 'node', 'dist/tools/grant-admin.js', 'chaos-admin@example.com');
+  admin = (
+    await http(`${ENGINE_URL}/auth/login`, {
       method: 'POST',
       body: JSON.stringify({ email: 'chaos-admin@example.com', password: 'password123' }),
-    });
-    return body.accessToken;
-  });
+    })
+  ).body.accessToken;
   const tokens = await Promise.all(
     Array.from({ length: TRADERS }, (_, i) => register(`chaos-${run}-${i}@example.com`)),
   );
+  probeToken = tokens[0];
   const owners = psql(`SELECT string_agg(id::text, ',') FROM users WHERE email LIKE 'chaos-${run}-%'`).split(',');
 
   log(`load: ${WORKERS} workers, ${TRADERS} traders`);
@@ -279,7 +297,7 @@ async function main() {
   const replay = JSON.parse(replayOutput.text);
   const reconcileOutput = (() => {
     try {
-      return compose('exec', '-T', '-e', 'RECONCILIATION_LAG_MS=0', 'settlement-service', 'node', 'dist/reconciliation/reconcile.js');
+      return compose('exec', '-T', '-e', 'RECONCILIATION_LAG_MS=0', 'settlement-service', 'sh', '/opt/secrets/with-secrets.sh', 'node', 'dist/reconciliation/reconcile.js');
     } catch (error) {
       return String(error.stdout);
     }

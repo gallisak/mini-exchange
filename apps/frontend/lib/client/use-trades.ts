@@ -1,7 +1,8 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
+import { mergeTrades, newestSeq, skipsTrades } from './feeds';
 import { useSocket } from './socket';
 import { Trade } from './types';
 
@@ -11,10 +12,18 @@ export function useTrades(instrument: string) {
   const socket = useSocket();
   const [trades, setTrades] = useState<Trade[] | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const loaded = useRef(false);
+  const arrived = useRef<Trade[]>([]);
+  const newest = useRef<number | null>(null);
 
   const load = useCallback(async () => {
     try {
-      setTrades(await api<Trade[]>(`/api/market/trades?instrument=${instrument}`));
+      const fresh = await api<Trade[]>(`/api/market/trades?instrument=${instrument}`);
+      const meanwhile = arrived.current;
+      arrived.current = [];
+      loaded.current = true;
+      newest.current = Math.max(newest.current ?? 0, newestSeq([...fresh, ...meanwhile]) ?? 0);
+      setTrades((current) => mergeTrades(current ?? [], [...fresh, ...meanwhile], KEEP));
       setError(null);
     } catch (failure) {
       setError((failure as Error).message);
@@ -22,6 +31,9 @@ export function useTrades(instrument: string) {
   }, [instrument]);
 
   useEffect(() => {
+    loaded.current = false;
+    arrived.current = [];
+    newest.current = null;
     setTrades(null);
     void load();
   }, [load]);
@@ -30,18 +42,23 @@ export function useTrades(instrument: string) {
     if (!socket) return;
     const onTrade = (trade: Trade) => {
       if (trade.instrument !== instrument) return;
-      setTrades((current) =>
-        current && !current.some((known) => known.id === trade.id)
-          ? [trade, ...current].slice(0, KEEP)
-          : current,
-      );
+      if (!loaded.current) {
+        arrived.current.push(trade);
+        return;
+      }
+      const skipped = skipsTrades(newest.current, trade);
+      newest.current = Math.max(newest.current ?? 0, trade.seq);
+      setTrades((current) => mergeTrades(current ?? [], [trade], KEEP));
+      if (skipped) void load();
     };
-    const onReconnect = () => void load();
+    const onConnect = () => void load();
     socket.on('trade', onTrade);
-    socket.io.on('reconnect', onReconnect);
+    socket.on('connect', onConnect);
+    socket.on('resync', onConnect);
     return () => {
       socket.off('trade', onTrade);
-      socket.io.off('reconnect', onReconnect);
+      socket.off('connect', onConnect);
+      socket.off('resync', onConnect);
     };
   }, [socket, instrument, load]);
 

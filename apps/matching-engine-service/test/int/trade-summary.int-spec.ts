@@ -35,7 +35,10 @@ describe('trade summary', () => {
   }
 
   const summary = (from: string, to: string) =>
-    request(app.getHttpServer()).get('/trades/summary').query({ from, to });
+    request(app.getHttpServer())
+      .get('/trades/summary')
+      .set('x-internal-key', process.env.ENGINE_INTERNAL_KEY as string)
+      .query({ from, to });
 
   it('totals the trades of each instrument in the period exactly', async () => {
     await executed('ABC', '10.01', '0.12345678', '2026-11-04T10:00:00.000Z');
@@ -73,6 +76,20 @@ describe('trade summary', () => {
   it('rejects a period that is not a valid range', async () => {
     await summary('yesterday', '2026-11-04T11:00:00.000Z').expect(400);
     await summary('2026-11-04T11:00:00.000Z', '2026-11-04T10:00:00.000Z').expect(400);
-    await request(app.getHttpServer()).get('/trades/summary').expect(400);
+    await request(app.getHttpServer())
+      .get('/trades/summary')
+      .set('x-internal-key', process.env.ENGINE_INTERNAL_KEY as string)
+      .expect(400);
+  });
+
+  it('is not open to the public, since it scans every trade of the period', async () => {
+    const period = { from: '2026-11-04T10:00:00.000Z', to: '2026-11-04T11:00:00.000Z' };
+
+    await request(app.getHttpServer()).get('/trades/summary').query(period).expect(401);
+    await request(app.getHttpServer())
+      .get('/trades/summary')
+      .set('x-internal-key', 'wrong')
+      .query(period)
+      .expect(401);
   });
 });

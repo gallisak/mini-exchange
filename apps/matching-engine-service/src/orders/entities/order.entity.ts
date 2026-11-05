@@ -5,6 +5,7 @@ export type OrderStatus = 'open' | 'partially_filled' | 'filled' | 'cancelled';
 
 @Entity('orders')
 @Index('IDX_orders_owner_created', ['ownerId', 'createdAt'])
+@Index('IDX_orders_owner_status', ['ownerId', 'status'])
 @Index('IDX_orders_open_by_instrument', ['instrument', 'seq'], {
   where: `"status" IN ('open', 'partially_filled')`,
 })

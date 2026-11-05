@@ -4,11 +4,11 @@ services:
       ORDER_RATE_LIMIT: '100000'
       AUTH_RATE_LIMIT: '100000'
       PUBLIC_RATE_LIMIT: '100000'
-      ADMIN_EMAILS: chaos-admin@example.com
+      SNAPSHOT_RATE_LIMIT: '100000'
 
   matching-engine-2:
     environment:
       ORDER_RATE_LIMIT: '100000'
       AUTH_RATE_LIMIT: '100000'
       PUBLIC_RATE_LIMIT: '100000'
-      ADMIN_EMAILS: chaos-admin@example.com
+      SNAPSHOT_RATE_LIMIT: '100000'

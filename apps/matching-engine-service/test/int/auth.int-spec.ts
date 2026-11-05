@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
 import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793781500000-LowercaseEmails';
+import { setAdmin } from '../../src/tools/grant-admin';
 import { createApp, resetState } from './harness';
 
 const claims = (token: string) =>
@@ -27,6 +28,17 @@ describe('authentication sessions', () => {
   const signUp = async (email = `user-${randomUUID()}@example.com`) =>
     (await http().post('/auth/register').send({ email, password: 'password123' }).expect(201)).body;
   const refresh = (refreshToken: string) => http().post('/auth/refresh').send({ refreshToken });
+
+  it('answers 409, not 500, when the same email registers twice at once', async () => {
+    const email = `race-${randomUUID()}@example.com`;
+    const statuses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        http().post('/auth/register').send({ email, password: 'password123' }),
+      ),
+    ).then((responses) => responses.map((response) => response.status).sort());
+
+    expect(statuses).toEqual([201, 409, 409, 409, 409]);
+  });
 
   it('trades a refresh token for a new pair once', async () => {
     const session = await signUp();
@@ -73,30 +85,53 @@ describe('authentication sessions', () => {
     await http().post('/auth/logout').expect(401);
   });
 
-  it('gives the admin role only to configured emails', async () => {
-    const admin = await signUp('OPS@example.com');
-    const user = await signUp();
+  it('does not make whoever registers an email from the configuration an admin', async () => {
+    const squatter = await signUp('OPS@example.com');
 
-    expect(claims(admin.accessToken).role).toBe('admin');
-    expect(claims(user.accessToken).role).toBe('user');
+    expect(claims(squatter.accessToken).role).toBe('user');
   });
 
-  it('follows ADMIN_EMAILS on every sign-in, granting and taking away the role', async () => {
-    await signUp('boss@example.com');
+  it('signs tokens with the role stored for the account, on sign-in and on refresh', async () => {
+    const session = await signUp('promoted@example.com');
+    const dataSource = app.get(DataSource);
     const login = async () =>
+      (
+        await http()
+          .post('/auth/login')
+          .send({ email: 'promoted@example.com', password: 'password123' })
+          .expect(200)
+      ).body;
+
+    await dataSource.query(`UPDATE users SET role = 'admin' WHERE email = 'promoted@example.com'`);
+    const promoted = await login();
+    const refreshed = (await refresh(promoted.refreshToken).expect(200)).body;
+    await dataSource.query(`UPDATE users SET role = 'user' WHERE email = 'promoted@example.com'`);
+    const demoted = await login();
+
+    expect(claims(session.accessToken).role).toBe('user');
+    expect(claims(promoted.accessToken).role).toBe('admin');
+    expect(claims(refreshed.accessToken).role).toBe('admin');
+    expect(claims(demoted.accessToken).role).toBe('user');
+  });
+
+  it('grants and takes away the admin role through the operator tool', async () => {
+    await signUp('operator@example.com');
+    const dataSource = app.get(DataSource);
+    const role = async () =>
       claims(
         (
           await http()
             .post('/auth/login')
-            .send({ email: 'boss@example.com', password: 'password123' })
+            .send({ email: 'operator@example.com', password: 'password123' })
             .expect(200)
         ).body.accessToken,
       ).role;
 
-    process.env.ADMIN_EMAILS = 'someone-else@example.com';
-    expect(await login()).toBe('user');
-    process.env.ADMIN_EMAILS = 'BOSS@example.com';
-    expect(await login()).toBe('admin');
+    expect(await setAdmin(dataSource, ' Operator@Example.com ', true)).toBe(true);
+    expect(await role()).toBe('admin');
+    expect(await setAdmin(dataSource, 'operator@example.com', false)).toBe(true);
+    expect(await role()).toBe('user');
+    expect(await setAdmin(dataSource, 'nobody@example.com', true)).toBe(false);
   });
 
   it('lowercases stored emails that would otherwise no longer sign in, unless that would clash', async () => {

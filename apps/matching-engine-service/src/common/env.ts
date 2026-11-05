@@ -6,6 +6,13 @@ export function requireEnv(name: string): string {
   return value;
 }
 
+export function trustedProxies(): string[] {
+  return (process.env.TRUST_PROXY ?? 'loopback, uniquelocal')
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry.length > 0);
+}
+
 export function corsOrigins(): string[] {
   return (process.env.CORS_ORIGINS ?? 'http://localhost:3000')
     .split(',')

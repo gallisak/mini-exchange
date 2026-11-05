@@ -44,7 +44,12 @@ const browser = await chromium.launch();
 try {
   const run = Date.now();
   const seller = await (await browser.newContext()).newPage();
-  const buyer = await (await browser.newContext()).newPage();
+  const buyerContext = await browser.newContext();
+  let tokenFailures = 0;
+  await buyerContext.route('**/api/ws-token', (route) =>
+    tokenFailures++ < 3 ? route.fulfill({ status: 503, body: '{}' }) : route.continue(),
+  );
+  const buyer = await buyerContext.newPage();
 
   await register(seller, `browser-seller-${run}@example.com`, '?next=//example.com');
   log('signed up, and a sign-in link to another site still landed on', new URL(seller.url()).pathname);
@@ -55,6 +60,12 @@ try {
   await placeOrder(buyer, 'buy', '20.00', '1');
   await seller.getByTestId('order-row').first().getByText('partially filled').waitFor({ timeout: 10_000 });
   log("the seller's order turned partially filled without a reload");
+  await buyer.getByRole('tab', { name: 'Filled & cancelled' }).click();
+  await buyer.getByTestId('order-row').first().getByText('filled', { exact: true }).waitFor({ timeout: 20_000 });
+  await buyer.getByRole('tab', { name: 'Active' }).click();
+  await placeOrder(buyer, 'buy', '1.00', '1');
+  await buyer.getByTestId('order-row').first().getByText('open', { exact: true }).waitFor({ timeout: 10_000 });
+  log('the buyer still got live order updates after 3 failed socket token requests');
   await shot(seller, 'orders');
 
   const market = await (await browser.newContext()).newPage();
@@ -84,6 +95,23 @@ try {
   await buyer.getByTestId('balance-row').filter({ hasText: 'ABC' }).getByText('1003').waitFor({ timeout: 10_000 });
   log('the buyer wallet shows the 3 ABC bought');
   await shot(buyer, 'wallet');
+
+  const resyncs = async () =>
+    Number(((await market.getByText(/^Sequence \d+/).textContent()).match(/resynced (\d+)×/) ?? [0, 0])[1]);
+  const resyncsBefore = await resyncs();
+  const reloads = [
+    seller.waitForRequest((request) => new URL(request.url()).pathname === '/api/orders' && request.method() === 'GET'),
+    buyer.waitForRequest((request) => new URL(request.url()).pathname === '/api/wallet'),
+    market.waitForRequest((request) => new URL(request.url()).pathname === '/api/market/trades'),
+  ];
+  compose('exec', '-T', 'redis', 'redis-cli', 'CLIENT', 'KILL', 'TYPE', 'pubsub');
+  await Promise.all(reloads);
+  for (const deadline = Date.now() + 10_000; (await resyncs()) <= resyncsBefore; ) {
+    if (Date.now() > deadline) throw new Error('the book did not resync after the subscription was lost');
+    await market.waitForTimeout(200);
+  }
+  await waitStatus(market, 'live');
+  log('after the engines lost their Redis subscription, the orders, wallet, trades and book reloaded');
 
   await buyer.goto(`${BASE}/ops`);
   await buyer.getByText('Admins only').waitFor();

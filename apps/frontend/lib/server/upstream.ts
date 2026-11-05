@@ -115,6 +115,14 @@ export async function withSession(
     if (failure) return failure;
     result = await call(accessToken);
   }
+  if (result.status === 401 && rotated) {
+    const response = NextResponse.json(
+      { message: 'The exchange did not accept your session, try again shortly' },
+      { status: 502 },
+    );
+    storeTokens(response, rotated);
+    return response;
+  }
   const response = NextResponse.json(result.body, { status: result.status });
   if (rotated) storeTokens(response, rotated);
   if (result.status === 401) clearTokens(response);

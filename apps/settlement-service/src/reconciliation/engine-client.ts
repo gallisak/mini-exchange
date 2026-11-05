@@ -37,6 +37,7 @@ export class EngineClient {
     url.searchParams.set('from', from.toISOString());
     url.searchParams.set('to', to.toISOString());
     const response = await fetch(url, {
+      headers: { 'x-internal-key': process.env.ENGINE_INTERNAL_KEY ?? '' },
       signal: AbortSignal.timeout(Number(process.env.ENGINE_TIMEOUT_MS ?? 5000)),
     });
     if (!response.ok) {

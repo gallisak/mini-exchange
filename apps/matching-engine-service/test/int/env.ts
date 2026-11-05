@@ -8,11 +8,13 @@ const defaults: Record<string, string> = {
   REDIS_PORT: '56379',
   JWT_ACCESS_SECRET: 'test-access-secret',
   JWT_REFRESH_SECRET: 'test-refresh-secret',
+  ENGINE_INTERNAL_KEY: 'test-engine-key',
   INSTANCE_ID: 'engine-test',
   BOOK_HEARTBEAT_MS: '500',
   ORDER_RATE_LIMIT: '100000',
   AUTH_RATE_LIMIT: '100000',
   PUBLIC_RATE_LIMIT: '100000',
+  SNAPSHOT_RATE_LIMIT: '100000',
 };
 
 for (const [key, value] of Object.entries(defaults)) {

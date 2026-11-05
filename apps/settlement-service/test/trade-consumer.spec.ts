@@ -31,7 +31,7 @@ function consumer(settle: (trade: SettleTradeDto) => Promise<SettlementResult>) 
       calls.push({ command, args });
       return 1;
     };
-  const service = new TradeConsumerService({ settleTrade: settle } as unknown as LedgerService);
+  const service = new TradeConsumerService({ settleAndAnnounce: settle } as unknown as LedgerService);
   Object.assign(service as unknown as Record<string, unknown>, {
     client: { xack: record('xack'), xadd: record('xadd') },
   });
@@ -59,7 +59,7 @@ describe('trade event consumer', () => {
     expect(calls[0].args).toEqual([STREAM, 'settlement', '1-0']);
   });
 
-  it('acknowledges a redelivered trade the ledger already settled without moving money again', async () => {
+  it('acknowledges a redelivered trade the ledger reports as a duplicate', async () => {
     let settlements = 0;
     const { handle, commands } = consumer(async () => (++settlements === 1 ? 'settled' : 'duplicate'));
 

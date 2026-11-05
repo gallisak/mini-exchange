@@ -108,4 +108,34 @@ describe('fencing of the order book writer', () => {
     expect(fenced[0].currentFence).toBeNull();
     expect(await storedOrders()).toBe(0);
   });
+
+  it('stops announcing its sequence number once its lease has expired by its own clock', async () => {
+    const announced: string[] = [];
+    let valid = true;
+    const instance = new BookRunner('ABC', {
+      dataSource,
+      redis,
+      orderBook: new OrderBookService(),
+      batchSize: 100,
+      blockMs: 200,
+      retryDelayMs: 100,
+      fence: 1n,
+      leaseValid: () => valid,
+      onFenced: () => undefined,
+      publish: async (event) => {
+        announced.push(event.type);
+      },
+      heartbeatMs: 50,
+    });
+    runners.push(instance);
+    await instance.start();
+    await eventually(async () => expect(announced).toContain('book_heartbeat'));
+
+    valid = false;
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    announced.length = 0;
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(announced).toEqual([]);
+  });
 });
