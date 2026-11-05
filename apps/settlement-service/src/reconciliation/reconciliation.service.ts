@@ -72,7 +72,8 @@ export class ReconciliationService {
   ) {}
 
   async defaultPeriod(to?: Date): Promise<{ from: Date; to: Date }> {
-    const end = to ?? new Date(Date.now() - this.lagMs);
+    const latest = Date.now() - this.lagMs;
+    const end = new Date(Math.min(to?.getTime() ?? latest, latest));
     const checkpoint = await this.dataSource
       .getRepository(ReconciliationCheckpoint)
       .findOneBy({ name: CHECKPOINT });

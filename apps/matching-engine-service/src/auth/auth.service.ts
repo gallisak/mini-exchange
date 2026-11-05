@@ -108,11 +108,9 @@ export class AuthService {
       if (!session || session.revokedAt || session.tokenHash !== tokenHash(refreshToken)) return null;
       const user = await manager.findOneBy(User, { id: userId });
       if (session.usedAt) {
-        const retried =
-          user && attempt && this.retriesRotation(session, attempt)
-            ? await this.reissue(manager, user, session)
-            : null;
-        if (retried) return retried;
+        if (attempt && this.retriesRotation(session, attempt)) {
+          return user ? this.reissue(manager, user, session) : null;
+        }
         await manager.update(
           RefreshSession,
           { familyId: session.familyId, revokedAt: IsNull() },

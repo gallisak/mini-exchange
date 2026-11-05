@@ -16,6 +16,7 @@ import {
   attemptFor,
   loadAttempt,
   saveAttempt,
+  unconfirmed,
 } from '@/lib/client/order-attempt';
 import { cn } from '@/lib/utils';
 
@@ -53,7 +54,8 @@ export function OrderForm({ instrument }: { instrument: string }) {
     quantity && !(QUANTITY.test(quantity) && positive(quantity))
       ? 'Up to 8 decimals, above zero'
       : null;
-  const pending = attempt?.unconfirmed && attempt.draft.instrument === instrument ? attempt.draft : null;
+  const pending =
+    !busy && attempt?.unconfirmed && attempt.draft.instrument === instrument ? attempt.draft : null;
   const ready = pending || (price && quantity && !priceError && !quantityError);
   const describe = (order: Attempt['draft']) =>
     `${order.side === 'buy' ? 'Buy' : 'Sell'} ${order.quantity} ${order.instrument} @ ${order.price}`;
@@ -62,7 +64,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
     event.preventDefault();
     if (!ready) return;
     const current = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
-    setAttempt(current);
+    setAttempt(unconfirmed(current));
     setBusy(true);
     try {
       await api('/api/orders', {
