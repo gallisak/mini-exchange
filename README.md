@@ -22,7 +22,7 @@ that kills processes under load.
 ## Run it
 
 ```bash
-docker compose up -d --build
+docker compose up -d --build        # or docker-compose up --build with the standalone Compose
 ```
 
 | What | URL |
@@ -38,9 +38,13 @@ no passwords, and the command stream trusts whoever can write to it, so only the
 them. Use `docker compose exec exchange-db psql -U exchange` or `docker compose exec redis redis-cli`.
 
 Register on http://localhost:3000/login; a new account starts with 100,000 USD and 1,000 of every
-instrument (`ABC`, `DEF`, `XYZ`). To open the operations panel, put your email into `ADMIN_EMAILS`
-in `apps/matching-engine-service/.env.example`, restart the engines
-(`docker compose up -d matching-engine-1 matching-engine-2`) and sign in again.
+instrument (`ABC`, `DEF`, `XYZ`). To open the operations panel, register first, then make your
+account an admin and sign in again:
+
+```bash
+docker compose exec matching-engine-1 node dist/tools/grant-admin.js you@example.com
+docker compose exec matching-engine-1 node dist/tools/grant-admin.js --revoke you@example.com
+```
 
 Useful commands:
 
@@ -97,10 +101,10 @@ The path of one order:
 4. After the commit it publishes book deltas, trades and order updates through Redis pub/sub; every
    engine forwards them to its own WebSocket clients.
 5. The outbox relay moves each trade to `trades:<instrument>`.
-6. Settlement reads that stream through a consumer group, books the trade into the ledger in one
-   transaction and only then acknowledges it.
-7. Settlement publishes a wallet change, and the owner of the wallet gets a `wallet` event over
-   WebSocket.
+6. Settlement reads that stream through a consumer group and books the trade into the ledger in one
+   transaction.
+7. Settlement publishes the wallet change of both sides and only then acknowledges the event; the
+   owner of each wallet gets a `wallet` event over WebSocket.
 
 One trace id follows that path. The id comes from `x-request-id` or is generated, travels in the
 command, the trade and the trade event, and every JSON log line on the way carries it. `smoke.sh`
@@ -124,7 +128,16 @@ place, in the order the commands sit in the stream. There is no lock around matc
 **What the broker guarantees.** A Redis stream assigns every entry a strictly increasing id at
 `XADD`. The order of entries is the order in which Redis accepted the commands, which is the arrival
 order the exchange commits to. Two requests that arrive "at the same time" are ordered by Redis, once,
-and every replay sees the same order.
+and every replay sees the same order. Before `XADD` there is no order: two requests still travelling
+through nginx and two different engines can reach Redis in either order, and the one Redis accepts
+first is the one that arrived first. The `202` is sent only after `XADD`, so a client that waits for
+it before sending its next order always gets them matched in its own order.
+
+**Order of trade events.** Trades leave each instrument through its own stream, `trades:<instrument>`,
+in the order the engine committed them: the outbox relay runs on one instance at a time (a Postgres
+advisory lock) and publishes rows in id order. Settlement does not rely on that order, though. Every
+posting only adds to or subtracts from a balance, so trades give the same balances in any order, and
+an event reclaimed from a crashed consumer can safely be settled after newer ones.
 
 **Determinism.** Time-priority uses a per-instrument `seq`, not wall clocks. An order's `createdAt`
 and a trade's time come from the stream id, and trade ids are derived from the order id. Replaying a
@@ -133,7 +146,10 @@ chaos test both compare the stored state with such a replay.
 
 **Exactly-once application.** The position in the stream is committed in the same transaction as the
 orders and trades it produced. After a crash, a new owner resumes after the last committed command:
-a committed command is never applied twice, an uncommitted one is applied once.
+a committed command is never applied twice, an uncommitted one is applied once. The owner itself
+works the same way after any failed batch: a commit can succeed even when the database answers with
+an error, so it reloads the book and its position from Postgres and matches nothing until that
+reload succeeds.
 
 **Persistence.** The task allows periodic persistence. This implementation commits every batch,
 which is stricter: the book in memory always equals the open orders in Postgres, so any instance can
@@ -158,8 +174,11 @@ second. Acquire, renew and release are Lua scripts, so "check the holder and act
   `instrument_state.fence` to its token before it reads the book, and every commit starts with
   `UPDATE instrument_state … WHERE fence = <my token>`. A stale owner updates zero rows, rolls back
   and steps down. Nothing it computed reaches the database.
-- **Local deadline.** An owner stops committing when its own monotonic clock says the lease is
-  about to expire (with a safety margin of `max(TTL / 5, 200 ms)`), before anyone else can hold it.
+- **Local deadline.** Before each commit an owner checks that its own monotonic clock still gives
+  the lease a safety margin of `max(TTL / 5, 200 ms)`, and stops when it does not. This keeps a
+  slow owner from even trying in most cases; a commit that starts in time and runs past the lease
+  is still stopped by the fencing token. An owner past its deadline also stops announcing its
+  `seq`, so its clients do not see a heartbeat from an instance that no longer owns the book.
 
 **Expected downtime of an instrument.**
 
@@ -167,7 +186,7 @@ second. Acquire, renew and release are Lua scripts, so "check the holder and act
 |---|---|---|
 | Owner killed (`kill -9`) | up to ~7 s: lease expiry ≤ 5 s, acquisition ≤ 1 s, loading the book | 5.5 s, 5.4 s, 5.3 s |
 | Owner frozen past its lease | same as a kill, the zombie is rejected when it wakes | 6.2 s, 6.2 s, 6.6 s |
-| Owner stopped gracefully (`SIGTERM`) | about 1 s: the owner releases its lease on shutdown | 1.5 s, 1.4 s, 1.3 s |
+| Owner stopped gracefully (`SIGTERM`) | about 1 s: the owner finishes its batch, then releases its lease | 1.5 s, 1.4 s, 1.3 s |
 
 During the downtime the API keeps accepting orders. They wait in the stream and the new owner
 applies them in order, so no accepted order is lost or applied twice.
@@ -190,9 +209,11 @@ between the two steps publishes the trade again, so the event may arrive more th
 4. Update the balances, always in sorted account order, so concurrent trades between the same
    users cannot deadlock.
 
-The event is acknowledged (`XACK`) only after the commit. If settlement dies between the commit and
-the acknowledgement, another consumer reclaims the event after `CONSUMER_RETRY_IDLE_MS`, step 1 sees
-the existing reference, and the money does not move again. Malformed events and conflicting trade
+The event is acknowledged (`XACK`) only after the commit and the wallet announcement. If settlement
+dies between the commit and the acknowledgement, or cannot publish the announcement, another consumer
+reclaims the event after `CONSUMER_RETRY_IDLE_MS`, step 1 sees the existing reference, the money does
+not move again, and the wallets are announced again. Wallet events are therefore delivered at least
+once. Malformed events and conflicting trade
 ids go to `settlement:dead-letter`; any other failure is retried without a limit, so a database
 outage never dead-letters a valid trade.
 
@@ -215,7 +236,7 @@ Every query used for access checks and reconciliation has an index:
 | Table | Index | Used by |
 |---|---|---|
 | `orders` | primary key `id` | cancel, which looks an order up by its id and owner |
-| `orders` | `(ownerId, createdAt)` | a user's own orders |
+| `orders` | `(ownerId, createdAt)`, `(ownerId, status)` | a user's own active and finished orders |
 | `orders` | `(instrument, seq)` where open | loading a book, snapshots |
 | `trades` | unique `(instrument, seq)`, `(executedAt)` | trade feed, engine totals for reconciliation |
 | `outbox` | `(id)` where unpublished | the relay |
@@ -238,8 +259,16 @@ The client side is a pure reducer (`apps/frontend/lib/book/reducer.ts`, unit tes
 
 - deltas that arrive before the snapshot are buffered, and only those newer than the snapshot are
   applied;
-- a gap in `seq`, a heartbeat ahead of the book, or silence for longer than three heartbeat
-  intervals (at least 7 s) mark the book **stale** and request a new snapshot;
+- a gap in `seq`, a heartbeat that differs from the book's `seq`, or silence for longer than
+  three heartbeat intervals (at least 7 s) mark the book **stale** and request a new snapshot.
+  A heartbeat behind the book within 1 s of a snapshot is the one exception: it was sent just before
+  the commit the snapshot already shows, so it is ignored, and the next one decides;
+- a snapshot the client is no longer waiting for, older than the book it shows, is ignored, so a
+  late reply cannot roll the book back;
+- when an engine's own Redis subscription was down, it may have missed updates for its clients, so
+  once it is subscribed again it sends every client `resync`. An owner that failed to publish an
+  update does the same through every engine at its next successful publish, at the latest with its
+  next heartbeat. The book asks for a snapshot, and orders, trades and the wallet reload;
 - a requested snapshot that has not arrived after 5 s is requested again; when the engine answers
   `rate_limited`, the client retries after the time it was given and counts the 5 s from then;
 - a lost connection shows **reconnecting**, and the book is replaced by a fresh snapshot after
@@ -300,11 +329,23 @@ it fails without the fix.
 | **Postgres and Redis were published on the host** without passwords, and the command stream trusts whoever writes to it, so any local process could place or cancel orders for any user. | Reading `docker-compose.yml` | They are reachable only from the containers |
 | **The chaos test measured the load generator, and the secrets test only passed on macOS.** A takeover counted as finished at the next order from the load, which nginx partly sent to the frozen engine, so B failed on a slow CI runner with the new owner already working. The secrets test read the generated files from the host, which only works where Docker ignores file owners. | The `chaos` and `infrastructure` jobs failed in CI | A probe order sent straight to the new owner marks the end of a takeover; the secrets test runs on a Docker volume and also checks the files belong to the node user with mode 600 |
 | **Updates missed before a late first connect were lost.** Orders, trades and the wallet reloaded only on a reconnect, so when the socket first connected late, for example while its token could not be issued, what happened meanwhile never showed up. | `browser-smoke.mjs`: the buyer's socket token fails three times first | They reload on every connect |
+| **A book could match on state older than its last commit.** When a commit succeeded but the database answered with an error, the owner reloaded its state once and, if that reload failed too, went on with the book and counters from before the commit. It wrote smaller `orderSeq` and `tradeSeq` back, could match against orders that had already filled, and the next trade then hit the unique `(instrument, seq)` index for good. | `book-recovery.int-spec.ts` | After any failed batch the owner reloads from Postgres and matches nothing until the reload succeeds |
+| **A graceful shutdown dropped the lease before the book stopped.** Both shutdown hooks ran at once, so the owner released the instrument while its last batch was still committing, and that batch was thrown away. | `ownership-shutdown.spec.ts` | The owner waits for its book to stop, with a valid lease, and releases the instrument after that |
+| **A frozen owner kept announcing its `seq` when it woke up.** Its heartbeat came from a book it no longer owned. | `fencing.int-spec.ts`: "stops announcing its sequence number once its lease has expired" | No heartbeat past the lease deadline or before a reload |
+| **Anyone could become an admin by registering an email from `ADMIN_EMAILS` first.** Emails are not verified. | `auth.int-spec.ts`: "does not make whoever registers an email from the configuration an admin" | The role lives with the account and only `grant-admin.js` changes it |
+| **Updates lost while an engine's Redis subscription was down went unnoticed** by the order list, the trade feed and the wallet, which have no sequence numbers, while the socket to the browser stayed up. | `realtime-private.int-spec.ts`: "tells connected clients to reload once its Redis subscription was down" | Once it is subscribed again the engine sends `resync`; every page reloads and the book asks for a snapshot |
+| **A late snapshot could roll the book back**, and a heartbeat behind the book went unnoticed. | `reducer.test.ts` | A snapshot older than the book is ignored unless one is awaited; any heartbeat that differs from the book makes it stale |
+| **A form on another site could sign a visitor in** to the attacker's account, because sign-in read any body as JSON. | `auth-route.test.ts` | Sign-in and sign-up accept only `application/json` |
+| **`replay-check` looked only at open orders**, so a filled order stored as cancelled passed. | `replay-check.int-spec.ts`: "notices a finished order stored with another outcome" | It compares the status and remaining quantity of every order |
+| **`rate_limited` did not say which book it was about**, and listing own orders by status had no index. | `platform.int-spec.ts` | The notice names the instrument; index on `orders(ownerId, status)` |
+| **A wallet announcement that failed was never sent.** Settlement logged the failure and acknowledged the trade, so the wallet page stayed behind until the next reconnect. | `trade-stream.int-spec.ts`: "announces a settled trade to both wallets even when the first announcement could not be published" | The consumer acknowledges only after the announcement; a redelivered trade is announced again |
+| **An update the owner failed to publish went unnoticed** by clients whose socket and subscription stayed up. | `realtime-private.int-spec.ts`: "tells connected clients to reload after an update could not be published" | The next successful publish is followed by `resync` to every client |
+| **A heartbeat that raced a snapshot made the book stale for nothing.** | `reducer.test.ts`: "stays live on a heartbeat sent just before the commit its snapshot already shows" | A heartbeat behind the book within 1 s of a snapshot is ignored; the next one decides |
 
 ## Chaos test
 
 `scripts/chaos/run.mjs` runs against the compose stack (`docker-compose.chaos.yml` only raises rate
-limits and names an admin) and runs in CI as the `chaos` job.
+limits; the script makes its own admin with `grant-admin.js`) and runs in CI as the `chaos` job.
 
 **Load.** Eight workers place orders for ten traders on all three instruments, about 150 a second,
 priced so most of them trade. On a timeout, a 5xx or a 429 a worker retries with the same
@@ -323,16 +364,27 @@ priced so most of them trade. On a timeout, a 5xx or a 429 a worker retries with
 
 - every order that got a 202 is stored exactly once, and nothing else is stored;
 - the engines applied every command in the streams;
-- `replay-check` rebuilds every book from its stream: same trades, same open orders;
+- `replay-check` rebuilds every book from its stream: same trades, same open orders, and the same
+  status and remaining quantity for every order;
 - reconciliation is `ok` and the number of settled trades equals the number of trades;
 - each takeover finished within its limit (10 s, 10 s, 3 s). A takeover counts as finished when a
   probe order, sent straight to the new owner's container so that nginx cannot route it to the
   frozen one, is committed;
 - the resumed zombie in B stepped down instead of writing.
 
-**Before the fixes** the starter could not even run this test: a killed owner kept its instrument
-forever (the failing test is in `proof/ownership`), settlement was not implemented, and concurrent
-orders were lost (`proof/command-log`).
+**Before the fixes** the starter could not run this test at all: settlement was not implemented, and
+concurrent orders were lost (`proof/command-log`). Scenario A was reproduced on its own with the
+starter lock wired in (`a376930` in `proof/ownership`) and two engines against the same Redis:
+
+| | Observed |
+|---|---|
+| Owner `engine-a` running | `lock:instrument:ABC = engine-a`, `PTTL -1`: the lock never expires |
+| 30 s after `kill -9 engine-a` | Still `engine-a`, `PTTL -1`; `engine-b` never logged that it owns `ABC` |
+| A buy against a resting sell after the kill | Accepted but never matched: `failover.int-spec.ts` waited 15 s for `filled` and got nothing |
+| `SIGTERM` instead of `kill -9` | The same: the order sent after the stop was never stored, the lock stayed with the stopped engine |
+
+After the fixes the same test passes, and the chaos run below hands `ABC` over in about 5 s under
+load.
 
 **After the fixes**, three consecutive local runs:
 
@@ -370,10 +422,14 @@ Redis Streams is the order log and Redis is the coordinator.
 ## Security and platform
 
 - **Authentication.** JWT access tokens (15 min) and refresh tokens (7 days) that rotate on use.
-  Reusing an old refresh token ends the session. Logout revokes the refresh token. Admins are the
-  emails in `ADMIN_EMAILS`, re-evaluated at every sign-in.
+  Reusing an old refresh token ends the session. Logout revokes the refresh token. The admin role
+  is stored with the account and given or taken away only by an operator with `grant-admin.js`; it
+  reaches the token at the next sign-in or refresh. Emails are not verified, so a role that came
+  from the email alone would go to whoever registered that address first.
 - **Frontend.** Tokens live only in httpOnly, `SameSite=lax` cookies, and the browser talks to
   Next.js route handlers that forward the token. Sign-in redirects only to paths inside the app.
+  Sign-in and sign-up accept only a JSON body, which a form on another site cannot send, so such a
+  form cannot sign the visitor into an attacker's account.
   The WebSocket handshake carries a short-lived access token, and the socket is closed when that
   token expires.
 - **IDOR.** Orders and wallets are always looked up by the token's user. A WebSocket client cannot
@@ -409,12 +465,12 @@ Redis Streams is the order log and Redis is the coordinator.
 
 | Where | What |
 |---|---|
-| `apps/matching-engine-service/test` | Unit tests: matcher, precision, order and password validation, self-trade, depth, apply-commands, the order response, sign-in timing, ownership, random command streams against an independent price-time reference |
-| `apps/matching-engine-service/test/int` | Against real Postgres and Redis, including spawned engine processes: starter bugs, concurrency against a replay and the reference, cancelling, the own order list, fencing, a stuck book, failover, real-time across instances, auth, rate limits including snapshots per address, tracing, ops, replay check |
+| `apps/matching-engine-service/test` | Unit tests: matcher, precision, order and password validation, self-trade, depth, apply-commands, the order response, sign-in timing, ownership and its shutdown order, random command streams against an independent price-time reference |
+| `apps/matching-engine-service/test/int` | Against real Postgres and Redis, including spawned engine processes: starter bugs, concurrency against a replay and the reference, cancelling, the own order list, fencing, a stuck book, a book recovering from a commit answered with an error, failover, real-time across instances, private updates and `resync`, auth and the admin tool, rate limits including snapshots per address, tracing, ops, replay check |
 | `apps/settlement-service/test` | Unit tests: postings, idempotent handling of trade events; integration: redelivery, crash before `XACK`, concurrent trades, reconciliation, ops including retried trades |
-| `apps/frontend/lib` | Book resync reducer, trade feed and order list merging, the socket token retry, the order form's key, the operations page polling, sharing a refresh and handling a service's 401, decimals, safe redirect |
+| `apps/frontend/lib` | Book resync reducer, trade feed and order list merging, the socket token retry, the order form's key, the operations page polling, sharing a refresh and handling a service's 401, sign-in only as JSON, decimals, safe redirect |
 | `scripts/smoke.sh` | The whole compose stack, from a trade to both wallets, reconciliation, one trace id, 429s, forged headers, docs |
-| `e2e/browser-smoke.mjs` | Playwright: sign-up, live orders while the socket token fails at first, the book, a forced resync, a reconnect, the wallet |
+| `e2e/browser-smoke.mjs` | Playwright: sign-up, live orders while the socket token fails at first, the book, a forced resync, a reconnect, the wallet, and every page reloading after the engines lose their Redis subscription |
 | `scripts/chaos/run.mjs` | The chaos test above |
 | `scripts/test-gateway.sh`, `scripts/test-secrets.sh` | nginx retries an order but not a sign-in an engine already received; every service gets its own secrets, kept across restarts |
 
@@ -442,7 +498,10 @@ rewritten because it tested nothing (problem 1).
 | `GET /orders` returned every order | Every active order and the latest 100 finished ones | Bounded response |
 | Any password length | At most 72 bytes | bcrypt compares only 72 bytes |
 | `book_heartbeat` `{instrument, seq}` | `{instrument, seq, intervalMs}` | Clients derive their silence limit from it |
-| Postgres on `127.0.0.1:5433`, Redis on `127.0.0.1:6379` | Not published | No passwords, and the command stream trusts its writers |
+| Postgres on host port 5433, Redis on 6379, both on every interface | Not published | No passwords, and the command stream trusts its writers |
+| `ADMIN_EMAILS` granted the admin role at sign-up and sign-in | The role is stored with the account and set with `grant-admin.js` | Emails are not verified |
+| `/api/auth/login` and `/api/auth/register` took any body | JSON only, anything else gives 415 | Login CSRF |
+| `rate_limited` `{event, retryAfterMs}` | `{event, instrument, retryAfterMs}`, plus a `resync` event | A client with several books retries the right one, and reloads after lost updates |
 
 ## Known limitations and what I would do differently
 
@@ -461,8 +520,11 @@ rewritten because it tested nothing (problem 1).
   a user's buy can rest above their own sell. Other users still trade against both.
 - **Book contract for clients.** A `book_delta` may arrive before the `book_snapshot`; clients
   buffer and drop deltas with `seq` not above the snapshot.
-- **Lost `wallet` notifications.** If settlement dies between its commit and the notification, the
-  event is lost. The money is right, and the client re-reads the wallet when it reconnects.
+- **The internal `POST /trades/settle` announces wallets best effort.** Trades from the stream are
+  announced at least once, but this fallback endpoint answers its caller and does not retry a
+  failed announcement. The client still reloads its wallet on every connect and `resync`.
+- **A real heartbeat regression is noticed one interval later** within 1 s of a snapshot, because
+  that heartbeat could also be one that raced the snapshot.
 - **Sessions.**
   - An access token stays valid until it expires (15 min) after logout.
   - Two simultaneous refreshes with the same token end the session; the frontend serialises them
