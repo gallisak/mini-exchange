@@ -224,6 +224,20 @@ describe('order book resync', () => {
     expect(late.status).toBe('live');
   });
 
+  it('ignores a snapshot older than its book while it waits for a newer one', () => {
+    let state = live(5);
+    state = bookReducer(state, { type: 'delta', delta: delta(6, [ask('100.50', '1')]), at: 1 });
+    state = bookReducer(state, { type: 'delta', delta: delta(7, [ask('100.25', '1')]), at: 2 });
+    state = bookReducer(state, { type: 'resync' });
+    state = bookReducer(state, { type: 'snapshotRequested', at: 3 });
+
+    const older = bookReducer(state, { type: 'snapshot', snapshot: snapshot(6), at: 4 });
+
+    expect(older.seq).toBe(7);
+    expect(older.asks).toEqual(state.asks);
+    expect(older.awaitingSnapshot).toBe(true);
+  });
+
   it('stays live on a heartbeat behind the book, however late it arrives', () => {
     const soon = bookReducer(live(5), { type: 'heartbeat', seq: 4, at: 100 });
     const late = bookReducer(soon, { type: 'heartbeat', seq: 4, at: 5_000 });

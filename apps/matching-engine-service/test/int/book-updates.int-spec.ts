@@ -1,0 +1,150 @@
+import { randomUUID } from 'crypto';
+import Redis from 'ioredis';
+import { DataSource } from 'typeorm';
+import { buildDataSourceOptions } from '../../src/database/data-source';
+import { BookRunner, BookRunnerOptions } from '../../src/orders/engine/book-runner';
+import { commandStreamKey, encodeCommand } from '../../src/orders/engine/order-command';
+import { InstrumentState } from '../../src/orders/entities/instrument-state.entity';
+import { Order, OrderSide } from '../../src/orders/entities/order.entity';
+import { TradeRecord } from '../../src/orders/entities/trade-record.entity';
+import { OrderBookService } from '../../src/orders/order-book.service';
+import { MarketEvent } from '../../src/orders/realtime/market-events';
+import { RedisService } from '../../src/redis/redis.service';
+import { uuidV5 } from '../../src/common/uuid';
+import { eventually, resetState } from './harness';
+
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+
+describe('a running book', () => {
+  let dataSource: DataSource;
+  let redis: RedisService;
+  let raw: Redis;
+  let runner: BookRunner | undefined;
+
+  beforeEach(async () => {
+    await resetState();
+    dataSource = await new DataSource(buildDataSourceOptions()).initialize();
+    redis = new RedisService();
+    raw = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT) });
+  });
+
+  afterEach(async () => {
+    await runner?.stop();
+    runner = undefined;
+    await raw.quit();
+    await redis.onApplicationShutdown();
+    await dataSource.destroy();
+  });
+
+  const options = (overrides: Partial<BookRunnerOptions> = {}): BookRunnerOptions => ({
+    dataSource,
+    redis,
+    orderBook: new OrderBookService(),
+    batchSize: 100,
+    blockMs: 200,
+    retryDelayMs: 100,
+    fence: 1n,
+    leaseValid: () => true,
+    onFenced: () => undefined,
+    ...overrides,
+  });
+
+  async function place(orderId: string, ownerId: string, side: OrderSide, quantity = '1') {
+    await raw.xadd(
+      commandStreamKey('ABC'),
+      '*',
+      ...encodeCommand({ type: 'submit', orderId, ownerId, side, price: '10.00', quantity }),
+    );
+  }
+
+  it('fills one order against thousands of resting orders', async () => {
+    const seller = randomUUID();
+    const resting: Order[] = Array.from({ length: 7000 }, (_, i) => ({
+      id: uuidV5(`resting:${i}`),
+      ownerId: seller,
+      instrument: 'ABC',
+      side: 'sell',
+      price: '10.00',
+      quantity: '0.00000001',
+      remainingQuantity: '0.00000001',
+      status: 'open',
+      createdAt: new Date(1_700_000_000_000 + i),
+      seq: String(i + 1),
+    }));
+    for (let i = 0; i < resting.length; i += 1000) {
+      await dataSource.getRepository(Order).insert(resting.slice(i, i + 1000));
+    }
+    await dataSource.getRepository(InstrumentState).insert({ instrument: 'ABC', orderSeq: '7000' });
+    runner = new BookRunner('ABC', options());
+    await runner.start();
+    const buyId = uuidV5('large-buy');
+
+    await place(buyId, randomUUID(), 'buy', '0.00007');
+
+    await eventually(async () => {
+      const buy = await dataSource.getRepository(Order).findOneBy({ id: buyId });
+      expect(buy?.status).toBe('filled');
+    }, 20000);
+    expect(await dataSource.getRepository(TradeRecord).count()).toBe(7000);
+  }, 60000);
+
+  it('publishes the updates of a committed batch before it stops', async () => {
+    const published: string[] = [];
+    runner = new BookRunner(
+      'ABC',
+      options({
+        publish: async (event) => {
+          await sleep(300);
+          published.push(event.type);
+        },
+      }),
+    );
+    await runner.start();
+    await place(uuidV5('sell'), 'seller', 'sell');
+    await place(uuidV5('buy'), 'buyer', 'buy');
+    await eventually(async () =>
+      expect(await dataSource.getRepository(TradeRecord).count()).toBe(1),
+    );
+
+    await runner.stop();
+    runner = undefined;
+
+    expect(published).toEqual(expect.arrayContaining(['trades', 'orders', 'book_delta']));
+  });
+
+  it('tells every client to reload when it takes a book over, since the last owner may not have published', async () => {
+    const events: MarketEvent[] = [];
+    runner = new BookRunner('ABC', options({ fence: 2n, publish: async (event) => void events.push(event) }));
+
+    await runner.start();
+
+    await eventually(async () =>
+      expect(events).toContainEqual({
+        type: 'resync',
+        resync: { instruments: ['ABC'], owners: [], allOwners: true },
+      }),
+    );
+  });
+
+  it('stops at once even after its stream reader reconnected', async () => {
+    runner = new BookRunner('ABC', options({ blockMs: 5000 }));
+    await runner.start();
+    const readers = async () =>
+      ((await raw.client('LIST')) as string).split('\n').filter((line) => line.includes('cmd=xread'));
+    await eventually(async () => expect(await readers()).toHaveLength(1));
+    const [first] = await readers();
+    const id = /\bid=(\d+)/.exec(first)?.[1] as string;
+    await raw.client('KILL', 'ID', id);
+    await eventually(async () => {
+      const now = await readers();
+      expect(now).toHaveLength(1);
+      expect(/\bid=(\d+)/.exec(now[0])?.[1]).not.toBe(id);
+    });
+
+    const startedAt = Date.now();
+    await runner.stop();
+    runner = undefined;
+
+    expect(Date.now() - startedAt).toBeLessThan(1000);
+  });
+});

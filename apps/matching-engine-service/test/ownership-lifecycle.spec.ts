@@ -156,4 +156,39 @@ describe('instrument ownership lifecycle', () => {
     expect(attempts).toBeGreaterThan(1);
     expect(calls.started).toEqual([]);
   });
+
+  it('keeps renewing the other instruments while a lost one is still stopping', async () => {
+    const renewed: string[] = [];
+    let lost = false;
+    let finishStop: () => void = () => undefined;
+    const lock = {
+      acquire: async (key: string) => (lost && key.endsWith(':ABC') ? null : 1n),
+      renew: async (key: string) => {
+        renewed.push(key);
+        return !(lost && key.endsWith(':ABC'));
+      },
+      release: async () => true,
+      raiseFence: async () => undefined,
+    } as unknown as RedisLockService;
+    const engine = {
+      isStopping: () => false,
+      startInstrument: async () => undefined,
+      stopInstrument: (instrument: string) =>
+        instrument === 'ABC'
+          ? new Promise<void>((resolve) => (finishStop = resolve))
+          : Promise.resolve(),
+    } as unknown as MatchingEngineService;
+    const service = new InstrumentOwnershipService(lock, engine);
+    await service.onApplicationBootstrap();
+
+    lost = true;
+    await sleep(150);
+    const before = renewed.filter((key) => key.endsWith(':DEF')).length;
+    await sleep(400);
+    const after = renewed.filter((key) => key.endsWith(':DEF')).length;
+    finishStop();
+    await service.onModuleDestroy();
+
+    expect(after - before).toBeGreaterThanOrEqual(2);
+  });
 });

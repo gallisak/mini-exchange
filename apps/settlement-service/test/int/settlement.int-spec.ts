@@ -3,7 +3,7 @@ import { randomUUID } from 'crypto';
 import Redis from 'ioredis';
 import request from 'supertest';
 import { WalletNotifier } from '../../src/notifications/wallet-notifier.service';
-import { balances, createApp, eventually, range, redisClient, resetState, settle, trade } from './harness';
+import { accessToken, balances, createApp, eventually, range, redisClient, resetState, settle, trade } from './harness';
 
 const OPENING = { USD: '100000.00', ABC: '1000.00000000', DEF: '1000.00000000', XYZ: '1000.00000000' };
 
@@ -201,5 +201,22 @@ describe('trade settlement', () => {
       .get('/wallets/me')
       .set('authorization', 'Bearer not-a-token')
       .expect(401);
+  });
+
+  it('opens a new wallet once when several requests ask for it at the same time', async () => {
+    const owner = randomUUID();
+
+    const statuses = await Promise.all(
+      range(20).map(async () =>
+        (
+          await request(app.getHttpServer())
+            .get('/wallets/me')
+            .set('authorization', `Bearer ${accessToken(owner)}`)
+        ).status,
+      ),
+    );
+
+    expect(statuses).toEqual(range(20).map(() => 200));
+    expect(await balances(app, owner)).toEqual(OPENING);
   });
 });

@@ -33,4 +33,14 @@ describe('ledger schema', () => {
       /duplicate key/,
     );
   });
+
+  it('keeps the indexes the reconciliation of one period needs', async () => {
+    const indexes: { tablename: string; indexdef: string }[] = await dataSource.query(
+      `SELECT tablename, indexdef FROM pg_indexes WHERE tablename = 'ledger_transactions'`,
+    );
+
+    expect(indexes.map((row) => row.indexdef)).toEqual(
+      expect.arrayContaining([expect.stringMatching(/\("createdAt"\)/)]),
+    );
+  });
 });

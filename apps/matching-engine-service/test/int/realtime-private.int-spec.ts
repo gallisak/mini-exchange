@@ -3,7 +3,8 @@ import { JwtService } from '@nestjs/jwt';
 import Redis from 'ioredis';
 import { AddressInfo } from 'net';
 import { Socket, io } from 'socket.io-client';
-import { WALLET_CHANNEL } from '../../src/orders/realtime/market-events';
+import request from 'supertest';
+import { WALLET_CHANNEL, marketChannel } from '../../src/orders/realtime/market-events';
 import { RedisService } from '../../src/redis/redis.service';
 import { TestUser, createApp, eventually, register, resetState, submit } from './harness';
 
@@ -184,5 +185,35 @@ describe('private real-time updates', () => {
     await eventually(async () => expect(resyncs).toHaveLength(1));
     await submit(app, alice, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
     await eventually(async () => expect(events.orders).toHaveLength(1));
+  });
+
+  it('takes only a real-time ticket for the connection, not an API access token', async () => {
+    const alice = await register(app);
+    const ticket = (
+      await request(app.getHttpServer())
+        .post('/auth/ws-ticket')
+        .set('authorization', `Bearer ${alice.token}`)
+        .expect(200)
+    ).body.ticket;
+
+    await expect(connect(alice.token)).rejects.toThrow('Unauthorized');
+    await expect(connect(ticket)).resolves.toBeDefined();
+  });
+
+  it('tells every signed-in client to reload its orders when a book changed owner', async () => {
+    const [alice, bob] = [await register(app), await register(app)];
+    const [aliceResyncs, bobResyncs] = [await watching(alice), await watching(bob, 'ABC')];
+    const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT) });
+
+    await redis.publish(
+      marketChannel('resync'),
+      JSON.stringify({ type: 'resync', resync: { instruments: ['ABC'], owners: [], allOwners: true } }),
+    );
+    await redis.quit();
+
+    await eventually(async () => {
+      expect(aliceResyncs).toEqual([{ orders: true }]);
+      expect(bobResyncs).toEqual(expect.arrayContaining([{ instrument: 'ABC' }, { orders: true }]));
+    });
   });
 });

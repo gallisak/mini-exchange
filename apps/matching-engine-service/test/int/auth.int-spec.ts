@@ -27,7 +27,10 @@ describe('authentication sessions', () => {
   const http = () => request(app.getHttpServer());
   const signUp = async (email = `user-${randomUUID()}@example.com`) =>
     (await http().post('/auth/register').send({ email, password: 'password123' }).expect(201)).body;
-  const refresh = (refreshToken: string) => http().post('/auth/refresh').send({ refreshToken });
+  const refresh = (refreshToken: string, attempt?: string) =>
+    http().post('/auth/refresh').send({ refreshToken, ...(attempt ? { attempt } : {}) });
+  const login = async (email: string, password = 'password123') =>
+    (await http().post('/auth/login').send({ email, password }).expect(200)).body;
 
   it('answers 409, not 500, when the same email registers twice at once', async () => {
     const email = `race-${randomUUID()}@example.com`;
@@ -196,5 +199,88 @@ describe('authentication sessions', () => {
       .post('/auth/register')
       .send({ email: 'TRADER@example.com', password: 'password123' })
       .expect(409);
+  });
+
+  it('gives the same rotation again to the caller that lost its answer', async () => {
+    const session = await signUp();
+    const attempt = randomUUID();
+    await refresh(session.refreshToken, attempt).expect(200);
+
+    const retried = await refresh(session.refreshToken, attempt).expect(200);
+
+    await refresh(retried.body.refreshToken).expect(200);
+    await refresh(session.refreshToken, attempt).expect(401);
+  });
+
+  it('still ends the session when a used refresh token comes back without the attempt that used it', async () => {
+    const session = await signUp();
+    const rotated = await refresh(session.refreshToken, randomUUID()).expect(200);
+
+    await refresh(session.refreshToken, randomUUID()).expect(401);
+
+    await refresh(rotated.body.refreshToken).expect(401);
+  });
+
+  it('signs out only the device that logs out', async () => {
+    const email = `logout-${randomUUID()}@example.com`;
+    const laptop = await signUp(email);
+    const phone = await login(email);
+
+    await http().post('/auth/logout').set('authorization', `Bearer ${laptop.accessToken}`).expect(204);
+
+    await refresh(laptop.refreshToken).expect(401);
+    await refresh(phone.refreshToken).expect(200);
+  });
+
+  it('stops honouring the admin role as soon as the operator tool takes it away', async () => {
+    await signUp('chief@example.com');
+    const dataSource = app.get(DataSource);
+    await setAdmin(dataSource, 'chief@example.com', true);
+    const admin = await login('chief@example.com');
+    const status = () =>
+      http().get('/ops/status').set('authorization', `Bearer ${admin.accessToken}`);
+    await status().expect(200);
+
+    await setAdmin(dataSource, 'chief@example.com', false);
+
+    await status().expect(403);
+  });
+
+  it('signs in an account whose email differs from another one only in case', async () => {
+    const dataSource = app.get(DataSource);
+    const first = await signUp('clash@example.com');
+    await dataSource.query(`UPDATE users SET email = 'Clash@Example.com' WHERE email = 'clash@example.com'`);
+    const second = (
+      await http()
+        .post('/auth/register')
+        .send({ email: 'clash@example.com', password: 'another-password' })
+        .expect(201)
+    ).body;
+
+    const firstAgain = await login('Clash@Example.com');
+    const secondAgain = await login('clash@example.com', 'another-password');
+
+    expect(claims(firstAgain.accessToken).sub).toBe(claims(first.accessToken).sub);
+    expect(claims(secondAgain.accessToken).sub).toBe(claims(second.accessToken).sub);
+    await http()
+      .post('/auth/login')
+      .send({ email: 'clash@example.com', password: 'wrong-password' })
+      .expect(401);
+  });
+
+  it('issues a short-lived ticket for the real-time connection that the API does not accept', async () => {
+    const session = await signUp();
+
+    const response = await http()
+      .post('/auth/ws-ticket')
+      .set('authorization', `Bearer ${session.accessToken}`)
+      .expect(200);
+
+    const ticket = claims(response.body.ticket);
+    expect(ticket.sub).toBe(claims(session.accessToken).sub);
+    expect((ticket.exp as number) - (ticket.iat as number)).toBeLessThanOrEqual(60);
+    expect(ticket.until).toBe(claims(session.accessToken).exp);
+    await http().get('/orders').set('authorization', `Bearer ${response.body.ticket}`).expect(401);
+    await http().post('/auth/ws-ticket').expect(401);
   });
 });

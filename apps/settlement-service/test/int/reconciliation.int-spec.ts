@@ -303,12 +303,21 @@ describe('reconciliation', () => {
     expect(response.body.engineError).toBe('Engine returned a malformed trade summary');
   });
 
-  it('stops short of the most recent trades by default so in-flight ones do not show up', async () => {
+  it('checks the last day by default and stops short of the most recent trades', async () => {
     const response = await reconcile({}).expect(200);
 
     const { from, to } = response.body.period;
-    expect(from).toBe('1970-01-01T00:00:00.000Z');
+    expect(new Date(to).getTime() - new Date(from).getTime()).toBe(24 * 3_600_000);
     expect(Date.now() - new Date(to).getTime()).toBeGreaterThanOrEqual(60000);
+  });
+
+  it('checks only the ledger activity of the period it was asked about', async () => {
+    await settle(app, trade({ executedAt: '2026-11-03T10:00:00.000Z' })).expect(200);
+    await corrupt(`UPDATE accounts SET balance = balance + 1 WHERE asset = 'ABC' AND kind = 'user'`);
+
+    const response = await reconcile().expect(200);
+
+    expect(response.body.ledger.accountsOffEntries).toEqual([]);
   });
 
   it('is open only to admins and rejects a bad period', async () => {

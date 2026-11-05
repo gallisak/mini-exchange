@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { REFRESH_REUSE_WINDOW_MS, Rotation, refreshOnce } from './session';
+import { NextResponse } from 'next/server';
+import { REFRESH_REUSE_WINDOW_MS, Rotation, refreshOnce, storeTokens } from './session';
 
 describe('sharing one refresh between requests', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -14,10 +15,10 @@ describe('sharing one refresh between requests', () => {
     const rotate = vi.fn(async () => rotated(1));
 
     const [first, second] = await Promise.all([
-      refreshOnce('shared-a', rotate),
-      refreshOnce('shared-a', rotate),
+      refreshOnce({ refreshToken: 'shared-a', accessToken: 'access-a' }, rotate),
+      refreshOnce({ refreshToken: 'shared-a', accessToken: 'access-a' }, rotate),
     ]);
-    const late = await refreshOnce('shared-a', rotate);
+    const late = await refreshOnce({ refreshToken: 'shared-a', accessToken: 'access-a' }, rotate);
 
     expect(rotate).toHaveBeenCalledTimes(1);
     expect([first, second, late]).toEqual([rotated(1), rotated(1), rotated(1)]);
@@ -26,12 +27,46 @@ describe('sharing one refresh between requests', () => {
   it('stops handing out the new pair for the old token after a few seconds', async () => {
     let n = 0;
     const rotate = vi.fn(async () => rotated(++n));
-    await refreshOnce('shared-b', rotate);
+    await refreshOnce({ refreshToken: 'shared-b', accessToken: 'access-b' }, rotate);
 
     await vi.advanceTimersByTimeAsync(REFRESH_REUSE_WINDOW_MS);
-    await refreshOnce('shared-b', rotate);
+    await refreshOnce({ refreshToken: 'shared-b', accessToken: 'access-b' }, rotate);
 
     expect(REFRESH_REUSE_WINDOW_MS).toBeLessThanOrEqual(5_000);
     expect(rotate).toHaveBeenCalledTimes(2);
+  });
+
+  it('does not hand the new pair to someone who has the old refresh token without its access token', async () => {
+    const rotate = vi.fn(async () => rotated(1));
+    await refreshOnce({ refreshToken: 'stolen', accessToken: 'access-c' }, rotate);
+    await refreshOnce({ refreshToken: 'stolen', accessToken: 'access-c' }, rotate);
+
+    await refreshOnce({ refreshToken: 'stolen' }, rotate);
+    await refreshOnce({ refreshToken: 'stolen', accessToken: 'forged' }, rotate);
+
+    expect(rotate).toHaveBeenCalledTimes(3);
+  });
+
+  it('retries a rotation whose answer was lost as the same attempt', async () => {
+    const outcomes: Rotation[] = [{ kind: 'unavailable' }, rotated(1)];
+    const rotate = vi.fn(async (_token: string, _attempt: string) => outcomes.shift() as Rotation);
+
+    await refreshOnce({ refreshToken: 'lost', accessToken: 'access-d' }, rotate);
+    await refreshOnce({ refreshToken: 'lost', accessToken: 'access-d' }, rotate);
+
+    const [first, second] = rotate.mock.calls.map(([, attempt]) => attempt);
+    expect(first).toEqual(expect.any(String));
+    expect(second).toBe(first);
+  });
+
+  it('keeps the access cookie as long as the refresh cookie, so a refresh can be tied to both', () => {
+    const response = NextResponse.json({});
+
+    storeTokens(response, { accessToken: 'a', refreshToken: 'r' });
+
+    const ages = response.headers
+      .getSetCookie()
+      .map((cookie) => [cookie.split('=')[0], /Max-Age=(\d+)/.exec(cookie)?.[1]]);
+    expect(Object.fromEntries(ages)).toEqual({ mx_access: '604800', mx_refresh: '604800' });
   });
 });

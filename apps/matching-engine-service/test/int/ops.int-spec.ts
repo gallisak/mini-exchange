@@ -21,6 +21,21 @@ describe('operations endpoints', () => {
 
     const http = () => request(app.getHttpServer());
 
+    it('answers 404 for an unknown path even when it names a network error', async () => {
+      await http().get('/ECONNREFUSED').expect(404);
+      await http().get('/orders/book/Connection%20is%20closed').expect(404);
+    });
+
+    it('keeps an index for purging published outbox messages', async () => {
+      const indexes: { indexdef: string }[] = await app
+        .get(DataSource)
+        .query(`SELECT indexdef FROM pg_indexes WHERE tablename = 'outbox'`);
+
+      expect(indexes.map((row) => row.indexdef)).toEqual(
+        expect.arrayContaining([expect.stringMatching(/\("publishedAt"\) WHERE \("publishedAt" IS NOT NULL\)/)]),
+      );
+    });
+
     it('reports itself healthy', async () => {
       const response = await http().get('/health').expect(200);
 

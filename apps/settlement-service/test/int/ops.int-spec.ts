@@ -115,4 +115,16 @@ describe('settlement operations endpoints', () => {
     }, 10000);
     await redis.quit();
   });
+
+  it('stops honouring an admin token issued before the role was taken away', async () => {
+    const admin = randomUUID();
+    const token = accessToken(admin, 'admin');
+    await http().get('/ops/status').set('authorization', `Bearer ${token}`).expect(200);
+    const redis = redisClient();
+
+    await redis.set(`auth:role-changed:${admin}`, String(Date.now()));
+    await redis.quit();
+
+    await http().get('/ops/status').set('authorization', `Bearer ${token}`).expect(403);
+  });
 });

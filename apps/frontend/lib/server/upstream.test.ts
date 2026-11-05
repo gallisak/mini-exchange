@@ -11,11 +11,11 @@ function request(cookies: Record<string, string>) {
   });
 }
 
-function upstreamAnswers(answer: (url: string) => { status: number; body: unknown }) {
+function upstreamAnswers(answer: (url: string, init?: RequestInit) => { status: number; body: unknown }) {
   vi.stubGlobal(
     'fetch',
-    vi.fn(async (url: string) => {
-      const { status, body } = answer(url);
+    vi.fn(async (url: string, init?: RequestInit) => {
+      const { status, body } = answer(url, init);
       return new Response(JSON.stringify(body), { status });
     }),
   );
@@ -57,5 +57,23 @@ describe('calling a service with the session', () => {
 
     expect(response.status).toBe(401);
     expect(cleared(response)).toBe(2);
+  });
+
+  it('names the rotation attempt when it renews a session', async () => {
+    const sent: unknown[] = [];
+    upstreamAnswers((url, init) => {
+      if (url.endsWith('/auth/refresh')) {
+        sent.push(JSON.parse(String(init?.body)));
+        return { status: 200, body: { accessToken: token(900), refreshToken: 'renewed' } };
+      }
+      return { status: 200, body: {} };
+    });
+    const incoming = request({ mx_access: token(-1), mx_refresh: 'aging-refresh' });
+
+    await withSession(incoming, (accessToken) =>
+      upstream(incoming, 'settlement', '/wallets/me', {}, accessToken),
+    );
+
+    expect(sent).toEqual([{ refreshToken: 'aging-refresh', attempt: expect.any(String) }]);
   });
 });
