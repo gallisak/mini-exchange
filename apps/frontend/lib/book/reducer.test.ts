@@ -224,19 +224,13 @@ describe('order book resync', () => {
     expect(late.status).toBe('live');
   });
 
-  it('marks the book stale when a heartbeat is behind it, since the engine lost changes it showed', () => {
-    const state = bookReducer(live(5), { type: 'heartbeat', seq: 3, at: 2_000 });
+  it('stays live on a heartbeat behind the book, however late it arrives', () => {
+    const soon = bookReducer(live(5), { type: 'heartbeat', seq: 4, at: 100 });
+    const late = bookReducer(soon, { type: 'heartbeat', seq: 4, at: 5_000 });
 
-    expect(state.status).toBe('stale');
-    expect(needsSnapshot(state)).toBe(true);
-  });
-
-  it('stays live on a heartbeat sent just before the commit its snapshot already shows', () => {
-    const raced = bookReducer(live(5), { type: 'heartbeat', seq: 4, at: 100 });
-    const persisting = bookReducer(raced, { type: 'heartbeat', seq: 4, at: 2_100 });
-
-    expect(raced.status).toBe('live');
-    expect(persisting.status).toBe('stale');
+    expect(soon.status).toBe('live');
+    expect(late.status).toBe('live');
+    expect(late.seq).toBe(5);
   });
 
   it('asks for a fresh snapshot when the engine says updates may have been lost', () => {

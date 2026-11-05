@@ -53,7 +53,10 @@ export async function replayInstrument(
   const { state, trades, orders } = await dataSource.transaction('REPEATABLE READ', async (manager) => ({
     state: await manager.findOneBy(InstrumentState, { instrument }),
     trades: await manager.find(TradeRecord, { where: { instrument }, order: { seq: 'ASC' } }),
-    orders: await manager.find(Order, { where: { instrument } }),
+    orders: await manager.find(Order, {
+      where: { instrument },
+      select: { id: true, status: true, remainingQuantity: true },
+    }),
   }));
   const open = orders.filter((order) => OPEN.includes(order.status));
   const appliedUpTo = state?.lastCommandId ?? '0-0';
@@ -134,9 +137,10 @@ async function main(): Promise<number> {
     port: Number(process.env.REDIS_PORT ?? 6379),
   });
   try {
-    const instruments = await Promise.all(
-      INSTRUMENTS.map((instrument) => replayInstrument(dataSource, redis, instrument)),
-    );
+    const instruments: InstrumentReplay[] = [];
+    for (const instrument of INSTRUMENTS) {
+      instruments.push(await replayInstrument(dataSource, redis, instrument));
+    }
     const matches = instruments.every((result) => result.problems.length === 0);
     process.stdout.write(`${JSON.stringify({ matches, instruments }, null, 2)}\n`);
     return matches ? 0 : 1;

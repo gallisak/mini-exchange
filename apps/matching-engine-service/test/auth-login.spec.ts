@@ -4,6 +4,7 @@ import { Repository } from 'typeorm';
 import { UnauthorizedException } from '@nestjs/common';
 import { AuthService } from '../src/auth/auth.service';
 import { User } from '../src/auth/entities/user.entity';
+import { RefreshSession } from '../src/auth/entities/refresh-session.entity';
 
 jest.mock('bcrypt', () => {
   const actual = jest.requireActual('bcrypt');
@@ -13,7 +14,7 @@ jest.mock('bcrypt', () => {
 describe('login', () => {
   it('checks a password hash even for an unknown email, so timing does not reveal accounts', async () => {
     const users = { findOne: async () => null } as unknown as Repository<User>;
-    const service = new AuthService(users, new JwtService());
+    const service = new AuthService(users, {} as Repository<RefreshSession>, new JwtService());
 
     await expect(
       service.login({ email: 'nobody@example.com', password: 'password123' }),

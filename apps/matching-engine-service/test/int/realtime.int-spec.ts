@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import { AddressInfo } from 'net';
 import { Socket, io } from 'socket.io-client';
+import Redis from 'ioredis';
 import request from 'supertest';
 import { createApp, eventually, listOrders, register, resetState, submit } from './harness';
 
@@ -173,5 +174,29 @@ describe('real-time order book', () => {
     expect(response.status).toBe(200);
     expect(JSON.stringify(response.body)).not.toContain(seller.userId);
     expect(response.body).toEqual((await subscribed()).snapshot);
+  });
+
+  it('ignores malformed market messages and keeps serving the book', async () => {
+    const seller = await register(app);
+    const { socket } = await subscribed();
+    const deltas = collect(socket, 'book_delta');
+    const raw = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT) });
+    for (const message of [
+      '{"type":"resync"}',
+      '{"type":"resync","resync":{"instruments":"ABC"}}',
+      '{"type":"book_delta"}',
+      '{"type":"book_heartbeat"}',
+      '{"type":"trades","trades":[null]}',
+      '{"type":"orders","orders":[null]}',
+      'null',
+      '[]',
+    ]) {
+      await raw.publish('market:ABC', message);
+    }
+    await raw.quit();
+
+    await submit(app, seller, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
+
+    await eventually(async () => expect(deltas).toHaveLength(1));
   });
 });

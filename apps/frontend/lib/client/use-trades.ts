@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { mergeTrades, newestSeq, skipsTrades } from './feeds';
 import { useSocket } from './socket';
-import { Trade } from './types';
+import { ResyncScope, Trade, resyncsBook } from './types';
 
 const KEEP = 50;
 
@@ -52,13 +52,16 @@ export function useTrades(instrument: string) {
       if (skipped) void load();
     };
     const onConnect = () => void load();
+    const onResync = (scope?: ResyncScope) => {
+      if (resyncsBook(scope, instrument)) void load();
+    };
     socket.on('trade', onTrade);
     socket.on('connect', onConnect);
-    socket.on('resync', onConnect);
+    socket.on('resync', onResync);
     return () => {
       socket.off('trade', onTrade);
       socket.off('connect', onConnect);
-      socket.off('resync', onConnect);
+      socket.off('resync', onResync);
     };
   }, [socket, instrument, load]);
 

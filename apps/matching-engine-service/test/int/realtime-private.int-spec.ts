@@ -121,18 +121,54 @@ describe('private real-time updates', () => {
     expect(bobClient.events.wallets).toEqual([]);
   });
 
-  it('tells connected clients to reload after an update could not be published', async () => {
-    const alice = await register(app);
-    const { socket } = await connect(alice);
+  function failFirstPublishOf(type: string) {
+    const client = app.get(RedisService).client;
+    const publish = client.publish.bind(client);
+    let failed = false;
+    jest.spyOn(client, 'publish').mockImplementation(((channel: string, message: string) => {
+      if (!failed && JSON.parse(message).type === type) {
+        failed = true;
+        return Promise.reject(new Error('Connection is closed.'));
+      }
+      return publish(channel, message);
+    }) as never);
+  }
+
+  async function watching(user: TestUser, instrument?: string) {
+    const client = await connect(user);
     const resyncs: unknown[] = [];
-    socket.on('resync', () => resyncs.push(true));
-    jest
-      .spyOn(app.get(RedisService).client, 'publish')
-      .mockRejectedValueOnce(new Error('Connection is closed.'));
+    client.socket.on('resync', (scope: unknown) => resyncs.push(scope));
+    if (instrument) {
+      await new Promise((resolve) => {
+        client.socket.once('book_snapshot', resolve);
+        client.socket.emit('subscribe', instrument);
+      });
+    }
+    return resyncs;
+  }
+
+  it('tells the owner of an order update that could not be published to reload, and nobody else', async () => {
+    const [alice, bob] = [await register(app), await register(app)];
+    const [aliceResyncs, bobResyncs] = [await watching(alice), await watching(bob, 'DEF')];
+    failFirstPublishOf('orders');
 
     await submit(app, alice, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
 
-    await eventually(async () => expect(resyncs.length).toBeGreaterThanOrEqual(1));
+    await eventually(async () => expect(aliceResyncs).toEqual([{ orders: true }]));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(bobResyncs).toEqual([]);
+  });
+
+  it('tells the subscribers of a book whose delta could not be published to reload, and nobody else', async () => {
+    const [alice, bob, carol] = [await register(app), await register(app), await register(app)];
+    const [abcResyncs, defResyncs] = [await watching(bob, 'ABC'), await watching(carol, 'DEF')];
+    failFirstPublishOf('book_delta');
+
+    await submit(app, alice, { side: 'sell', price: '100.00', quantity: '1' }).expect(202);
+
+    await eventually(async () => expect(abcResyncs).toEqual([{ instrument: 'ABC' }]));
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    expect(defResyncs).toEqual([]);
   });
 
   it('tells connected clients to reload once its Redis subscription was down, since updates may be lost', async () => {

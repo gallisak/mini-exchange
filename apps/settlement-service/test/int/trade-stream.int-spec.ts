@@ -87,9 +87,9 @@ describe('trade stream consumer', () => {
   it('keeps retrying a trade the ledger failed to settle instead of dead-lettering it', async () => {
     app = await createApp();
     const ledger = app.get(LedgerService);
-    const settle = ledger.settleAndAnnounce.bind(ledger);
+    const settle = ledger.settle.bind(ledger);
     let failures = 0;
-    jest.spyOn(ledger, 'settleAndAnnounce').mockImplementation(async (body) => {
+    jest.spyOn(ledger, 'settle').mockImplementation(async (body) => {
       if (failures < 4) {
         failures += 1;
         throw new Error('Connection terminated unexpectedly');

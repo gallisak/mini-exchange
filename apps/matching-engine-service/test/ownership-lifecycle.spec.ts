@@ -33,6 +33,7 @@ function ownership({ acquire, startDelayMs }: Setup) {
     raiseFence: async () => undefined,
   } as unknown as RedisLockService;
   const engine = {
+    isStopping: () => false,
     startInstrument: async (instrument: string) => {
       await sleep(startDelayMs);
       calls.started.push(instrument);
@@ -104,6 +105,7 @@ describe('instrument ownership lifecycle', () => {
     } as unknown as RedisLockService;
     const runners = new Map<string, InstrumentLease>();
     const engine = {
+      isStopping: () => false,
       startInstrument: async (instrument: string, lease: InstrumentLease) => {
         if (slowStart) {
           holder = 'other';

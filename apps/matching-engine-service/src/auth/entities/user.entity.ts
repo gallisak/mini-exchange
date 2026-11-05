@@ -13,9 +13,6 @@ export class User {
   @Column()
   passwordHash: string;
 
-  @Column({ type: 'varchar', nullable: true })
-  refreshTokenHash: string | null;
-
   @Column({ type: 'varchar', default: 'user' })
   role: UserRole;
 }

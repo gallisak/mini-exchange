@@ -1,5 +1,5 @@
 import { Injectable, OnApplicationShutdown } from '@nestjs/common';
-import Redis from 'ioredis';
+import Redis, { RedisOptions } from 'ioredis';
 
 export async function closeRedis(client: Redis | undefined): Promise<void> {
   if (!client || client.status === 'end') return;
@@ -23,8 +23,8 @@ export class RedisService implements OnApplicationShutdown {
     return this.client.status === 'ready';
   }
 
-  createConnection(): Redis {
-    return this.client.duplicate();
+  createConnection(options: RedisOptions = {}): Redis {
+    return this.client.duplicate(options);
   }
 
   async onApplicationShutdown(): Promise<void> {

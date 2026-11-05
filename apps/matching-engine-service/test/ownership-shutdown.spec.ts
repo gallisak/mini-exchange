@@ -44,4 +44,27 @@ describe('shutting down an owner', () => {
 
     expect(events).toEqual(['book stopped, lease valid: true', 'released']);
   });
+
+  it('does not take an instrument while its previous book is still stopping', async () => {
+    const acquired: string[] = [];
+    const lock = {
+      acquire: async (key: string) => {
+        acquired.push(key);
+        return null;
+      },
+      renew: async () => true,
+      release: async () => true,
+      raiseFence: async () => undefined,
+    } as unknown as RedisLockService;
+    const engine = {
+      isStopping: (instrument: string) => instrument === 'ABC',
+      startInstrument: async () => undefined,
+      stopInstrument: async () => undefined,
+    } as unknown as MatchingEngineService;
+    const ownership = new InstrumentOwnershipService(lock, engine);
+
+    await (ownership as unknown as { acquireFree: () => Promise<void> }).acquireFree();
+
+    expect(acquired).toEqual(['lock:instrument:DEF', 'lock:instrument:XYZ']);
+  });
 });

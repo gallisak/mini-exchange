@@ -25,8 +25,12 @@ import {
   WalletChanged,
 } from '../realtime/market-events';
 
+const SUBSCRIBE_RETRY_MS = 1000;
 const bookRoom = (instrument: string) => `book:${instrument}`;
 const userRoom = (userId: string) => `user:${userId}`;
+
+const isInstrument = (value: unknown): value is string =>
+  typeof value === 'string' && INSTRUMENTS.includes(value);
 
 function parse<T>(message: string): T | null {
   try {
@@ -47,6 +51,8 @@ export class OrdersGateway
 {
   private readonly logger = new Logger(OrdersGateway.name);
   private subscriber?: Redis;
+  private subscribeRetry?: NodeJS.Timeout;
+  private closing = false;
   private readonly expiries = new Map<string, NodeJS.Timeout>();
   private readonly snapshots = new Map<string, { windowStart: number; count: number }>();
   private readonly trust = proxyAddr.compile(trustedProxies());
@@ -72,39 +78,43 @@ export class OrdersGateway
       next();
     });
 
-    const subscriber = this.redis.createConnection();
+    const subscriber = this.redis.createConnection({ autoResubscribe: false });
     this.subscriber = subscriber;
-    const subscribe = () =>
+    let subscribedBefore = false;
+    let missedUpdates = false;
+    const subscribe = () => {
+      clearTimeout(this.subscribeRetry);
       Promise.all([
         subscriber.psubscribe(`${MARKET_CHANNEL_PREFIX}*`),
         subscriber.subscribe(WALLET_CHANNEL),
-      ]);
-    let connectedBefore = false;
-    subscriber.on('ready', () => {
-      if (!connectedBefore) {
-        connectedBefore = true;
-        return;
-      }
-      subscribe().then(
+      ]).then(
         () => {
-          this.logger.warn('Real-time subscription restored, telling clients to reload');
-          server.emit('resync');
+          if (subscribedBefore || missedUpdates) {
+            this.logger.warn('Real-time subscription restored, telling clients to reload');
+            server.emit('resync', {});
+          }
+          subscribedBefore = true;
+          missedUpdates = false;
         },
-        (error: Error) => this.logger.error(`Could not resubscribe to real-time events: ${error.message}`),
+        (error: Error) => {
+          missedUpdates = true;
+          this.logger.error(`Could not subscribe to real-time events, retrying: ${error.message}`);
+          if (!this.closing) this.subscribeRetry = setTimeout(subscribe, SUBSCRIBE_RETRY_MS);
+        },
       );
-    });
+    };
+    subscriber.on('ready', subscribe);
     subscriber.on('pmessage', (_pattern: string, _channel: string, message: string) =>
       this.fanOutMarket(message),
     );
     subscriber.on('message', (channel: string, message: string) => {
       if (channel === WALLET_CHANNEL) this.fanOutWallet(message);
     });
-    subscribe().catch((error: Error) =>
-      this.logger.error(`Could not subscribe to real-time events: ${error.message}`),
-    );
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.closing = true;
+    clearTimeout(this.subscribeRetry);
     this.expiries.forEach((timer) => clearTimeout(timer));
     this.expiries.clear();
     await closeRedis(this.subscriber);
@@ -190,27 +200,42 @@ export class OrdersGateway
   }
 
   private fanOutMarket(message: string): void {
-    const event = parse<MarketEvent>(message);
-    if (event?.type === 'resync') {
-      this.server.emit('resync');
+    try {
+      this.routeMarket(parse<MarketEvent>(message));
+    } catch (error) {
+      this.logger.warn(`Ignoring a malformed market message: ${(error as Error).message}`);
     }
-    if (event?.type === 'book_delta') {
+  }
+
+  private routeMarket(event: MarketEvent | null): void {
+    if (typeof event !== 'object' || event === null) return;
+    if (event.type === 'book_delta' && isInstrument(event.delta?.instrument)) {
       this.server.to(bookRoom(event.delta.instrument)).emit('book_delta', event.delta);
     }
-    if (event?.type === 'book_heartbeat') {
-      this.server
-        .to(bookRoom(event.heartbeat.instrument))
-        .emit('book_heartbeat', event.heartbeat);
+    if (event.type === 'book_heartbeat' && isInstrument(event.heartbeat?.instrument)) {
+      this.server.to(bookRoom(event.heartbeat.instrument)).emit('book_heartbeat', event.heartbeat);
     }
-    if (event?.type === 'trades') {
+    if (event.type === 'trades' && Array.isArray(event.trades)) {
       for (const trade of event.trades) {
-        this.server.to(bookRoom(trade.instrument)).emit('trade', trade);
+        if (isInstrument(trade?.instrument)) this.server.to(bookRoom(trade.instrument)).emit('trade', trade);
       }
     }
-    if (event?.type === 'orders') {
-      for (const { ownerId, ...order } of event.orders) {
-        this.server.to(userRoom(ownerId)).emit('order', order);
+    if (event.type === 'orders' && Array.isArray(event.orders)) {
+      for (const order of event.orders) {
+        if (typeof order?.ownerId !== 'string') continue;
+        const { ownerId, ...update } = order;
+        this.server.to(userRoom(ownerId)).emit('order', update);
       }
+    }
+    if (event.type === 'resync') {
+      const { instruments, owners } = event.resync ?? {};
+      for (const instrument of Array.isArray(instruments) ? instruments : []) {
+        if (isInstrument(instrument)) this.server.to(bookRoom(instrument)).emit('resync', { instrument });
+      }
+      const rooms = (Array.isArray(owners) ? owners : [])
+        .filter((owner): owner is string => typeof owner === 'string')
+        .map(userRoom);
+      if (rooms.length > 0) this.server.to(rooms).emit('resync', { orders: true });
     }
   }
 

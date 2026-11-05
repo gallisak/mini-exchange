@@ -17,7 +17,7 @@ import { RequireSession } from '@/components/require-session';
 import { api } from '@/lib/client/api';
 import { trimAmount } from '@/lib/client/format';
 import { useSocket } from '@/lib/client/socket';
-import { Balance } from '@/lib/client/types';
+import { Balance, ResyncScope, resyncsEverything } from '@/lib/client/types';
 import { cn } from '@/lib/utils';
 
 function Wallet() {
@@ -43,13 +43,16 @@ function Wallet() {
   useEffect(() => {
     if (!socket) return;
     const onChange = () => void load();
+    const onResync = (scope?: ResyncScope) => {
+      if (resyncsEverything(scope)) void load();
+    };
     socket.on('wallet', onChange);
     socket.on('connect', onChange);
-    socket.on('resync', onChange);
+    socket.on('resync', onResync);
     return () => {
       socket.off('wallet', onChange);
       socket.off('connect', onChange);
-      socket.off('resync', onChange);
+      socket.off('resync', onResync);
     };
   }, [socket, load]);
 
