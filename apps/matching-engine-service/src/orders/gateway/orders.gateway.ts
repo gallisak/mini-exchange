@@ -29,6 +29,9 @@ const SUBSCRIBE_RETRY_MS = 1000;
 const bookRoom = (instrument: string) => `book:${instrument}`;
 const userRoom = (userId: string) => `user:${userId}`;
 
+const isInstrument = (value: unknown): value is string =>
+  typeof value === 'string' && INSTRUMENTS.includes(value);
+
 function parse<T>(message: string): T | null {
   try {
     return JSON.parse(message) as T;
@@ -78,6 +81,7 @@ export class OrdersGateway
     const subscriber = this.redis.createConnection({ autoResubscribe: false });
     this.subscriber = subscriber;
     let subscribedBefore = false;
+    let missedUpdates = false;
     const subscribe = () => {
       clearTimeout(this.subscribeRetry);
       Promise.all([
@@ -85,13 +89,15 @@ export class OrdersGateway
         subscriber.subscribe(WALLET_CHANNEL),
       ]).then(
         () => {
-          if (subscribedBefore) {
+          if (subscribedBefore || missedUpdates) {
             this.logger.warn('Real-time subscription restored, telling clients to reload');
-            server.emit('resync');
+            server.emit('resync', {});
           }
           subscribedBefore = true;
+          missedUpdates = false;
         },
         (error: Error) => {
+          missedUpdates = true;
           this.logger.error(`Could not subscribe to real-time events, retrying: ${error.message}`);
           if (!this.closing) this.subscribeRetry = setTimeout(subscribe, SUBSCRIBE_RETRY_MS);
         },
@@ -194,31 +200,42 @@ export class OrdersGateway
   }
 
   private fanOutMarket(message: string): void {
-    const event = parse<MarketEvent>(message);
-    if (event?.type === 'resync') {
-      const rooms = [
-        ...event.resync.instruments.map(bookRoom),
-        ...event.resync.owners.map(userRoom),
-      ];
-      if (rooms.length > 0) this.server.to(rooms).emit('resync');
+    try {
+      this.routeMarket(parse<MarketEvent>(message));
+    } catch (error) {
+      this.logger.warn(`Ignoring a malformed market message: ${(error as Error).message}`);
     }
-    if (event?.type === 'book_delta') {
+  }
+
+  private routeMarket(event: MarketEvent | null): void {
+    if (typeof event !== 'object' || event === null) return;
+    if (event.type === 'book_delta' && isInstrument(event.delta?.instrument)) {
       this.server.to(bookRoom(event.delta.instrument)).emit('book_delta', event.delta);
     }
-    if (event?.type === 'book_heartbeat') {
-      this.server
-        .to(bookRoom(event.heartbeat.instrument))
-        .emit('book_heartbeat', event.heartbeat);
+    if (event.type === 'book_heartbeat' && isInstrument(event.heartbeat?.instrument)) {
+      this.server.to(bookRoom(event.heartbeat.instrument)).emit('book_heartbeat', event.heartbeat);
     }
-    if (event?.type === 'trades') {
+    if (event.type === 'trades' && Array.isArray(event.trades)) {
       for (const trade of event.trades) {
-        this.server.to(bookRoom(trade.instrument)).emit('trade', trade);
+        if (isInstrument(trade?.instrument)) this.server.to(bookRoom(trade.instrument)).emit('trade', trade);
       }
     }
-    if (event?.type === 'orders') {
-      for (const { ownerId, ...order } of event.orders) {
-        this.server.to(userRoom(ownerId)).emit('order', order);
+    if (event.type === 'orders' && Array.isArray(event.orders)) {
+      for (const order of event.orders) {
+        if (typeof order?.ownerId !== 'string') continue;
+        const { ownerId, ...update } = order;
+        this.server.to(userRoom(ownerId)).emit('order', update);
       }
+    }
+    if (event.type === 'resync') {
+      const { instruments, owners } = event.resync ?? {};
+      for (const instrument of Array.isArray(instruments) ? instruments : []) {
+        if (isInstrument(instrument)) this.server.to(bookRoom(instrument)).emit('resync', { instrument });
+      }
+      const rooms = (Array.isArray(owners) ? owners : [])
+        .filter((owner): owner is string => typeof owner === 'string')
+        .map(userRoom);
+      if (rooms.length > 0) this.server.to(rooms).emit('resync', { orders: true });
     }
   }
 

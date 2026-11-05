@@ -42,15 +42,11 @@ export class LedgerService {
     private readonly notifier: WalletNotifier,
   ) {}
 
-  settle(trade: SettleTradeDto): Promise<SettlementResult> {
-    return this.record(trade);
-  }
-
   announce(trade: SettleTradeDto): Promise<void> {
     return this.notifier.announce(trade.tradeId, [trade.buyerId, trade.sellerId]);
   }
 
-  private record(trade: SettleTradeDto): Promise<SettlementResult> {
+  settle(trade: SettleTradeDto): Promise<SettlementResult> {
     return this.dataSource.transaction(async (manager) => {
       const [transaction] = await manager
         .createQueryBuilder()

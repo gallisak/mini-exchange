@@ -1,5 +1,5 @@
 import { DataSource } from 'typeorm';
-import { User } from '../src/auth/entities/user.entity';
+import { RefreshSession } from '../src/auth/entities/refresh-session.entity';
 import { entities } from '../src/database/data-source';
 
 describe('entity metadata', () => {
@@ -8,7 +8,7 @@ describe('entity metadata', () => {
     const builder = dataSource as unknown as { buildMetadatas(): Promise<void> };
 
     await expect(builder.buildMetadatas()).resolves.toBeUndefined();
-    expect(dataSource.getMetadata(User).findColumnWithPropertyName('refreshTokenHash')?.type).toBe(
+    expect(dataSource.getMetadata(RefreshSession).findColumnWithPropertyName('tokenHash')?.type).toBe(
       'varchar',
     );
   });

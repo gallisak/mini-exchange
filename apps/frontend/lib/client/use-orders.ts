@@ -4,7 +4,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { api } from './api';
 import { mergeOrders } from './feeds';
 import { useSocket } from './socket';
-import { Order } from './types';
+import { Order, ResyncScope, resyncsOrders } from './types';
 
 export function useOrders() {
   const socket = useSocket();
@@ -37,13 +37,16 @@ export function useOrders() {
       setOrders((current) => (current ? mergeOrders(current, [order]) : current));
     };
     const onConnect = () => void load();
+    const onResync = (scope?: ResyncScope) => {
+      if (resyncsOrders(scope)) void load();
+    };
     socket.on('order', onOrder);
     socket.on('connect', onConnect);
-    socket.on('resync', onConnect);
+    socket.on('resync', onResync);
     return () => {
       socket.off('order', onOrder);
       socket.off('connect', onConnect);
-      socket.off('resync', onConnect);
+      socket.off('resync', onResync);
     };
   }, [socket, load]);
 

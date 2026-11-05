@@ -1,18 +1,26 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import { RedisService } from '../../redis/redis.service';
 import { MarketEvent, marketChannel } from './market-events';
 
+const RESYNC_RETRY_MS = 1000;
+const RESYNC_CHANNEL = marketChannel('resync');
+
 @Injectable()
-export class MarketPublisherService {
+export class MarketPublisherService implements OnModuleDestroy {
   private readonly logger = new Logger(MarketPublisherService.name);
   private readonly lost = { instruments: new Set<string>(), owners: new Set<string>() };
+  private retry?: NodeJS.Timeout;
 
   constructor(private readonly redis: RedisService) {}
 
+  onModuleDestroy(): void {
+    clearTimeout(this.retry);
+    this.retry = undefined;
+  }
+
   async publish(instrument: string, event: MarketEvent): Promise<void> {
-    const channel = marketChannel(instrument);
     try {
-      await this.redis.client.publish(channel, JSON.stringify(event));
+      await this.redis.client.publish(marketChannel(instrument), JSON.stringify(event));
     } catch (error) {
       this.remember(instrument, event);
       this.logger.warn(
@@ -20,7 +28,7 @@ export class MarketPublisherService {
       );
       return;
     }
-    await this.announceLost(channel);
+    await this.announceLost();
   }
 
   private remember(instrument: string, event: MarketEvent): void {
@@ -32,9 +40,13 @@ export class MarketPublisherService {
     } else {
       this.lost.instruments.add(instrument);
     }
+    this.retry ??= setTimeout(() => {
+      this.retry = undefined;
+      void this.announceLost();
+    }, RESYNC_RETRY_MS);
   }
 
-  private async announceLost(channel: string): Promise<void> {
+  private async announceLost(): Promise<void> {
     if (this.lost.instruments.size === 0 && this.lost.owners.size === 0) return;
     const event: MarketEvent = {
       type: 'resync',
@@ -42,6 +54,8 @@ export class MarketPublisherService {
     };
     this.lost.instruments.clear();
     this.lost.owners.clear();
-    await this.redis.client.publish(channel, JSON.stringify(event)).catch(() => this.remember('', event));
+    await this.redis.client
+      .publish(RESYNC_CHANNEL, JSON.stringify(event))
+      .catch(() => this.remember('', event));
   }
 }

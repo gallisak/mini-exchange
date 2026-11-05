@@ -28,6 +28,10 @@ export class MatchingEngineService implements OnModuleDestroy {
     return this.runners.has(instrument);
   }
 
+  isStopping(instrument: string): boolean {
+    return this.stopping.has(instrument);
+  }
+
   async startInstrument(instrument: string, lease: InstrumentLease): Promise<void> {
     const existing = this.runners.get(instrument);
     if (existing?.fence === lease.fence) return;

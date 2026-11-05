@@ -32,6 +32,19 @@ export interface Trade {
   executedAt: string;
 }
 
+export interface ResyncScope {
+  instrument?: string;
+  orders?: boolean;
+}
+
+export const resyncsBook = (scope: ResyncScope | undefined, instrument: string) =>
+  !scope?.orders && (scope?.instrument === undefined || scope.instrument === instrument);
+
+export const resyncsOrders = (scope: ResyncScope | undefined) => scope?.instrument === undefined;
+
+export const resyncsEverything = (scope: ResyncScope | undefined) =>
+  scope?.instrument === undefined && !scope?.orders;
+
 export interface Balance {
   asset: string;
   balance: string;

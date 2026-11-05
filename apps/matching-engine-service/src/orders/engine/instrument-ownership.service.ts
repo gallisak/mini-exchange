@@ -98,7 +98,7 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
 
   private async acquireFree(): Promise<void> {
     for (const instrument of INSTRUMENTS) {
-      if (this.stopped || this.owned.has(instrument)) continue;
+      if (this.stopped || this.owned.has(instrument) || this.engine.isStopping(instrument)) continue;
       const key = instrumentLockKey(instrument);
       const requestedAt = performance.now();
       const token = await this.lock.acquire(key, this.ownerId, this.ttlMs);

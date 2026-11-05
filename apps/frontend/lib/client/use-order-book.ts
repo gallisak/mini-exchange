@@ -3,6 +3,7 @@
 import { useEffect, useReducer } from 'react';
 import { BookState, Delta, Snapshot, bookReducer, initialBook, needsSnapshot } from '../book/reducer';
 import { useSocket } from './socket';
+import { ResyncScope, resyncsBook } from './types';
 
 const TICK_MS = 1_000;
 
@@ -31,7 +32,9 @@ export function useOrderBook(instrument: string): BookState {
     };
     const onDisconnect = () => dispatch({ type: 'disconnected' });
     const retries: ReturnType<typeof setTimeout>[] = [];
-    const onResync = () => dispatch({ type: 'resync' });
+    const onResync = (scope?: ResyncScope) => {
+      if (resyncsBook(scope, instrument)) dispatch({ type: 'resync' });
+    };
     const onRateLimited = ({
       retryAfterMs,
       instrument: limited,
