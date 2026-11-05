@@ -43,12 +43,13 @@ describe('Idempotency-Key of an order attempt', () => {
     };
     const sent = unconfirmed(attemptFor(null, draft, newKey));
 
-    saveAttempt(storage, 'ABC', sent);
-    expect(loadAttempt(storage, 'ABC')).toEqual(sent);
-    expect(loadAttempt(storage, 'DEF')).toBeNull();
+    saveAttempt(storage, 'alice', 'ABC', sent);
+    expect(loadAttempt(storage, 'alice', 'ABC')).toEqual(sent);
+    expect(loadAttempt(storage, 'alice', 'DEF')).toBeNull();
+    expect(loadAttempt(storage, 'bob', 'ABC')).toBeNull();
 
-    saveAttempt(storage, 'ABC', null);
-    expect(loadAttempt(storage, 'ABC')).toBeNull();
+    saveAttempt(storage, 'alice', 'ABC', null);
+    expect(loadAttempt(storage, 'alice', 'ABC')).toBeNull();
   });
 
   it('keeps working when the browser refuses storage', () => {
@@ -64,8 +65,10 @@ describe('Idempotency-Key of an order attempt', () => {
       },
     };
 
-    expect(() => saveAttempt(broken, 'ABC', unconfirmed(attemptFor(null, draft, newKey)))).not.toThrow();
-    expect(loadAttempt(broken, 'ABC')).toBeNull();
+    expect(() =>
+      saveAttempt(broken, 'alice', 'ABC', unconfirmed(attemptFor(null, draft, newKey))),
+    ).not.toThrow();
+    expect(loadAttempt(broken, 'alice', 'ABC')).toBeNull();
   });
 
   it('stops holding the form once the exchange gave a clear answer to the resent order', () => {

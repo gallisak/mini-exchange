@@ -73,6 +73,15 @@ describe('trade summary', () => {
     ]);
   });
 
+  it('tells when the first trade of all was executed, so a first reconciliation knows where to start', async () => {
+    await executed('DEF', '1.00', '1', '2026-11-02T08:00:00.000Z');
+    await executed('ABC', '1.00', '1', '2026-11-03T08:00:00.000Z');
+
+    const response = await summary('2026-11-04T10:00:00.000Z', '2026-11-04T11:00:00.000Z').expect(200);
+
+    expect(response.body.firstTradeAt).toBe('2026-11-02T08:00:00.000Z');
+  });
+
   it('rejects a period that is not a valid range', async () => {
     await summary('yesterday', '2026-11-04T11:00:00.000Z').expect(400);
     await summary('2026-11-04T11:00:00.000Z', '2026-11-04T10:00:00.000Z').expect(400);

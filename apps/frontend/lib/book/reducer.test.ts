@@ -143,11 +143,18 @@ describe('order book resync', () => {
   });
 
   it('goes stale when it has heard nothing for too long', () => {
-    const quiet = bookReducer(live(5), { type: 'tick', at: SILENCE_LIMIT_MS + 1 });
-    const recent = bookReducer(live(5), { type: 'tick', at: SILENCE_LIMIT_MS - 1 });
+    const beating = bookReducer(live(5), { type: 'heartbeat', seq: 5, at: 0 });
+    const quiet = bookReducer(beating, { type: 'tick', at: SILENCE_LIMIT_MS + 1 });
+    const recent = bookReducer(beating, { type: 'tick', at: SILENCE_LIMIT_MS - 1 });
 
     expect(quiet.status).toBe('stale');
     expect(recent.status).toBe('live');
+  });
+
+  it('stays live through silence while the engine sends no heartbeats at all', () => {
+    const quiet = bookReducer(live(5), { type: 'tick', at: 10 * SILENCE_LIMIT_MS });
+
+    expect(quiet.status).toBe('live');
   });
 
   it('waits for three missed heartbeats when the engine announces a slower heartbeat', () => {

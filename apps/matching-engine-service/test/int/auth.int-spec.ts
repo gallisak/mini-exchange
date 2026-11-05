@@ -317,6 +317,23 @@ describe('authentication sessions', () => {
     await http().get(`/auth/admins/${claims(user.accessToken).sub}`).expect(401);
   });
 
+  it('gives a rotation made before the tokens became reproducible to the caller that retries it', async () => {
+    const session = await signUp();
+    const attempt = randomUUID();
+    const rotated = await refresh(session.refreshToken, attempt).expect(200);
+    await app
+      .get(DataSource)
+      .query(`UPDATE refresh_sessions SET "createdAt" = "createdAt" + interval '1.5 second' WHERE id = $1`, [
+        claims(rotated.body.refreshToken).jti,
+      ]);
+
+    const first = await refresh(session.refreshToken, attempt).expect(200);
+    const second = await refresh(session.refreshToken, attempt).expect(200);
+
+    expect(second.body.refreshToken).toBe(first.body.refreshToken);
+    await refresh(second.body.refreshToken).expect(200);
+  });
+
   it('keeps the pair a retried rotation gave out when the original request arrives late', async () => {
     const session = await signUp();
     const attempt = randomUUID();

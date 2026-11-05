@@ -76,4 +76,31 @@ describe('calling a service with the session', () => {
 
     expect(sent).toEqual([{ refreshToken: 'aging-refresh', attempt: expect.any(String) }]);
   });
+
+  it('shares a rotation with the same browser after it moved to another network', async () => {
+    const from = (address: string) =>
+      new NextRequest('http://exchange.test/api/wallet', {
+        headers: {
+          cookie: `mx_access=${token(-1)}; mx_refresh=roaming-refresh`,
+          'x-forwarded-for': address,
+          'user-agent': 'Phone Browser',
+        },
+      });
+    const call = (incoming: NextRequest) =>
+      withSession(incoming, (accessToken) => upstream(incoming, 'settlement', '/wallets/me', {}, accessToken));
+    const sent: unknown[] = [];
+    upstreamAnswers((url, init) => {
+      if (url.endsWith('/auth/refresh')) {
+        sent.push(JSON.parse(String(init?.body)).attempt);
+        return { status: 503, body: {} };
+      }
+      return { status: 200, body: {} };
+    });
+
+    await call(from('198.51.100.1'));
+    await call(from('203.0.113.9'));
+
+    expect(sent).toHaveLength(2);
+    expect(sent[1]).toBe(sent[0]);
+  });
 });

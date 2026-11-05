@@ -192,4 +192,40 @@ describe('a running book', () => {
       }),
     );
   });
+
+  it('keeps matching when Redis does not answer the note of what it published', async () => {
+    const set = redis.client.set.bind(redis.client) as (...args: unknown[]) => Promise<unknown>;
+    jest.spyOn(redis.client, 'set').mockImplementation(((...args: unknown[]) =>
+      String(args[0]).startsWith('book:published:')
+        ? new Promise(() => undefined)
+        : set(...args)) as never);
+    runner = new BookRunner('ABC', options({ publish: async () => undefined }));
+    await runner.start();
+    const bookSeq = async () =>
+      (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq;
+
+    await place(uuidV5('first'), 'seller', 'sell');
+    await eventually(async () => expect(await bookSeq()).toBe('1'));
+    await place(uuidV5('second'), 'seller', 'sell');
+
+    await eventually(async () => expect(await bookSeq()).toBe('2'), 5000);
+  });
+
+  it('does not note a batch as published when its updates could not be published', async () => {
+    runner = new BookRunner(
+      'ABC',
+      options({ publish: (async (event: MarketEvent) => event.type !== 'book_delta') as never }),
+    );
+    await runner.start();
+
+    await place(uuidV5('unpublished'), 'seller', 'sell');
+    await eventually(async () =>
+      expect(
+        (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
+      ).toBe('1'),
+    );
+    await sleep(300);
+
+    expect(await raw.get('book:published:ABC')).toBeNull();
+  });
 });

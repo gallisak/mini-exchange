@@ -29,6 +29,7 @@ describe('reconciliation', () => {
   let engine: Server;
   let engineRows: EngineRow[] | 'down' | 'malformed' | ((from: Date) => EngineRow[]);
   let engineQueries: URLSearchParams[];
+  let firstTradeAt: string | null;
   let engineUrl: string;
 
   beforeAll(async () => {
@@ -51,6 +52,7 @@ describe('reconciliation', () => {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({
+          firstTradeAt,
           instruments:
             engineRows === 'malformed'
               ? [{ instrument: 'ABC', count: '2', quantity: 'lots' }]
@@ -75,6 +77,7 @@ describe('reconciliation', () => {
     await resetState();
     engineRows = [];
     engineQueries = [];
+    firstTradeAt = null;
     app = await createApp();
   });
 
@@ -329,6 +332,7 @@ describe('reconciliation', () => {
 
   it('keeps showing a trade the ledger never settled, however long ago it was executed', async () => {
     const executedAt = new Date(Date.now() - 30 * 3_600_000);
+    firstTradeAt = executedAt.toISOString();
     engineRows = (from) =>
       from <= executedAt
         ? [{ instrument: 'ABC', count: 1, quantity: '1.00000000', notional: '10.0000000000' }]
@@ -338,6 +342,24 @@ describe('reconciliation', () => {
     const second = await reconcile({}).expect(200);
 
     expect([first.body.status, second.body.status]).toEqual(['mismatch', 'mismatch']);
+  });
+
+  it('starts its first run at the first trade either side knows of and checks one day at a time', async () => {
+    const executedAt = new Date(Date.now() - 30 * 3_600_000);
+    firstTradeAt = executedAt.toISOString();
+    engineRows = (from) =>
+      from <= executedAt
+        ? [{ instrument: 'ABC', count: 1, quantity: '1.00000000', notional: '10.0000000000' }]
+        : [];
+
+    const first = await reconcile({}).expect(200);
+    const second = await reconcile({}).expect(200);
+
+    const span = (period: { from: string; to: string }) =>
+      new Date(period.to).getTime() - new Date(period.from).getTime();
+    expect(first.body.period.from).toBe(executedAt.toISOString());
+    expect(span(first.body.period)).toBeLessThanOrEqual(24 * 3_600_000);
+    expect(second.body.period).toEqual(first.body.period);
   });
 
   it('checks only the ledger activity of the period it was asked about', async () => {
