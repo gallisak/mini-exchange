@@ -1,6 +1,6 @@
 import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository } from 'typeorm';
+import { QueryFailedError, Repository } from 'typeorm';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcrypt';
 import { createHash, randomUUID } from 'crypto';
@@ -16,6 +16,9 @@ interface TokenPair {
 
 const INVALID_CREDENTIALS = 'Invalid email or password';
 const INVALID_REFRESH = 'Refresh token is invalid or was already used';
+const EMAIL_TAKEN = 'Email is already registered';
+const UNIQUE_VIOLATION = '23505';
+const DUMMY_HASH = bcrypt.hashSync(randomUUID(), 10);
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 
@@ -42,22 +45,27 @@ export class AuthService {
   async register(dto: RegisterDto): Promise<TokenPair> {
     const existing = await this.users.findOne({ where: { email: dto.email } });
     if (existing) {
-      throw new ConflictException('Email is already registered');
+      throw new ConflictException(EMAIL_TAKEN);
     }
     const passwordHash = await bcrypt.hash(dto.password, 10);
-    const user = await this.users.save(
-      this.users.create({ email: dto.email, passwordHash, role: roleFor(dto.email) }),
-    );
+    const user = await this.users
+      .save(this.users.create({ email: dto.email, passwordHash, role: roleFor(dto.email) }))
+      .catch((error: unknown) => {
+        if (
+          error instanceof QueryFailedError &&
+          (error.driverError as { code?: string }).code === UNIQUE_VIOLATION
+        ) {
+          throw new ConflictException(EMAIL_TAKEN);
+        }
+        throw error;
+      });
     return this.issueTokens(user);
   }
 
   async login(dto: LoginDto): Promise<TokenPair> {
     const user = await this.users.findOne({ where: { email: dto.email } });
-    if (!user) {
-      throw new UnauthorizedException(INVALID_CREDENTIALS);
-    }
-    const valid = await bcrypt.compare(dto.password, user.passwordHash);
-    if (!valid) {
+    const valid = await bcrypt.compare(dto.password, user?.passwordHash ?? DUMMY_HASH);
+    if (!user || !valid) {
       throw new UnauthorizedException(INVALID_CREDENTIALS);
     }
     return this.issueTokens(user);

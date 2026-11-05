@@ -279,7 +279,7 @@ async function main() {
   const replay = JSON.parse(replayOutput.text);
   const reconcileOutput = (() => {
     try {
-      return compose('exec', '-T', '-e', 'RECONCILIATION_LAG_MS=0', 'settlement-service', 'node', 'dist/reconciliation/reconcile.js');
+      return compose('exec', '-T', '-e', 'RECONCILIATION_LAG_MS=0', 'settlement-service', 'sh', '/opt/secrets/with-secrets.sh', 'node', 'dist/reconciliation/reconcile.js');
     } catch (error) {
       return String(error.stdout);
     }

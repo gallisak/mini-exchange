@@ -1,4 +1,17 @@
+x-secrets-loader: &secrets-loader
+  entrypoint: ['sh', '/opt/secrets/with-secrets.sh']
+
 services:
+  secrets:
+    image: alpine:3.20
+    command: ['sh', '/opt/secrets/generate.sh']
+    volumes:
+      - ./docker/secrets:/opt/secrets:ro
+      - engine-secrets:/run/exchange/engine
+      - settlement-secrets:/run/exchange/settlement
+      - frontend-secrets:/run/exchange/frontend
+    restart: 'no'
+
   exchange-db:
     image: postgres:16-alpine
     environment:
@@ -33,8 +46,14 @@ services:
     env_file: ./apps/matching-engine-service/.env.example
     environment:
       DATABASE_HOST: exchange-db
+    <<: *secrets-loader
     command: ['npm', 'run', 'migration:run:prod']
+    volumes:
+      - ./docker/secrets:/opt/secrets:ro
+      - engine-secrets:/run/exchange:ro
     depends_on:
+      secrets:
+        condition: service_completed_successfully
       exchange-db:
         condition: service_healthy
     restart: 'no'
@@ -46,6 +65,11 @@ services:
       DATABASE_HOST: exchange-db
       REDIS_HOST: redis
       INSTANCE_ID: engine-1
+    <<: *secrets-loader
+    command: ['node', 'dist/main']
+    volumes:
+      - ./docker/secrets:/opt/secrets:ro
+      - engine-secrets:/run/exchange:ro
     restart: unless-stopped
     stop_grace_period: 15s
     depends_on:
@@ -71,13 +95,19 @@ services:
       - matching-engine-1
       - matching-engine-2
     ports:
-      - '3001:3001'
+      - '127.0.0.1:3001:3001'
 
   settlement-migrate:
     build: ./apps/settlement-service
     env_file: ./apps/settlement-service/.env.example
+    <<: *secrets-loader
     command: ['npm', 'run', 'migration:run:prod']
+    volumes:
+      - ./docker/secrets:/opt/secrets:ro
+      - settlement-secrets:/run/exchange:ro
     depends_on:
+      secrets:
+        condition: service_completed_successfully
       exchange-db:
         condition: service_healthy
     restart: 'no'
@@ -85,6 +115,11 @@ services:
   settlement-service:
     build: ./apps/settlement-service
     env_file: ./apps/settlement-service/.env.example
+    <<: *secrets-loader
+    command: ['node', 'dist/main']
+    volumes:
+      - ./docker/secrets:/opt/secrets:ro
+      - settlement-secrets:/run/exchange:ro
     restart: unless-stopped
     stop_grace_period: 15s
     depends_on:
@@ -95,7 +130,7 @@ services:
       settlement-migrate:
         condition: service_completed_successfully
     ports:
-      - '3002:3002'
+      - '127.0.0.1:3002:3002'
 
   frontend:
     build:
@@ -106,6 +141,11 @@ services:
     environment:
       MATCHING_ENGINE_URL: http://matching-engine-service:3001
       SETTLEMENT_URL: http://settlement-service:3002
+    <<: *secrets-loader
+    command: ['node', 'server.js']
+    volumes:
+      - ./docker/secrets:/opt/secrets:ro
+      - frontend-secrets:/run/exchange:ro
     depends_on:
       - matching-engine-service
       - settlement-service
@@ -117,8 +157,11 @@ services:
     depends_on:
       - frontend
     ports:
-      - '3000:3000'
+      - '127.0.0.1:3000:3000'
 
 volumes:
   exchange-db-data:
   redis-data:
+  engine-secrets:
+  settlement-secrets:
+  frontend-secrets:

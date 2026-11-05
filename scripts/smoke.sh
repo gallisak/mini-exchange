@@ -78,7 +78,7 @@ fi
 echo "OK: buyer paid 10.00 USD to the seller for 1 ABC"
 
 report=$($COMPOSE exec -T -e RECONCILIATION_LAG_MS=0 settlement-service \
-  node dist/reconciliation/reconcile.js) || {
+  sh /opt/secrets/with-secrets.sh node dist/reconciliation/reconcile.js) || {
   echo "FAIL: reconciliation did not match"
   echo "$report"
   exit 1

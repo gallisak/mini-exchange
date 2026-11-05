@@ -39,6 +39,10 @@ describe('reconciliation', () => {
         res.writeHead(503).end();
         return;
       }
+      if (req.headers['x-internal-key'] !== process.env.ENGINE_INTERNAL_KEY) {
+        res.writeHead(401).end();
+        return;
+      }
       res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
         JSON.stringify({

@@ -28,6 +28,17 @@ describe('authentication sessions', () => {
     (await http().post('/auth/register').send({ email, password: 'password123' }).expect(201)).body;
   const refresh = (refreshToken: string) => http().post('/auth/refresh').send({ refreshToken });
 
+  it('answers 409, not 500, when the same email registers twice at once', async () => {
+    const email = `race-${randomUUID()}@example.com`;
+    const statuses = await Promise.all(
+      Array.from({ length: 5 }, () =>
+        http().post('/auth/register').send({ email, password: 'password123' }),
+      ),
+    ).then((responses) => responses.map((response) => response.status).sort());
+
+    expect(statuses).toEqual([201, 409, 409, 409, 409]);
+  });
+
   it('trades a refresh token for a new pair once', async () => {
     const session = await signUp();
 
