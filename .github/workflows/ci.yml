@@ -147,6 +147,13 @@ jobs:
       - run: npm test
       - run: npm run build
 
+  infrastructure:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: ./scripts/test-secrets.sh
+      - run: ./scripts/test-gateway.sh
+
   compose-smoke:
     runs-on: ubuntu-latest
     steps:

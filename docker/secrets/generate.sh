@@ -2,8 +2,8 @@
 set -eu
 
 root=/run/exchange
-if [ -s "$root/engine/secrets.env" ] && [ -s "$root/settlement/secrets.env" ] &&
-  [ -s "$root/frontend/secrets.env" ]; then
+if [ -s "$root/engine/secrets.env" ] && [ -s "$root/frontend/secrets.env" ] &&
+  grep -q '^SETTLEMENT_INTERNAL_KEY=' "$root/settlement/secrets.env" 2>/dev/null; then
   exit 0
 fi
 
@@ -15,6 +15,7 @@ access=$(key)
 refresh=$(key)
 proxy=$(key)
 internal=$(key)
+settlement=$(key)
 
 write() {
   dir="$root/$1"
@@ -32,7 +33,8 @@ write engine \
   "ENGINE_INTERNAL_KEY=$internal"
 write settlement \
   "JWT_ACCESS_SECRET=$access" \
-  "ENGINE_INTERNAL_KEY=$internal"
+  "ENGINE_INTERNAL_KEY=$internal" \
+  "SETTLEMENT_INTERNAL_KEY=$settlement"
 write frontend \
   "FRONTEND_PROXY_KEY=$proxy"
 echo "Generated new secrets"

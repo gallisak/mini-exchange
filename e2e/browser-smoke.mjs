@@ -44,7 +44,12 @@ const browser = await chromium.launch();
 try {
   const run = Date.now();
   const seller = await (await browser.newContext()).newPage();
-  const buyer = await (await browser.newContext()).newPage();
+  const buyerContext = await browser.newContext();
+  let tokenFailures = 0;
+  await buyerContext.route('**/api/ws-token', (route) =>
+    tokenFailures++ < 3 ? route.fulfill({ status: 503, body: '{}' }) : route.continue(),
+  );
+  const buyer = await buyerContext.newPage();
 
   await register(seller, `browser-seller-${run}@example.com`, '?next=//example.com');
   log('signed up, and a sign-in link to another site still landed on', new URL(seller.url()).pathname);
@@ -55,6 +60,12 @@ try {
   await placeOrder(buyer, 'buy', '20.00', '1');
   await seller.getByTestId('order-row').first().getByText('partially filled').waitFor({ timeout: 10_000 });
   log("the seller's order turned partially filled without a reload");
+  await buyer.getByRole('tab', { name: 'Filled & cancelled' }).click();
+  await buyer.getByTestId('order-row').first().getByText('filled', { exact: true }).waitFor({ timeout: 20_000 });
+  await buyer.getByRole('tab', { name: 'Active' }).click();
+  await placeOrder(buyer, 'buy', '1.00', '1');
+  await buyer.getByTestId('order-row').first().getByText('open', { exact: true }).waitFor({ timeout: 10_000 });
+  log('the buyer still got live order updates after 3 failed socket token requests');
   await shot(seller, 'orders');
 
   const market = await (await browser.newContext()).newPage();
