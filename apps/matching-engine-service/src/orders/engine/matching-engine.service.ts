@@ -49,6 +49,7 @@ export class MatchingEngineService implements OnModuleDestroy {
       fence: lease.fence,
       leaseValid: lease.isValid,
       publish: (event) => this.market.publish(instrument, event),
+      resyncPending: () => this.market.resyncPending(),
       heartbeatMs: this.heartbeatMs,
       onFenced: (error) => {
         if (this.runners.get(instrument) === runner) this.runners.delete(instrument);

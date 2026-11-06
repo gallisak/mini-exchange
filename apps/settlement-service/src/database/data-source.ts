@@ -7,8 +7,16 @@ import { LedgerTransaction } from '../ledger/entities/ledger-transaction.entity'
 import { LedgerEntry } from '../ledger/entities/ledger-entry.entity';
 import { SettledTrade } from '../ledger/entities/settled-trade.entity';
 import { ReconciliationCheckpoint } from '../reconciliation/reconciliation-checkpoint.entity';
+import { UnresolvedPeriod } from '../reconciliation/unresolved-period.entity';
 
-export const entities = [Account, LedgerTransaction, LedgerEntry, SettledTrade, ReconciliationCheckpoint];
+export const entities = [
+  Account,
+  LedgerTransaction,
+  LedgerEntry,
+  SettledTrade,
+  ReconciliationCheckpoint,
+  UnresolvedPeriod,
+];
 
 export function buildDataSourceOptions(database = process.env.LEDGER_DATABASE_NAME ?? 'ledger'): DataSourceOptions {
   return {

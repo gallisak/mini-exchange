@@ -4,7 +4,9 @@ export function safeRedirect(target: string | null | undefined, fallback = '/ord
   }
   try {
     const url = new URL(target, 'http://exchange.invalid');
-    return url.origin === 'http://exchange.invalid' ? `${url.pathname}${url.search}` : fallback;
+    const path = `${url.pathname}${url.search}`;
+    const inside = url.origin === 'http://exchange.invalid' && !path.startsWith('//') && !path.startsWith('/\\');
+    return inside ? path : fallback;
   } catch {
     return fallback;
   }

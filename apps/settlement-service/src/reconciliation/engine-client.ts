@@ -31,6 +31,16 @@ function isTotals(value: unknown): value is EngineInstrumentTotals {
   );
 }
 
+export interface EngineProgress {
+  firstTradeAt: Date | null;
+  pendingSince: Date | null;
+}
+
+function dateOf(value: unknown): Date | null {
+  const date = typeof value === 'string' ? new Date(value) : null;
+  return date && !Number.isNaN(date.getTime()) ? date : null;
+}
+
 @Injectable()
 export class EngineClient {
   private readonly timeoutMs = intEnv('ENGINE_TIMEOUT_MS', 30_000);
@@ -39,15 +49,15 @@ export class EngineClient {
     return (await this.summary(from, to)).instruments;
   }
 
-  async firstTradeAt(): Promise<Date | null> {
-    const { firstTradeAt } = await this.summary(new Date(0), new Date(1));
-    return firstTradeAt;
+  async progress(): Promise<EngineProgress> {
+    const { firstTradeAt, pendingSince } = await this.summary(new Date(0), new Date(1));
+    return { firstTradeAt, pendingSince };
   }
 
   private async summary(
     from: Date,
     to: Date,
-  ): Promise<{ instruments: EngineInstrumentTotals[]; firstTradeAt: Date | null }> {
+  ): Promise<{ instruments: EngineInstrumentTotals[] } & EngineProgress> {
     const url = new URL('/trades/summary', process.env.ENGINE_URL ?? 'http://localhost:3001');
     url.searchParams.set('from', from.toISOString());
     url.searchParams.set('to', to.toISOString());
@@ -61,14 +71,15 @@ export class EngineClient {
     const body = (await response.json().catch(() => null)) as {
       instruments?: unknown;
       firstTradeAt?: unknown;
+      pendingSince?: unknown;
     } | null;
     if (!Array.isArray(body?.instruments) || !body.instruments.every(isTotals)) {
       throw new Error('Engine returned a malformed trade summary');
     }
-    const first = typeof body.firstTradeAt === 'string' ? new Date(body.firstTradeAt) : null;
     return {
       instruments: body.instruments,
-      firstTradeAt: first && !Number.isNaN(first.getTime()) ? first : null,
+      firstTradeAt: dateOf(body.firstTradeAt),
+      pendingSince: dateOf(body.pendingSince),
     };
   }
 }

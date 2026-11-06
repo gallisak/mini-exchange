@@ -9,13 +9,14 @@ const passed = (response: Response) => response.headers.get('x-middleware-next')
 
 describe('requests another site makes the browser send', () => {
   it('cannot sign a user out or change anything through the API', () => {
-    for (const headers of [
+    const fromElsewhere: Record<string, string>[] = [
       { 'sec-fetch-site': 'cross-site' },
       { 'sec-fetch-site': 'same-site' },
       { origin: 'https://evil.example' },
       { origin: 'http://exchange.test.evil.example' },
       { origin: 'null' },
-    ]) {
+    ];
+    for (const headers of fromElsewhere) {
       for (const [method, path] of [
         ['POST', '/api/auth/logout'],
         ['POST', '/api/orders'],

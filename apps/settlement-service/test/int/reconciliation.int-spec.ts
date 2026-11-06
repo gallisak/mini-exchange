@@ -155,7 +155,10 @@ describe('reconciliation', () => {
         tradesOffEntries: [],
       },
     });
-    expect(engineQueries.map((query) => [query.get('from'), query.get('to')])).toEqual([[FROM, TO]]);
+    const periods = engineQueries
+      .map((query) => [query.get('from'), query.get('to')])
+      .filter(([from]) => from !== new Date(0).toISOString());
+    expect(periods).toEqual([[FROM, TO]]);
   });
 
   it('finds a trade the engine executed but the ledger never settled', async () => {

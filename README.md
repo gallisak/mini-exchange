@@ -37,7 +37,21 @@ docker compose exec matching-engine-1 node dist/tools/grant-admin.js you@example
 ```
 
 Every service has a `.env.example`, which compose loads. Secrets are not in it: on the first start
-a one-off `secrets` service generates them per installation.
+a one-off `secrets` service generates them per installation. A service started in production with a
+`change-me-*` placeholder from `.env.example` refuses to start.
+
+`/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
+
+```bash
+docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget -qO- --header "x-internal-key: $SETTLEMENT_INTERNAL_KEY" localhost:3002/metrics'
+```
+
+**Sessions.** Signing out ends the refresh session, refuses its access token at once (a note in Redis
+for 16 minutes, checked by both services) and closes its WebSocket connections. A rotation and a
+sign-out of the same user take one Postgres advisory lock, so a sign-out never misses a refresh token
+that a parallel rotation is saving. Refresh and sign-out are not counted against the sign-in limit.
+Requests that change something through the frontend's API are refused when another site makes the
+browser send them, and every page forbids being framed.
 
 ## Architecture and data path
 
@@ -152,17 +166,27 @@ once. Settlement books a trade in one transaction:
 
 The event is acknowledged only after the commit and the wallet announcement. If settlement dies in
 between, another consumer reclaims the event, step 1 finds the reference, and the money does not
-move again.
+move again. A trade that keeps failing is retried until it was delivered `CONSUMER_MAX_DELIVERIES`
+times and is older than `CONSUMER_GIVE_UP_AFTER_MS` (an hour), then dead-lettered with the last
+error; reconciliation shows it as unsettled. Once the cause is fixed, put dead letters back on their
+streams; settling twice is impossible, so replaying is safe:
+
+```bash
+docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/consumer/replay-dead-letters.js
+```
 
 **Reconciliation** checks that every ledger transaction balances, every balance equals its entries,
 every trade has the right four entries, and that the engine's trade count, quantity and
 `Σ price × quantity` per instrument equal the ledger's count, quantity and USD moved. It looks at
 one period: the trades executed in it, the ledger transactions created in it, and the accounts
 they touched. A run without `from` checks at most one day (`RECONCILIATION_STEP_HOURS`), starting
-where the last matching run ended, or at the first trade either service knows of, and never later
-than a minute ago. A mismatch keeps the start where it is, so a trade that never got settled keeps
-showing up until it is fixed, a clean history is not checked again, and no run scans everything.
-Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
+where the last run ended, or at the first trade either service knows of. No period ends later than
+a minute ago or than the oldest command a book has not applied yet: a trade carries the time its
+order entered the stream, so a book that lags behind could still add trades to a period checked
+earlier. A period that does not match is kept and checked again on every run, up to ten at a time,
+until it matches; the report lists them under `unresolved` and stays `mismatch` meanwhile. So a
+trade that never got settled keeps showing up, the next days are still checked, a clean history is
+not checked again, and no run scans everything. Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
 
 ```bash
 docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/reconciliation/reconcile.js
@@ -283,7 +307,8 @@ Redis Streams is the order log and Redis is the coordinator.
 | `GET /orders/book` with a token, raw orders | Public, aggregated levels with `seq`, no owners | Public depth, no data leak |
 | WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, and private `order` and `wallet` | Sequence numbers and resync |
 | `POST /auth/login` → 201 | 200, plus `/auth/refresh` and `/auth/logout` | Sessions |
-| WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token. To roll out, start the engines with `WS_ACCEPT_ACCESS_TOKENS=true`, update the frontend (it falls back to the access token while the engine has no tickets), then drop the setting |
+| WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token. To roll out, update the engines first with `WS_ACCEPT_ACCESS_TOKENS=true` so pages already open still connect, then the frontend (until its engine issues tickets it keeps retrying rather than hand out the access token), then drop the setting |
+| `GET /metrics` open | Needs the internal key of the service | Metrics show traffic and internals |
 | `GET /orders` returned every order | Every active order and the latest 100 finished ones | Bounded response |
 | Any password length | At most 72 bytes | bcrypt compares only 72 bytes |
 | Messages in Ukrainian | English | Language of the project |
@@ -300,6 +325,7 @@ Redis Streams is the order log and Redis is the coordinator.
 - **No balance reservation.** Balances can go negative.
 - **Crossed books within one user.** Self-trade prevention skips the user's own order, so a user's
   buy can rest above their own sell.
-- **A blocking failure stops its instrument.** A batch that can never commit, or a trade that can
-  never be booked, is retried and shown as stuck on the operations panel rather than skipped.
+- **A blocking failure stops its instrument.** A batch that can never commit is retried and shown as
+  stuck on the operations panel rather than skipped. A trade that can never be booked is retried for
+  an hour, then dead-lettered and shown as unsettled by reconciliation until it is replayed.
 - **Order history** returns the latest 100 finished orders; paging is not built.

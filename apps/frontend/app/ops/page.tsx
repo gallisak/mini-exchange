@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, RefreshCw, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
@@ -17,7 +17,8 @@ import { ErrorState, LoadingRows } from '@/components/states';
 import { RequireSession } from '@/components/require-session';
 import { api } from '@/lib/client/api';
 import { formatTime } from '@/lib/client/format';
-import { RECONCILE_REFRESH_MS, STATUS_REFRESH_MS, startOpsPolling } from '@/lib/client/ops-polling';
+import { RECONCILE_REFRESH_MS, STATUS_REFRESH_MS, opsView, startOpsPolling } from '@/lib/client/ops-polling';
+import { latestRequest } from '@/lib/client/latest';
 
 interface Part<T> {
   ok: boolean;
@@ -59,6 +60,7 @@ interface Reconciliation {
   status: 'ok' | 'mismatch' | 'incomplete';
   period: { from: string; to: string };
   engineError?: string;
+  unresolved?: { from: string; to: string; status: string }[];
   instruments: {
     instrument: string;
     engine: { count: number; notional: string } | null;
@@ -74,6 +76,8 @@ interface OpsReport {
 }
 
 
+const formatMoment = (iso: string) => new Date(iso).toLocaleString([], { hour12: false });
+
 function Unavailable({ part }: { part: Part<unknown> }) {
   return <ErrorState message={part.error?.message ?? `Unavailable (${part.status})`} />;
 }
@@ -83,22 +87,30 @@ function Ops() {
   const [reconciliation, setReconciliation] = useState<Part<Reconciliation> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  const beginLoad = useMemo(() => latestRequest(), []);
+  const beginReconcile = useMemo(() => latestRequest(), []);
+
   const load = useCallback(async () => {
+    const latest = beginLoad();
     try {
-      setReport(await api<OpsReport>('/api/ops'));
+      const loaded = await api<OpsReport>('/api/ops');
+      if (!latest()) return;
+      setReport(loaded);
       setError(null);
     } catch (failure) {
-      setError((failure as Error).message);
+      if (latest()) setError((failure as Error).message);
     }
-  }, []);
+  }, [beginLoad]);
 
   const reconcile = useCallback(async () => {
+    const latest = beginReconcile();
     try {
-      setReconciliation({ ok: true, data: await api<Reconciliation>('/api/ops/reconciliation') });
+      const data = await api<Reconciliation>('/api/ops/reconciliation');
+      if (latest()) setReconciliation({ ok: true, data });
     } catch (failure) {
-      setReconciliation({ ok: false, error: { message: (failure as Error).message } });
+      if (latest()) setReconciliation({ ok: false, error: { message: (failure as Error).message } });
     }
-  }, []);
+  }, [beginReconcile]);
 
   const refresh = useCallback(() => {
     void load();
@@ -114,9 +126,10 @@ function Ops() {
     [load, reconcile],
   );
 
-  if (error && !report) return <ErrorState message={error} onRetry={load} />;
-  if (!report) return <LoadingRows rows={8} />;
-  const { engine, settlement } = report;
+  const view = opsView(report, error);
+  if (view.kind === 'error') return <ErrorState message={view.message} onRetry={load} />;
+  if (view.kind === 'loading') return <LoadingRows rows={8} />;
+  const { engine, settlement } = view.report;
   const issues = reconciliation?.data
     ? Object.entries(reconciliation.data.ledger).filter(([, rows]) => rows.length > 0)
     : [];
@@ -136,6 +149,12 @@ function Ops() {
           Refresh
         </Button>
       </div>
+
+      {view.staleBecause && (
+        <div data-testid="ops-stale">
+          <ErrorState message={`Showing the last data that loaded: ${view.staleBecause}`} onRetry={load} />
+        </div>
+      )}
 
       <Card>
         <CardHeader className="pb-3">
@@ -314,6 +333,13 @@ function Ops() {
                 {issues.length > 0 && (
                   <ErrorState
                     message={issues.map(([check, rows]) => `${check}: ${rows.length}`).join(' · ')}
+                  />
+                )}
+                {(reconciliation.data.unresolved ?? []).length > 0 && (
+                  <ErrorState
+                    message={`Earlier periods that still do not match: ${(reconciliation.data.unresolved ?? [])
+                      .map((period) => `${formatMoment(period.from)} – ${formatMoment(period.to)}`)
+                      .join(', ')}`}
                   />
                 )}
               </>

@@ -16,7 +16,9 @@
     "migration:run": "ts-node src/database/migrate.ts",
     "migration:run:prod": "node dist/database/migrate.js",
     "reconcile": "ts-node src/reconciliation/reconcile.ts",
-    "reconcile:prod": "node dist/reconciliation/reconcile.js"
+    "reconcile:prod": "node dist/reconciliation/reconcile.js",
+    "dead-letters:replay": "ts-node src/consumer/replay-dead-letters.ts",
+    "dead-letters:replay:prod": "node dist/consumer/replay-dead-letters.js"
   },
   "dependencies": {
     "@nestjs/common": "^10.3.0",

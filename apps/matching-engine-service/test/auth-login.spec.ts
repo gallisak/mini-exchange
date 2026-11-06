@@ -18,7 +18,7 @@ describe('login', () => {
         where: () => ({ getMany: async () => [] }),
       }),
     } as unknown as Repository<User>;
-    const service = new AuthService(users, {} as Repository<RefreshSession>, new JwtService());
+    const service = new AuthService(users, {} as Repository<RefreshSession>, new JwtService(), {} as never);
 
     await expect(
       service.login({ email: 'nobody@example.com', password: 'password123' }),

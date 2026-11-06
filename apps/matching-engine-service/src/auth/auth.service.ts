@@ -10,6 +10,7 @@ import { RefreshSession } from './entities/refresh-session.entity';
 import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { requireEnv } from '../common/env';
+import { SessionRevocations } from './session-revocations.service';
 
 interface TokenPair {
   accessToken: string;
@@ -32,6 +33,7 @@ export class AuthService {
     @InjectRepository(User) private readonly users: Repository<User>,
     @InjectRepository(RefreshSession) private readonly sessions: Repository<RefreshSession>,
     private readonly jwt: JwtService,
+    private readonly revocations: SessionRevocations,
   ) {}
 
   async register(dto: RegisterDto): Promise<TokenPair> {
@@ -79,9 +81,9 @@ export class AuthService {
     return user?.role === 'admin';
   }
 
-  wsTicket(userId: string, until: number): { ticket: string } {
+  wsTicket(userId: string, until: number, sessionId?: string): { ticket: string } {
     const ticket = this.jwt.sign(
-      { sub: userId, until },
+      { sub: userId, until, ...(sessionId ? { sid: sessionId } : {}) },
       { secret: requireEnv('JWT_ACCESS_SECRET'), audience: WS_AUDIENCE, expiresIn: '30s' },
     );
     return { ticket };
@@ -100,7 +102,8 @@ export class AuthService {
     if (typeof userId !== 'string' || !isUUID(userId) || typeof sessionId !== 'string' || !isUUID(sessionId)) {
       throw new UnauthorizedException(INVALID_REFRESH);
     }
-    const pair = await this.sessions.manager.transaction(async (manager) => {
+    const outcome = await this.sessions.manager.transaction(async (manager) => {
+      await this.lockSessionsOf(manager, userId);
       const session = await manager.findOne(RefreshSession, {
         where: { id: sessionId, userId },
         lock: { mode: 'pessimistic_write' },
@@ -116,7 +119,7 @@ export class AuthService {
           { familyId: session.familyId, revokedAt: IsNull() },
           { revokedAt: () => 'now()' },
         );
-        return null;
+        return { reusedFamily: session.familyId };
       }
       if (!user) return null;
       const successorId = randomUUID();
@@ -131,13 +134,34 @@ export class AuthService {
       );
       return this.openSession(manager, user, session.familyId, successorId);
     });
-    if (!pair) throw new UnauthorizedException(INVALID_REFRESH);
-    return pair;
+    if (outcome && 'reusedFamily' in outcome) {
+      await this.revocations.revoke([outcome.reusedFamily]);
+      throw new UnauthorizedException(INVALID_REFRESH);
+    }
+    if (!outcome) throw new UnauthorizedException(INVALID_REFRESH);
+    return outcome;
   }
 
   async logout(userId: string, sessionId?: string): Promise<void> {
-    const scope = sessionId && isUUID(sessionId) ? { familyId: sessionId } : {};
-    await this.sessions.update({ userId, ...scope, revokedAt: IsNull() }, { revokedAt: () => 'now()' });
+    const familyId = sessionId && isUUID(sessionId) ? sessionId : undefined;
+    const families = await this.sessions.manager.transaction(async (manager) => {
+      await this.lockSessionsOf(manager, userId);
+      const revoked: { familyId: string }[] = (
+        await manager
+          .createQueryBuilder()
+          .update(RefreshSession)
+          .set({ revokedAt: () => 'now()' })
+          .where({ userId, ...(familyId ? { familyId } : {}), revokedAt: IsNull() })
+          .returning(['familyId'])
+          .execute()
+      ).raw;
+      return [...new Set([...(familyId ? [familyId] : []), ...revoked.map((row) => row.familyId)])];
+    });
+    await this.revocations.revoke(families);
+  }
+
+  private async lockSessionsOf(manager: EntityManager, userId: string): Promise<void> {
+    await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`refresh-sessions:${userId}`]);
   }
 
   private retriesRotation(session: RefreshSession, attempt: string): boolean {

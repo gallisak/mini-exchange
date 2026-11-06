@@ -13,6 +13,7 @@ export class MarketPublisherService implements OnModuleDestroy {
   private readonly lost = { instruments: new Set<string>(), owners: new Set<string>(), allOwners: false };
   private retry?: NodeJS.Timeout;
   private destroyed = false;
+  private announcing = 0;
 
   constructor(private readonly redis: RedisService) {}
 
@@ -34,6 +35,11 @@ export class MarketPublisherService implements OnModuleDestroy {
     }
     await this.announceLost();
     return true;
+  }
+
+  resyncPending(): boolean {
+    const { instruments, owners, allOwners } = this.lost;
+    return this.announcing > 0 || instruments.size > 0 || owners.size > 0 || allOwners;
   }
 
   private remember(instrument: string, event: MarketEvent): void {
@@ -72,8 +78,13 @@ export class MarketPublisherService implements OnModuleDestroy {
     instruments.clear();
     owners.clear();
     this.lost.allOwners = false;
-    await this.withTimeout(this.redis.client.publish(RESYNC_CHANNEL, JSON.stringify(event))).catch(() =>
-      this.remember('', event),
-    );
+    this.announcing += 1;
+    try {
+      await this.withTimeout(this.redis.client.publish(RESYNC_CHANNEL, JSON.stringify(event))).catch(() =>
+        this.remember('', event),
+      );
+    } finally {
+      this.announcing -= 1;
+    }
   }
 }

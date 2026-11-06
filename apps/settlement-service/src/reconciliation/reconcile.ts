@@ -16,7 +16,7 @@ async function main(): Promise<number> {
     const service = new ReconciliationService(dataSource, new EngineClient());
     const to = values.to ? new Date(values.to) : undefined;
     const report = values.from
-      ? await service.reconcile(new Date(values.from), service.periodEnd(to))
+      ? await service.reconcile(new Date(values.from), await service.periodEnd(to))
       : await service.reconcileSinceCheckpoint(to);
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return EXIT_CODES[report.status];

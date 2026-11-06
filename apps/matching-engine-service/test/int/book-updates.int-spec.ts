@@ -214,7 +214,9 @@ describe('a running book', () => {
   it('does not note a batch as published when its updates could not be published', async () => {
     runner = new BookRunner(
       'ABC',
-      options({ publish: (async (event: MarketEvent) => event.type !== 'book_delta') as never }),
+      options({
+        publish: (async (event: MarketEvent) => event.type !== 'book_delta' && event.type !== 'resync') as never,
+      }),
     );
     await runner.start();
 
@@ -229,9 +231,9 @@ describe('a running book', () => {
     expect(await raw.get('book:published:ABC')).toBeNull();
   });
 
-  it('does not note a later batch as published while an earlier one was lost, until clients were told to reload', async () => {
-    const events: MarketEvent[] = [];
+  it('does not note a later batch as published while an earlier one was lost, until the publisher told clients to reload', async () => {
     let losses = 1;
+    let resyncPending = true;
     runner = new BookRunner(
       'ABC',
       options({
@@ -240,31 +242,27 @@ describe('a running book', () => {
             losses -= 1;
             return false;
           }
-          events.push(event);
           return true;
         }) as never,
+        resyncPending: () => resyncPending,
       }),
     );
     await runner.start();
+    const bookSeq = async () =>
+      (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq;
 
     await place(uuidV5('lost'), 'seller', 'sell');
-    await eventually(async () =>
-      expect(
-        (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
-      ).toBe('1'),
-    );
+    await eventually(async () => expect(await bookSeq()).toBe('1'));
     await place(uuidV5('later'), 'seller', 'sell');
-    await eventually(async () =>
-      expect(
-        (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
-      ).toBe('2'),
-    );
+    await eventually(async () => expect(await bookSeq()).toBe('2'));
+    await sleep(300);
+    const whileLost = await raw.get('book:published:ABC');
+    resyncPending = false;
+    await place(uuidV5('after the resync'), 'seller', 'sell');
+    await eventually(async () => expect(await bookSeq()).toBe('3'));
     await sleep(300);
 
-    const marker = await raw.get('book:published:ABC');
-    const told = events.some(
-      (event) => event.type === 'resync' && event.resync.allOwners === true,
-    );
-    expect({ marker, told }).toEqual({ marker: told ? '2' : null, told: true });
+    expect(whileLost).toBeNull();
+    expect(await raw.get('book:published:ABC')).toBe('3');
   });
 });

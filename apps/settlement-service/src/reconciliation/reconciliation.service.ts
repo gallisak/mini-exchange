@@ -2,12 +2,14 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 import { LEDGER_SCALE, PRICE_SCALE, QUANTITY_SCALE, fromUnits, toUnits } from '../common/decimal';
 import { CASH_ASSET } from '../ledger/postings';
-import { EngineClient, EngineInstrumentTotals } from './engine-client';
+import { EngineClient, EngineInstrumentTotals, EngineProgress } from './engine-client';
 import { intEnv } from '../common/env';
 import { ReconciliationCheckpoint } from './reconciliation-checkpoint.entity';
 
 const ISSUE_LIMIT = 100;
 const CHECKPOINT = 'default';
+const UNRESOLVED_LIMIT = 10;
+const SEVERITY: Record<ReconciliationStatus, number> = { ok: 0, incomplete: 1, mismatch: 2 };
 
 export type ReconciliationStatus = 'ok' | 'mismatch' | 'incomplete';
 
@@ -48,6 +50,7 @@ export interface ReconciliationReport {
   instruments: InstrumentReconciliation[];
   ledger: LedgerIssues;
   engineError?: string;
+  unresolved?: { from: string; to: string; status: ReconciliationStatus }[];
 }
 
 const units = (value: string | null | undefined) => toUnits(value ?? '0', LEDGER_SCALE);
@@ -72,45 +75,45 @@ export class ReconciliationService {
     private readonly engine: EngineClient,
   ) {}
 
-  periodEnd(to?: Date): Date {
-    const latest = Date.now() - this.lagMs;
-    return new Date(Math.min(to?.getTime() ?? latest, latest));
+  async periodEnd(to?: Date): Promise<Date> {
+    return this.endOf(to, await this.engine.progress().catch(() => null));
   }
 
   async defaultPeriod(to?: Date): Promise<{ from: Date; to: Date }> {
-    const end = this.periodEnd(to).getTime();
+    const progress = await this.engine.progress().catch(() => null);
+    const end = this.endOf(to, progress).getTime();
     const checkpoint = await this.dataSource
       .getRepository(ReconciliationCheckpoint)
       .findOneBy({ name: CHECKPOINT });
     let from =
       checkpoint && checkpoint.reconciledUntil.getTime() < end
         ? checkpoint.reconciledUntil.getTime()
-        : await this.firstActivity();
+        : await this.firstActivity(progress?.firstTradeAt ?? null);
     if (from === null || from >= end) from = end - this.stepMs;
     return { from: new Date(from), to: new Date(Math.min(end, from + this.stepMs)) };
   }
 
-  private async firstActivity(): Promise<number | null> {
-    const [ledger, engine] = await Promise.all([
-      this.dataSource
-        .query(
-          `SELECT LEAST((SELECT MIN("executedAt") FROM "settled_trades"),
-                        (SELECT MIN("createdAt") FROM "ledger_transactions")) AS "first"`,
-        )
-        .then(([row]: { first: Date | null }[]) => (row?.first ? new Date(row.first).getTime() : null)),
-      this.engine.firstTradeAt().then(
-        (first) => first?.getTime() ?? null,
-        () => null,
-      ),
-    ]);
-    const known = [ledger, engine].filter((time): time is number => time !== null);
+  private endOf(to: Date | undefined, progress: EngineProgress | null): Date {
+    const latest = Date.now() - this.lagMs;
+    const pending = progress?.pendingSince?.getTime() ?? Infinity;
+    return new Date(Math.min(to?.getTime() ?? latest, latest, pending));
+  }
+
+  private async firstActivity(engineFirst: Date | null): Promise<number | null> {
+    const ledger = await this.dataSource
+      .query(
+        `SELECT LEAST((SELECT MIN("executedAt") FROM "settled_trades"),
+                      (SELECT MIN("createdAt") FROM "ledger_transactions")) AS "first"`,
+      )
+      .then(([row]: { first: Date | null }[]) => (row?.first ? new Date(row.first).getTime() : null));
+    const known = [ledger, engineFirst?.getTime() ?? null].filter((time): time is number => time !== null);
     return known.length > 0 ? Math.min(...known) : null;
   }
 
   async reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
     const period = await this.defaultPeriod(to);
     const report = await this.reconcile(period.from, period.to);
-    if (report.status === 'ok') {
+    if (report.status !== 'incomplete') {
       await this.dataSource.query(
         `INSERT INTO "reconciliation_checkpoints" ("name", "reconciledUntil") VALUES ($1, $2)
          ON CONFLICT ("name") DO UPDATE
@@ -118,7 +121,47 @@ export class ReconciliationService {
         [CHECKPOINT, period.to],
       );
     }
-    return report;
+    if (report.status === 'mismatch') {
+      await this.dataSource.query(
+        `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+        [period.from, period.to],
+      );
+    }
+    const unresolved = await this.recheckUnresolved(period);
+    const status = [report.status, ...unresolved.map((row) => row.status)].reduce((worst, next) =>
+      SEVERITY[next] > SEVERITY[worst] ? next : worst,
+    );
+    return { ...report, status, unresolved };
+  }
+
+  private async recheckUnresolved(current: {
+    from: Date;
+    to: Date;
+  }): Promise<NonNullable<ReconciliationReport['unresolved']>> {
+    const periods: { from: Date; to: Date }[] = await this.dataSource.query(
+      `SELECT "from", "to" FROM "reconciliation_unresolved_periods"
+        WHERE NOT ("from" = $1 AND "to" = $2)
+        ORDER BY "from"
+        LIMIT ${UNRESOLVED_LIMIT}`,
+      [current.from, current.to],
+    );
+    const results: NonNullable<ReconciliationReport['unresolved']> = [];
+    for (const period of periods) {
+      const { status } = await this.reconcile(new Date(period.from), new Date(period.to));
+      if (status === 'ok') {
+        await this.dataSource.query(
+          `DELETE FROM "reconciliation_unresolved_periods" WHERE "from" = $1 AND "to" = $2`,
+          [period.from, period.to],
+        );
+        continue;
+      }
+      results.push({
+        from: new Date(period.from).toISOString(),
+        to: new Date(period.to).toISOString(),
+        status,
+      });
+    }
+    return results;
   }
 
   async reconcile(from: Date, to: Date): Promise<ReconciliationReport> {

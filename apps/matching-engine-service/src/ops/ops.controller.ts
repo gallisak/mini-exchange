@@ -1,10 +1,11 @@
-import { ApiBearerAuth, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiSecurity, ApiTags } from '@nestjs/swagger';
 import { Controller, Get, Header, HttpStatus, Res, UseGuards } from '@nestjs/common';
 import { Response } from 'express';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AdminGuard } from '../auth/guards/admin.guard';
 import { metricsRegistry } from '../observability/metrics';
 import { OpsService } from './ops.service';
+import { InternalKeyGuard } from '../auth/guards/internal-key.guard';
 
 @ApiTags('ops')
 @Controller()
@@ -19,6 +20,8 @@ export class OpsController {
   }
 
   @Get('metrics')
+  @ApiSecurity('internal-key')
+  @UseGuards(InternalKeyGuard)
   @Header('content-type', metricsRegistry.contentType)
   metrics() {
     return metricsRegistry.metrics();

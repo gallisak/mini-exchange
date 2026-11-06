@@ -15,3 +15,14 @@ export function intEnv(name: string, fallback: number, min = 1): number {
   }
   return value;
 }
+
+const PLACEHOLDER = /^change-me/i;
+
+export function refusePlaceholderSecrets(names: string[]): void {
+  if (process.env.NODE_ENV !== 'production') return;
+  for (const name of names) {
+    if (PLACEHOLDER.test(process.env[name] ?? '')) {
+      throw new Error(`${name} still has the placeholder value from .env.example, set a real secret`);
+    }
+  }
+}

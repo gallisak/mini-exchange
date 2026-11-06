@@ -8,7 +8,9 @@ const digest = (value: string) => createHash('sha256').update(value).digest();
 export class InternalKeyGuard implements CanActivate {
   canActivate(context: ExecutionContext): boolean {
     const expected = process.env.ENGINE_INTERNAL_KEY;
-    const provided = context.switchToHttp().getRequest<Request>().header('x-internal-key');
+    const request = context.switchToHttp().getRequest<Request>();
+    const bearer = /^Bearer (.+)$/.exec(request.header('authorization') ?? '')?.[1];
+    const provided = request.header('x-internal-key') ?? bearer;
     if (!expected || !provided || !timingSafeEqual(digest(expected), digest(provided))) {
       throw new UnauthorizedException();
     }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { RefreshCw } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -16,6 +16,7 @@ import { EmptyState, ErrorState, LoadingRows } from '@/components/states';
 import { RequireSession } from '@/components/require-session';
 import { api } from '@/lib/client/api';
 import { trimAmount } from '@/lib/client/format';
+import { latestRequest } from '@/lib/client/latest';
 import { useSocket } from '@/lib/client/socket';
 import { Balance, ResyncScope, resyncsEverything } from '@/lib/client/types';
 import { cn } from '@/lib/utils';
@@ -26,15 +27,20 @@ function Wallet() {
   const [error, setError] = useState<string | null>(null);
   const [updatedAt, setUpdatedAt] = useState<Date | null>(null);
 
+  const begin = useMemo(() => latestRequest(), []);
+
   const load = useCallback(async () => {
+    const latest = begin();
     try {
-      setBalances((await api<{ balances: Balance[] }>('/api/wallet')).balances);
+      const { balances: loaded } = await api<{ balances: Balance[] }>('/api/wallet');
+      if (!latest()) return;
+      setBalances(loaded);
       setUpdatedAt(new Date());
       setError(null);
     } catch (failure) {
-      setError((failure as Error).message);
+      if (latest()) setError((failure as Error).message);
     }
-  }, []);
+  }, [begin]);
 
   useEffect(() => {
     void load();

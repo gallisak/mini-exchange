@@ -192,6 +192,11 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
         return;
       }
       tradeEvents.inc({ result: 'failed' });
+      if (this.givesUp(id, deliveries)) {
+        const reason = `gave up after ${deliveries} deliveries: ${(error as Error).message}`;
+        await this.deadLetter(stream, id, fields, deliveries, reason);
+        return;
+      }
       throw new SettlementFailedError(stream, id, error as Error);
     }
     tradeEvents.inc({ result });
@@ -199,10 +204,18 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
       await this.ledger.announce(trade);
     } catch (error) {
       tradeEvents.inc({ result: 'announce_failed' });
-      throw new SettlementFailedError(stream, id, error as Error);
+      if (!this.givesUp(id, deliveries)) throw new SettlementFailedError(stream, id, error as Error);
+      this.logger.error(
+        `Trade ${trade.tradeId} settled but its wallets could not be announced after ${deliveries} deliveries: ${(error as Error).message}`,
+      );
     }
     await this.client!.xack(stream, this.options.group, id);
     this.logger.log(`Trade ${trade.tradeId} ${result} from ${stream} ${id}`);
+  }
+
+  private givesUp(id: string, deliveries: number): boolean {
+    const age = Date.now() - Number(id.split('-')[0]);
+    return deliveries >= this.options.maxDeliveries && age >= this.options.giveUpAfterMs;
   }
 
   private async deadLetter(

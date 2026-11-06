@@ -7,6 +7,7 @@ import { AuthController } from './auth.controller';
 import { User } from './entities/user.entity';
 import { RefreshSession } from './entities/refresh-session.entity';
 import { JwtStrategy } from './strategies/jwt.strategy';
+import { SessionRevocations } from './session-revocations.service';
 
 @Module({
   imports: [
@@ -15,7 +16,7 @@ import { JwtStrategy } from './strategies/jwt.strategy';
     JwtModule.register({}),
   ],
   controllers: [AuthController],
-  providers: [AuthService, JwtStrategy],
-  exports: [JwtStrategy, PassportModule],
+  providers: [AuthService, JwtStrategy, SessionRevocations],
+  exports: [JwtStrategy, PassportModule, SessionRevocations],
 })
 export class AuthModule {}

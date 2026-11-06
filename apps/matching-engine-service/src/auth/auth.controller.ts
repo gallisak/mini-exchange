@@ -40,6 +40,7 @@ export class AuthController {
 
   @Post('refresh')
   @HttpCode(HttpStatus.OK)
+  @RateLimit('PUBLIC')
   refresh(@Body() dto: RefreshDto) {
     return this.auth.refresh(dto.refreshToken, dto.attempt);
   }
@@ -50,7 +51,7 @@ export class AuthController {
   @RateLimit('PUBLIC')
   @UseGuards(JwtAuthGuard)
   wsTicket(@Request() req: { user: AuthenticatedUser }) {
-    return this.auth.wsTicket(req.user.userId, req.user.expiresAt);
+    return this.auth.wsTicket(req.user.userId, req.user.expiresAt, req.user.sessionId);
   }
 
   @Get('admins/:id')
@@ -64,6 +65,7 @@ export class AuthController {
   @Post('logout')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.NO_CONTENT)
+  @RateLimit('PUBLIC')
   @UseGuards(JwtAuthGuard)
   logout(@Request() req: { user: AuthenticatedUser }) {
     return this.auth.logout(req.user.userId, req.user.sessionId);

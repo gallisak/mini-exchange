@@ -30,6 +30,7 @@ export interface BookRunnerOptions {
   leaseValid: () => boolean;
   onFenced: (error: FencedOutError) => void;
   publish?: (event: MarketEvent) => Promise<boolean | void>;
+  resyncPending?: () => boolean;
   heartbeatMs?: number;
 }
 
@@ -68,6 +69,7 @@ export class BookRunner {
   private state!: EngineState;
   private stuck?: StuckBook;
   private reloadNeeded = false;
+  private updatesLost = false;
 
   constructor(
     readonly instrument: string,
@@ -372,7 +374,11 @@ export class BookRunner {
       );
     }
     const published = await Promise.all(updates);
-    if (result.state.bookSeq !== previousSeq && published.every(Boolean)) {
+    if (!published.every(Boolean)) this.updatesLost = true;
+    else if (this.updatesLost && this.options.resyncPending && !this.options.resyncPending()) {
+      this.updatesLost = false;
+    }
+    if (result.state.bookSeq !== previousSeq && !this.updatesLost) {
       await this.markPublished(result.state.bookSeq);
     }
   }

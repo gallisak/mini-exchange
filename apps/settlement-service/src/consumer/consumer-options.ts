@@ -11,6 +11,8 @@ export interface ConsumerOptions {
   retryIdleMs: number;
   reclaimEveryMs: number;
   idleConsumerMs: number;
+  maxDeliveries: number;
+  giveUpAfterMs: number;
 }
 
 export function consumerOptionsFromEnv(): ConsumerOptions {
@@ -23,5 +25,7 @@ export function consumerOptionsFromEnv(): ConsumerOptions {
     retryIdleMs: intEnv('CONSUMER_RETRY_IDLE_MS', 10000),
     reclaimEveryMs: intEnv('CONSUMER_RECLAIM_INTERVAL_MS', 5000),
     idleConsumerMs: intEnv('CONSUMER_IDLE_DELETE_MS', 3_600_000),
+    maxDeliveries: intEnv('CONSUMER_MAX_DELIVERIES', 20),
+    giveUpAfterMs: intEnv('CONSUMER_GIVE_UP_AFTER_MS', 3_600_000, 0),
   };
 }

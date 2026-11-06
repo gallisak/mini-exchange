@@ -14,6 +14,7 @@ import proxyAddr from 'proxy-addr';
 import { Server, Socket } from 'socket.io';
 import { OrdersService } from '../orders.service';
 import { WS_AUDIENCE } from '../../auth/auth.service';
+import { LOGOUT_CHANNEL, SessionRevocations } from '../../auth/session-revocations.service';
 import { INSTRUMENTS } from '../../common/instruments';
 import { corsOrigins, intEnv, requireEnv, trustedProxies } from '../../common/env';
 import { RateLimitService } from '../../rate-limit/rate-limit.service';
@@ -29,6 +30,7 @@ import {
 const SUBSCRIBE_RETRY_MS = 1000;
 const bookRoom = (instrument: string) => `book:${instrument}`;
 const userRoom = (userId: string) => `user:${userId}`;
+const sessionRoom = (sessionId: string) => `session:${sessionId}`;
 
 const isInstrument = (value: unknown): value is string =>
   typeof value === 'string' && INSTRUMENTS.includes(value);
@@ -44,6 +46,7 @@ function parse<T>(message: string): T | null {
 interface Identity {
   userId: string;
   expiresAt: number;
+  sessionId?: string;
 }
 
 @WebSocketGateway({ cors: { origin: corsOrigins() } })
@@ -69,6 +72,7 @@ export class OrdersGateway
     private readonly redis: RedisService,
     private readonly jwt: JwtService,
     private readonly limiter: RateLimitService,
+    private readonly revocations: SessionRevocations,
   ) {}
 
   afterInit(server: Server): void {
@@ -77,9 +81,16 @@ export class OrdersGateway
       if (token === undefined) return next();
       const identity = this.identityFrom(token);
       if (!identity) return next(new Error('Unauthorized'));
-      socket.data.userId = identity.userId;
-      socket.data.expiresAt = identity.expiresAt;
-      next();
+      this.stillSignedIn(identity).then(
+        (signedIn) => {
+          if (!signedIn) return next(new Error('Unauthorized'));
+          socket.data.userId = identity.userId;
+          socket.data.expiresAt = identity.expiresAt;
+          socket.data.sessionId = identity.sessionId;
+          next();
+        },
+        () => next(new Error('Unavailable')),
+      );
     });
 
     const subscriber = this.redis.createConnection({ autoResubscribe: false });
@@ -90,7 +101,7 @@ export class OrdersGateway
       clearTimeout(this.subscribeRetry);
       Promise.all([
         subscriber.psubscribe(`${MARKET_CHANNEL_PREFIX}*`),
-        subscriber.subscribe(WALLET_CHANNEL),
+        subscriber.subscribe(WALLET_CHANNEL, LOGOUT_CHANNEL),
       ]).then(
         () => {
           if (subscribedBefore || missedUpdates) {
@@ -113,6 +124,7 @@ export class OrdersGateway
     );
     subscriber.on('message', (channel: string, message: string) => {
       if (channel === WALLET_CHANNEL) this.fanOutWallet(message);
+      if (channel === LOGOUT_CHANNEL) this.server.in(sessionRoom(message)).disconnectSockets(true);
     });
   }
 
@@ -132,7 +144,12 @@ export class OrdersGateway
         client.id,
         setTimeout(() => client.disconnect(true), Math.max(remainingMs, 0)),
       );
-      await client.join(userRoom(userId));
+      const sessionId: string | undefined = client.data.sessionId;
+      await client.join(sessionId ? [userRoom(userId), sessionRoom(sessionId)] : userRoom(userId));
+      if (sessionId && (await this.revocations.isRevoked(sessionId).catch(() => false))) {
+        client.disconnect(true);
+        return;
+      }
     }
     client.emit('connected', { message: 'ok', authenticated: Boolean(userId) });
   }
@@ -198,13 +215,14 @@ export class OrdersGateway
 
   private ticketIdentity(token: string): Identity | null {
     try {
-      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; until?: unknown }>(token, {
-        secret: requireEnv('JWT_ACCESS_SECRET'),
-        audience: WS_AUDIENCE,
-      });
+      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; until?: unknown; sid?: unknown }>(
+        token,
+        { secret: requireEnv('JWT_ACCESS_SECRET'), audience: WS_AUDIENCE },
+      );
       if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) return null;
       if (typeof payload.exp !== 'number' || typeof payload.until !== 'number') return null;
-      return { userId: payload.sub, expiresAt: payload.until * 1000 };
+      const sessionId = typeof payload.sid === 'string' ? payload.sid : undefined;
+      return { userId: payload.sub, expiresAt: payload.until * 1000, sessionId };
     } catch {
       return null;
     }
@@ -212,17 +230,22 @@ export class OrdersGateway
 
   private accessTokenIdentity(token: string): Identity | null {
     try {
-      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; aud?: unknown }>(token, {
+      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; aud?: unknown; sid?: unknown }>(token, {
         secret: requireEnv('JWT_ACCESS_SECRET'),
       });
       if (payload.aud !== undefined || typeof payload.sub !== 'string' || !isUUID(payload.sub)) {
         return null;
       }
       if (typeof payload.exp !== 'number') return null;
-      return { userId: payload.sub, expiresAt: payload.exp * 1000 };
+      const sessionId = typeof payload.sid === 'string' ? payload.sid : undefined;
+      return { userId: payload.sub, expiresAt: payload.exp * 1000, sessionId };
     } catch {
       return null;
     }
+  }
+
+  private async stillSignedIn(identity: Identity): Promise<boolean> {
+    return !identity.sessionId || !(await this.revocations.isRevoked(identity.sessionId));
   }
 
   private fanOutMarket(message: string): void {

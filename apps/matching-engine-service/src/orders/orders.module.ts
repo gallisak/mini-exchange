@@ -13,9 +13,14 @@ import { CommandStreamService } from './engine/command-stream.service';
 import { MatchingEngineService } from './engine/matching-engine.service';
 import { InstrumentOwnershipService } from './engine/instrument-ownership.service';
 import { MarketPublisherService } from './realtime/market-publisher.service';
+import { AuthModule } from '../auth/auth.module';
 
 @Module({
-  imports: [TypeOrmModule.forFeature([Order, TradeRecord, InstrumentState]), JwtModule.register({})],
+  imports: [
+    TypeOrmModule.forFeature([Order, TradeRecord, InstrumentState]),
+    JwtModule.register({}),
+    AuthModule,
+  ],
   controllers: [OrdersController],
   providers: [
     InstrumentOwnershipService,

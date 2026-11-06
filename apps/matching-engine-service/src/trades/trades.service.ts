@@ -2,6 +2,11 @@ import { BadRequestException, Injectable } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { TradeRecord } from '../orders/entities/trade-record.entity';
+import { InstrumentState } from '../orders/entities/instrument-state.entity';
+import { commandStreamKey, streamTimestamp } from '../orders/engine/order-command';
+import { INSTRUMENTS } from '../common/instruments';
+import { RedisService } from '../redis/redis.service';
+import { withTimeout } from '../common/with-timeout';
 import { PublicTrade, publicTrade } from './public-trade';
 
 export interface InstrumentTradeTotals {
@@ -15,12 +20,19 @@ export interface TradeSummary {
   from: string;
   to: string;
   firstTradeAt: string | null;
+  pendingSince: string | null;
   instruments: InstrumentTradeTotals[];
 }
 
+const PENDING_TIMEOUT_MS = 2_000;
+
 @Injectable()
 export class TradesService {
-  constructor(@InjectRepository(TradeRecord) private readonly trades: Repository<TradeRecord>) {}
+  constructor(
+    @InjectRepository(TradeRecord) private readonly trades: Repository<TradeRecord>,
+    @InjectRepository(InstrumentState) private readonly states: Repository<InstrumentState>,
+    private readonly redis: RedisService,
+  ) {}
 
   async recent(instrument: string, limit = 50): Promise<PublicTrade[]> {
     const trades = await this.trades.find({
@@ -56,6 +68,7 @@ export class TradesService {
       from: from.toISOString(),
       to: to.toISOString(),
       firstTradeAt: first?.firstTradeAt ? new Date(first.firstTradeAt).toISOString() : null,
+      pendingSince: await this.pendingSince(),
       instruments: rows.map((row) => ({
         instrument: row.instrument,
         count: Number(row.count),
@@ -63,5 +76,28 @@ export class TradesService {
         notional: row.notional,
       })),
     };
+  }
+
+  private async pendingSince(): Promise<string | null> {
+    const states = await this.states.find({ select: { instrument: true, lastCommandId: true } });
+    const applied = new Map(states.map((state) => [state.instrument, state.lastCommandId]));
+    const oldest = await Promise.all(
+      INSTRUMENTS.map(async (instrument) => {
+        const next = (await withTimeout(
+          this.redis.client.xrange(
+            commandStreamKey(instrument),
+            `(${applied.get(instrument) ?? '0-0'}`,
+            '+',
+            'COUNT',
+            1,
+          ),
+          PENDING_TIMEOUT_MS,
+          'Redis',
+        )) as [string, string[]][];
+        return next.length > 0 ? streamTimestamp(next[0][0]).getTime() : null;
+      }),
+    );
+    const known = oldest.filter((time): time is number => time !== null);
+    return known.length > 0 ? new Date(Math.min(...known)).toISOString() : null;
   }
 }

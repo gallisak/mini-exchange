@@ -11,3 +11,13 @@ export function startOpsPolling(loadStatus: () => void, reconcile: () => void): 
     clearInterval(reconciliation);
   };
 }
+
+export type OpsView<T> =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string }
+  | { kind: 'report'; report: T; staleBecause: string | null };
+
+export function opsView<T>(report: T | null, error: string | null): OpsView<T> {
+  if (report) return { kind: 'report', report, staleBecause: error };
+  return error ? { kind: 'error', message: error } : { kind: 'loading' };
+}
