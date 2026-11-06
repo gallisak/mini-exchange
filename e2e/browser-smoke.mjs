@@ -244,15 +244,6 @@ try {
 
   const leaving = await (await browser.newContext()).newPage();
   await register(leaving, `browser-leaving-${run}@example.com`);
-  await placeOrder(leaving, 'buy', '1.00', '1');
-  await leaving.getByRole('button', { name: /browser-leaving/ }).click();
-  await leaving.getByRole('menuitem', { name: 'Sign out' }).click();
-  await leaving.waitForURL('**/login');
-  await leaving.waitForTimeout(500);
-  if (await leaving.getByText(/accepted/).count()) {
-    throw new Error('an order toast stayed on screen after its user signed out');
-  }
-  await register(leaving, `browser-staying-${run}@example.com`);
   let answerOrder;
   const unanswered = new Promise((resolve) => (answerOrder = resolve));
   await leaving.route('**/api/orders', async (route) => {
@@ -263,7 +254,7 @@ try {
   await leaving.getByLabel('Price (USD)').fill('1.00');
   await leaving.getByLabel(/Quantity/).fill('1');
   await leaving.getByRole('button', { name: /^Buy ABC$/ }).click();
-  await leaving.getByRole('button', { name: /browser-staying/ }).click();
+  await leaving.getByRole('button', { name: /browser-leaving/ }).click();
   await leaving.getByRole('menuitem', { name: 'Sign out' }).click();
   await leaving.waitForURL('**/login');
   await registerHere(leaving, `browser-next-${run}@example.com`);
@@ -296,9 +287,14 @@ try {
   await second.waitForURL('**/orders');
   log('the sign-in page sends someone already signed in onward');
   await first.getByLabel('Price (USD)').fill('1.00');
+  await placeOrder(second, 'buy', '1.00', '1');
   await second.getByRole('button', { name: /browser-tab-a/ }).click();
   await second.getByRole('menuitem', { name: 'Sign out' }).click();
   await second.waitForURL('**/login');
+  await second.waitForTimeout(500);
+  if (await second.getByText(/accepted/).count()) {
+    throw new Error('an order toast stayed on screen after its user signed out');
+  }
   await registerHere(second, `browser-tab-b-${run}@example.com`);
   await first.getByRole('button', { name: /browser-tab-b/ }).waitFor({ timeout: 5_000 });
   if ((await first.getByLabel('Price (USD)').inputValue()) !== '') {
@@ -310,21 +306,22 @@ try {
   await unaware.addInitScript(() => delete window.BroadcastChannel);
   const staleTab = await unaware.newPage();
   await register(staleTab, `browser-stale-a-${run}@example.com`);
-  const freshTab = await unaware.newPage();
-  await freshTab.goto(`${BASE}/orders`);
-  await freshTab.getByRole('button', { name: /browser-stale-a/ }).click();
-  await freshTab.getByRole('menuitem', { name: 'Sign out' }).click();
-  await freshTab.waitForURL('**/login');
-  await registerHere(freshTab, `browser-stale-b-${run}@example.com`);
-  const stalePost = staleTab.waitForResponse(
-    (response) => ordersApi(response.request()),
-  );
+  const staleEmail = `browser-stale-b-${run}@example.com`;
+  await staleTab.route('**/api/auth/session', (route) => route.abort());
+  const signedIn = await unaware.request.post(`${BASE}/api/auth/register`, {
+    data: { email: staleEmail, password: 'password123' },
+  });
+  if (!signedIn.ok()) throw new Error(`the second account could not sign in: ${signedIn.status()}`);
+  const stalePost = staleTab.waitForResponse((response) => ordersApi(response.request()));
   await staleTab.getByLabel('Price (USD)').fill('1.00');
   await staleTab.getByLabel(/Quantity/).fill('1');
   await staleTab.getByRole('button', { name: /^Buy ABC$/ }).click();
   if ((await stalePost).status() !== 409) {
     throw new Error('a tab that still showed the previous account placed an order on the new one');
   }
+  await staleTab.waitForTimeout(300);
+  await staleTab.unroute('**/api/auth/session');
+  await staleTab.evaluate(() => window.dispatchEvent(new Event('focus')));
   await staleTab.getByRole('button', { name: /browser-stale-b/ }).waitFor({ timeout: 5_000 });
   log('a tab that did not hear of the new sign-in cannot trade on it, and catches up');
 
@@ -333,13 +330,9 @@ try {
   log('the operations panel is closed to a regular user');
 
   const admin = await (await browser.newContext()).newPage();
-  const adminEmail = `browser-admin-${run}@example.com`;
-  await register(admin, adminEmail);
-  compose('exec', '-T', 'matching-engine-1', 'sh', '/opt/secrets/with-secrets.sh', 'node', 'dist/tools/grant-admin.js', adminEmail);
-  await admin.getByRole('button', { name: /browser-admin/ }).click();
-  await admin.getByRole('menuitem', { name: 'Sign out' }).click();
-  await admin.waitForURL('**/login');
-  await admin.getByLabel('Email').fill(adminEmail);
+  compose('exec', '-T', 'matching-engine-1', 'sh', '/opt/secrets/with-secrets.sh', 'node', 'dist/tools/grant-admin.js', staleEmail);
+  await admin.goto(`${BASE}/login`);
+  await admin.getByLabel('Email').fill(staleEmail);
   await admin.getByLabel('Password').fill('password123');
   await admin.getByRole('button', { name: 'Sign in', exact: true }).click();
   await admin.waitForURL('**/orders');
