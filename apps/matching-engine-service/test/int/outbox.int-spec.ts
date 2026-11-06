@@ -116,6 +116,30 @@ describe('trade events outbox', () => {
       expect(await relay().purgePublished(3_600_000)).toBe(1);
       expect(await outbox.count()).toBe(2);
     });
+
+    it('purges a backlog a batch at a time and keeps relaying until it is gone', async () => {
+      process.env.OUTBOX_PURGE_BATCH = '3';
+      const outbox = dataSource.getRepository(OutboxMessage);
+      const old = {
+        stream: tradeStreamKey('ABC'),
+        type: 'trade.executed',
+        payload: {},
+        publishedAt: new Date(Date.now() - 2 * 3_600_000),
+      };
+      await outbox.insert(range(7).map(() => old));
+      const instance = relay();
+      delete process.env.OUTBOX_PURGE_BATCH;
+
+      expect(await instance.purgePublished(3_600_000)).toBe(3);
+      expect(await outbox.count()).toBe(4);
+
+      process.env.OUTBOX_RETENTION_HOURS = '1';
+      const purging = relay();
+      delete process.env.OUTBOX_RETENTION_HOURS;
+      purging.onApplicationBootstrap();
+      await eventually(async () => expect(await outbox.count()).toBe(0));
+      await purging.onModuleDestroy();
+    });
   });
 });
 

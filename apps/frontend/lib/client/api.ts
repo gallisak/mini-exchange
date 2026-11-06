@@ -1,4 +1,13 @@
+import { SESSION_CHANGED, SESSION_USER_HEADER } from '@/lib/session-user';
+
 export const UNAUTHORIZED_EVENT = 'mx:unauthorized';
+export const SESSION_CHANGED_EVENT = 'mx:session-changed';
+
+let shownUser: string | null = null;
+
+export function showingUser(userId: string | null): void {
+  shownUser = userId;
+}
 
 export interface UnauthorizedDetail {
   startedAt: number;
@@ -11,6 +20,10 @@ export class ApiError extends Error {
   ) {
     super(message);
   }
+}
+
+export function endsSession(failure: unknown): boolean {
+  return failure instanceof ApiError && failure.status === 401;
 }
 
 function messageOf(body: unknown, status: number): string {
@@ -35,7 +48,11 @@ export async function api<T>(
     response = await fetch(path, {
       ...init,
       signal,
-      headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
+      headers: {
+        'content-type': 'application/json',
+        ...(shownUser ? { [SESSION_USER_HEADER]: shownUser } : {}),
+        ...(init.headers ?? {}),
+      },
       cache: 'no-store',
     });
     text = await response.text();
@@ -54,6 +71,9 @@ export async function api<T>(
   if (!response.ok) {
     if (response.status === 401 && endsSessionOn401 && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, { detail: { startedAt } }));
+    }
+    if ((body as { code?: unknown } | null)?.code === SESSION_CHANGED && typeof window !== 'undefined') {
+      window.dispatchEvent(new Event(SESSION_CHANGED_EVENT));
     }
     throw new ApiError(response.status, messageOf(body, response.status));
   }

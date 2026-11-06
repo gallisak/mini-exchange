@@ -1,12 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { clearTokens, isFresh, readTokens, sessionsIn, storeTokens, TokenPair } from '@/lib/server/session';
-import { rotateTokens, upstream } from '@/lib/server/upstream';
+import { clearTokens, isFresh, olderSessions, readTokens, sessionsIn, storeTokens, TokenPair } from '@/lib/server/session';
+import { endForgottenSessions, isAnotherUser, rotateTokens, sessionChanged, upstream } from '@/lib/server/upstream';
 
 const notSignedOut = (status: number) =>
   NextResponse.json({ message: 'Could not sign out, try again' }, { status });
 
 export async function POST(request: NextRequest) {
   const { accessToken, refreshToken, session } = readTokens(request);
+  if (accessToken && isAnotherUser(request, accessToken)) return sessionChanged();
   let token = isFresh(accessToken) ? accessToken : undefined;
   let rotated: TokenPair | null = null;
   const rotate = async (): Promise<NextResponse | null> => {
@@ -42,5 +43,6 @@ export async function POST(request: NextRequest) {
   }
   const response = new NextResponse(null, { status: 204 });
   clearTokens(response, sessionsIn(request));
+  void endForgottenSessions(request, olderSessions(request, session));
   return response;
 }

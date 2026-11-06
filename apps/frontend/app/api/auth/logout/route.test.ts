@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
+import { sessionCookies } from '@/lib/server/test-session';
 import { POST } from './route';
 
 const access = ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: Math.floor(Date.now() / 1000) + 900 })).toString('base64url'), 's'].join('.');
@@ -7,15 +8,31 @@ const access = ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: Math.floor(Da
 const signedIn = (refresh = 'refresh') =>
   new NextRequest('http://exchange.test/api/auth/logout', {
     method: 'POST',
-    headers: { cookie: `mx_access=${access}; mx_refresh=${refresh}` },
+    headers: { cookie: sessionCookies(access, refresh) },
   });
 
 const cleared = (response: Response) =>
-  response.headers.getSetCookie().filter((cookie) => /^mx_(access|refresh)=;/.test(cookie)).length;
+  response.headers.getSetCookie().filter((cookie) => /^mx_(access|refresh)_[0-9a-z]+=;/.test(cookie)).length;
 
 describe('signing out through the frontend', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+  });
+
+  it('does not sign out another account than the one the page shows', async () => {
+    const engine = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', engine);
+
+    const response = await POST(
+      new NextRequest('http://exchange.test/api/auth/logout', {
+        method: 'POST',
+        headers: { cookie: sessionCookies(access, 'refresh'), 'x-session-user': 'someone-else' },
+      }),
+    );
+
+    expect(response.status).toBe(409);
+    expect(cleared(response)).toBe(0);
+    expect(engine).not.toHaveBeenCalled();
   });
 
   it('does not report success or forget the session when the engine could not end it', async () => {

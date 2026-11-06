@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { TokenPair, claimsOf, clearTokens, isFresh, olderSessions, readTokens, storeTokens } from '@/lib/server/session';
-import { rotateTokens, unavailable } from '@/lib/server/upstream';
+import { endForgottenSessions, rotateTokens, unavailable } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
 
@@ -13,8 +13,10 @@ export async function GET(request: NextRequest) {
   const { accessToken, refreshToken, session } = readTokens(request);
   const answer = (body: unknown, tokens?: TokenPair) => {
     const response = NextResponse.json(body);
-    clearTokens(response, olderSessions(request, session));
+    const forgotten = olderSessions(request, session);
+    clearTokens(response, forgotten);
     if (tokens) storeTokens(response, tokens, session);
+    void endForgottenSessions(request, forgotten);
     return response;
   };
   if (isFresh(accessToken)) return answer({ user: userOf(accessToken) });

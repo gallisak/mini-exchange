@@ -1,5 +1,6 @@
 'use client';
 
+import { Fragment } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { Lock } from 'lucide-react';
@@ -42,5 +43,5 @@ export function RequireSession({
       </Card>
     );
   }
-  return <>{children(user)}</>;
+  return <Fragment key={user.id}>{children(user)}</Fragment>;
 }

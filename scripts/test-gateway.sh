@@ -6,7 +6,7 @@ name="mx-gateway-test-$$"
 network="$name"
 
 cleanup() {
-  docker rm -f "$name-nginx" "$name-dropping" "$name-answering" "$name-slow-1" "$name-slow-2" "$name-hanging" "$name-quick" >/dev/null 2>&1 || true
+  docker rm -f "$name-nginx" "$name-dropping" "$name-answering" "$name-refusing" "$name-summing" "$name-slow-1" "$name-slow-2" "$name-hanging" "$name-quick" >/dev/null 2>&1 || true
   docker network rm "$network" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
@@ -48,6 +48,28 @@ for path in /orders /auth/refresh; do
 done
 
 docker rm -f "$name-nginx" "$name-dropping" "$name-answering" >/dev/null
+engine refusing matching-engine-1 "res.statusCode = 503; res.end('refused');"
+engine summing matching-engine-2 "res.end('answered');"
+docker run -d --name "$name-nginx" --network "$network" -p 127.0.0.1::3001 \
+  -v "$root/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine >/dev/null
+port=$(docker port "$name-nginx" 3001 | head -n 1 | sed 's/.*://')
+for attempt in $(seq 1 30); do
+  [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/health")" != 000 ] && break
+  sleep 1
+done
+sleep 3
+refused=0
+for n in 1 2 3 4; do
+  status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/trades/summary")
+  [ "$status" = 503 ] && refused=1
+done
+if [ "$refused" != 1 ]; then
+  echo "FAIL: a trade summary answered 503 was run again on the other engine"
+  exit 1
+fi
+echo "OK: a trade summary one engine gave up on is not run again on the other one"
+
+docker rm -f "$name-nginx" "$name-refusing" "$name-summing" >/dev/null
 slow="const delay = req.url.startsWith('/slow') ? 6000 : req.url.startsWith('/trades/summary') ? 5000 : 0; setTimeout(() => res.end('answered'), delay);"
 engine slow-1 matching-engine-1 "$slow"
 engine slow-2 matching-engine-2 "$slow"

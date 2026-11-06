@@ -94,7 +94,8 @@ export class LedgerService {
 
   async wallet(ownerId: string): Promise<WalletBalance[]> {
     let accounts = await this.accountsOf(ownerId);
-    if (accounts.length < WALLET_ASSETS.length) {
+    const open = new Set(accounts.map((account) => account.asset));
+    if (WALLET_ASSETS.some((asset) => !open.has(asset))) {
       await this.dataSource.transaction(async (manager) => {
         const journal = await this.openAccounts(
           manager,

@@ -4,6 +4,7 @@ import { RedisLockService } from '../src/locks/redis-lock.service';
 import { MatchingEngineService } from '../src/orders/engine/matching-engine.service';
 import { RedisService } from '../src/redis/redis.service';
 import { DataSource } from 'typeorm';
+import { refuseSharedSecret } from '../src/common/env';
 
 describe('numeric settings', () => {
   const saved = { ...process.env };
@@ -29,6 +30,15 @@ describe('numeric settings', () => {
           new InstrumentOwnershipService({} as RedisLockService, {} as MatchingEngineService),
       ).toThrow('LOCK_TTL_MS');
     }
+  });
+
+  it('refuses the same secret for access and refresh tokens', () => {
+    process.env.JWT_ACCESS_SECRET = 'one';
+    process.env.JWT_REFRESH_SECRET = 'one';
+    expect(() => refuseSharedSecret('JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET')).toThrow('must differ');
+
+    process.env.JWT_REFRESH_SECRET = 'two';
+    expect(() => refuseSharedSecret('JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET')).not.toThrow();
   });
 
   it('uses the default when a setting is not given', () => {

@@ -3,6 +3,7 @@
 import { createContext, useContext, useEffect, useState } from 'react';
 import { Socket, io } from 'socket.io-client';
 import { UNAUTHORIZED_EVENT, UnauthorizedDetail } from './api';
+import { SESSION_USER_HEADER } from '@/lib/session-user';
 import { waitForToken } from './ws-token';
 import { useSession } from './session';
 
@@ -23,7 +24,11 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
         if (!signedIn) return deliver({});
         const startedAt = performance.now();
         void waitForToken({
-          fetchToken: () => fetch('/api/ws-token', { cache: 'no-store' }),
+          fetchToken: () =>
+            fetch('/api/ws-token', {
+              cache: 'no-store',
+              headers: userId ? { [SESSION_USER_HEADER]: userId } : {},
+            }),
           sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
           cancelled: () => closed,
         }).then((outcome) => {

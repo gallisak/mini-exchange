@@ -1,4 +1,5 @@
 export interface RequestTurn {
+  startedAt: Date;
   latest: () => boolean;
   show: () => boolean;
 }
@@ -9,6 +10,7 @@ export function latestRequest(): () => RequestTurn {
   return () => {
     const mine = ++last;
     return {
+      startedAt: new Date(),
       latest: () => mine === last,
       show: () => {
         if (mine < shown) return false;

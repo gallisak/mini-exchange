@@ -32,6 +32,12 @@ export function intEnv(name: string, fallback: number, min = 1): number {
 
 const PLACEHOLDER = /^change-me/i;
 
+export function refuseSharedSecret(first: string, second: string): void {
+  if (process.env[first] === process.env[second]) {
+    throw new Error(`${first} and ${second} must differ, or a token of one kind passes as the other`);
+  }
+}
+
 export function refusePlaceholderSecrets(names: string[]): void {
   if (process.env.NODE_ENV !== 'production') return;
   for (const name of names) {

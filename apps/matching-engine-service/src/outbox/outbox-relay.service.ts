@@ -1,5 +1,5 @@
 import { Injectable, Logger, OnApplicationBootstrap, OnModuleDestroy } from '@nestjs/common';
-import { DataSource, In, IsNull, LessThan } from 'typeorm';
+import { DataSource, In, IsNull } from 'typeorm';
 import { RedisService } from '../redis/redis.service';
 import { OutboxMessage } from './outbox-message.entity';
 import { runWithTrace } from '../observability/trace-context';
@@ -18,6 +18,7 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
   private readonly retentionMs = intEnv('OUTBOX_RETENTION_HOURS', 24) * 3_600_000;
   private readonly cleanupEveryMs = intEnv('OUTBOX_CLEANUP_INTERVAL_MS', 60_000);
   private readonly publishTimeoutMs = intEnv('OUTBOX_PUBLISH_TIMEOUT_MS', 5_000);
+  private readonly purgeBatch = intEnv('OUTBOX_PURGE_BATCH', 1_000);
   private lastCleanup = 0;
   private running = false;
   private loop?: Promise<void>;
@@ -84,10 +85,24 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
   }
 
   async purgePublished(olderThanMs = this.retentionMs): Promise<number> {
-    const result = await this.dataSource.getRepository(OutboxMessage).delete({
-      publishedAt: LessThan(new Date(Date.now() - olderThanMs)),
+    const [, deleted]: [unknown, number] = await this.dataSource.query(
+      `DELETE FROM "outbox" WHERE "id" IN (
+         SELECT "id" FROM "outbox"
+          WHERE "publishedAt" < $1
+          LIMIT ${this.purgeBatch}
+          FOR UPDATE SKIP LOCKED)`,
+      [new Date(Date.now() - olderThanMs)],
+    );
+    return deleted;
+  }
+
+  private async purgeDue(): Promise<void> {
+    if (Date.now() - this.lastCleanup < this.cleanupEveryMs) return;
+    const purged = await this.purgePublished().catch((error: Error) => {
+      this.logger.warn(`Could not purge the outbox: ${error.message}`);
+      return 0;
     });
-    return result.affected ?? 0;
+    if (purged < this.purgeBatch) this.lastCleanup = Date.now();
   }
 
   private async run(): Promise<void> {
@@ -96,10 +111,7 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
       try {
         const published = await this.publishPending();
         delay = this.pollMs;
-        if (Date.now() - this.lastCleanup >= this.cleanupEveryMs) {
-          this.lastCleanup = Date.now();
-          await this.purgePublished();
-        }
+        await this.purgeDue();
         if (published > 0) continue;
       } catch (error) {
         if (!this.running) return;

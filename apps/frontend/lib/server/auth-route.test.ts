@@ -1,12 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { signIn } from './auth-route';
-import { readTokens } from './session';
+import { ACCESS_COOKIE, REFRESH_COOKIE, cookieName, newSession, readTokens, storeTokens } from './session';
+import { sessionCookies } from './test-session';
 import { withSession } from './upstream';
 
 describe('signing in through the frontend', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
+    vi.useRealTimers();
   });
 
   it('refuses a sign-in that a form on another site could send', async () => {
@@ -47,7 +50,9 @@ describe('signing in through the frontend', () => {
         ? new Response('{}', { status: 401 })
         : new Response(JSON.stringify(tokens), { status: 200 }),
     ));
-    const oldCookies = 'mx_access_0000000001old=expired; mx_refresh_0000000001old=revoked';
+    const old = newSession();
+    const oldNames = [cookieName(ACCESS_COOKIE, old), cookieName(REFRESH_COOKIE, old)].sort();
+    const oldCookies = sessionCookies('expired', 'revoked', old);
     const late = withSession(
       new NextRequest('http://exchange.test/api/wallet', { headers: { cookie: oldCookies } }),
       async () => ({ status: 200, body: {} }),
@@ -70,18 +75,96 @@ describe('signing in through the frontend', () => {
     const kept = named(login, false);
     expect(kept).toHaveLength(2);
     expect(lateAnswer.status).toBe(401);
-    expect(named(lateAnswer, true).sort()).toEqual(['mx_access_0000000001old', 'mx_refresh_0000000001old']);
+    expect(named(lateAnswer, true).sort()).toEqual(oldNames);
     expect(named(lateAnswer, true).some((name) => kept.includes(name))).toBe(false);
-    expect(named(login, true).sort()).toEqual(['mx_access_0000000001old', 'mx_refresh_0000000001old']);
+    expect(named(login, true).sort()).toEqual(oldNames);
   });
 
-  it('uses the newest sign-in when cookies of an older one are still there', () => {
-    const request = new NextRequest('http://exchange.test/api/wallet', {
-      headers: {
-        cookie: 'mx_access=legacy; mx_refresh=legacy; mx_access_00000000zzaaa=new-access; mx_refresh_00000000zzaaa=new-refresh; mx_refresh_000000001bbb=older',
-      },
-    });
+  const signInTwice = () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const older = newSession();
+    vi.setSystemTime(2_000_000);
+    return { older, newer: newSession() };
+  };
 
-    expect(readTokens(request)).toEqual({ session: '00000000zzaaa', accessToken: 'new-access', refreshToken: 'new-refresh' });
+  const carrying = (cookie: string) => new NextRequest('http://exchange.test/api/wallet', { headers: { cookie } });
+
+  it('uses the newest sign-in when cookies of an older one are still there', () => {
+    const { older, newer } = signInTwice();
+
+    expect(
+      readTokens(carrying(`${sessionCookies('old', 'older', older)}; ${sessionCookies('new-access', 'new-refresh', newer)}`)),
+    ).toEqual({ session: newer, accessToken: 'new-access', refreshToken: 'new-refresh' });
+  });
+
+  it('does not let a planted cookie win with a name that sorts last or has no session', () => {
+    const session = newSession();
+    const planted = 'z'.repeat(20) + '0'.repeat(16);
+    const cookie = [
+      sessionCookies('victim-access', 'victim-refresh', session),
+      `mx_access_${planted}=attacker-access`,
+      `mx_refresh_${planted}=attacker-refresh`,
+      'mx_access=attacker-access',
+      'mx_refresh=attacker-refresh',
+    ].join('; ');
+
+    expect(readTokens(carrying(cookie))).toEqual({
+      session,
+      accessToken: 'victim-access',
+      refreshToken: 'victim-refresh',
+    });
+  });
+
+  it('reads no session from planted cookies alone', () => {
+    expect(readTokens(carrying(`mx_access_${'z'.repeat(36)}=attacker; mx_refresh=attacker`))).toEqual({ session: '' });
+  });
+
+  it('names the cookies so that a browser takes them only from this host over HTTPS', () => {
+    vi.stubEnv('COOKIE_SECURE', 'true');
+    const response = NextResponse.json({});
+    const session = newSession();
+
+    storeTokens(response, { accessToken: 'a', refreshToken: 'r' }, session);
+
+    const cookies = response.headers.getSetCookie();
+    expect(cookies).toHaveLength(2);
+    for (const cookie of cookies) {
+      expect(cookie).toMatch(/^__Host-mx_(access|refresh)_/);
+      expect(cookie).toMatch(/; Secure/i);
+      expect(cookie).toMatch(/; Path=\/(;|$)/i);
+      expect(cookie).not.toMatch(/Domain=/i);
+    }
+  });
+
+  it('ignores a genuine session under a name without the prefix once cookies are secure', () => {
+    const plain = sessionCookies('attacker-access', 'attacker-refresh');
+    vi.stubEnv('COOKIE_SECURE', 'true');
+    const session = newSession();
+
+    expect(readTokens(carrying(`${sessionCookies('own-access', 'own-refresh', session)}; ${plain}`))).toEqual({
+      session,
+      accessToken: 'own-access',
+      refreshToken: 'own-refresh',
+    });
+  });
+
+  it('ends on the engine the session a new sign-in makes the browser forget', async () => {
+    const tokens = { accessToken: 'a.e30.s', refreshToken: 'refresh' };
+    const engine = vi.fn(async (_url: string, _init?: RequestInit) => new Response(JSON.stringify(tokens), { status: 200 }));
+    vi.stubGlobal('fetch', engine);
+
+    await signIn(
+      new NextRequest('http://exchange.test/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json', cookie: sessionCookies('old-access', 'old-refresh') },
+        body: JSON.stringify({ email: 'trader@example.com', password: 'password123' }),
+      }),
+      '/auth/login',
+    );
+
+    await vi.waitFor(() => {
+      const ended = engine.mock.calls.find(([url]) => String(url).endsWith('/auth/end-session'));
+      expect(JSON.parse(String(ended?.[1]?.body))).toEqual({ refreshToken: 'old-refresh' });
+    });
   });
 });

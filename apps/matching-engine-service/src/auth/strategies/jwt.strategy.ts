@@ -11,6 +11,7 @@ export interface JwtPayload {
   role?: string;
   exp: number;
   aud?: unknown;
+  jti?: unknown;
 }
 
 export interface AuthenticatedUser {
@@ -32,7 +33,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
-    if (payload.aud !== undefined) throw new UnauthorizedException();
+    if (payload.aud !== undefined || payload.jti !== undefined) throw new UnauthorizedException();
     if (payload.sid && (await this.revocations.isRevoked(payload.sid))) throw new UnauthorizedException();
     return {
       userId: payload.sub,

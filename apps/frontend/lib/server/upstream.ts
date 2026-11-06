@@ -1,14 +1,17 @@
 import { randomUUID } from 'crypto';
+import { SESSION_CHANGED, SESSION_USER_HEADER } from '@/lib/session-user';
 import { UPSTREAM_TIMEOUT_MS } from '@/lib/timeouts';
 import { NextRequest, NextResponse } from 'next/server';
 import {
   Rotation,
   SessionTokens,
   TokenPair,
+  claimsOf,
   isFresh,
   clearTokens,
   readTokens,
   refreshOnce,
+  refreshTokenOf,
   storeTokens,
 } from './session';
 
@@ -89,6 +92,31 @@ export function rotateTokens(request: NextRequest, tokens: SessionTokens): Promi
   });
 }
 
+export async function endForgottenSessions(request: NextRequest, sessions: string[]): Promise<void> {
+  await Promise.all(
+    sessions.map(async (session) => {
+      const refreshToken = refreshTokenOf(request, session);
+      if (!refreshToken) return;
+      await upstream(request, 'engine', '/auth/end-session', {
+        method: 'POST',
+        body: JSON.stringify({ refreshToken }),
+      });
+    }),
+  );
+}
+
+export function isAnotherUser(request: NextRequest, accessToken: string | undefined): boolean {
+  const expected = request.headers.get(SESSION_USER_HEADER);
+  return Boolean(expected) && claimsOf(accessToken)?.id !== expected;
+}
+
+export function sessionChanged(): NextResponse {
+  return NextResponse.json(
+    { code: SESSION_CHANGED, message: 'This browser is signed in to another account now, check the page first' },
+    { status: 409 },
+  );
+}
+
 export async function withSession(
   request: NextRequest,
   call: (accessToken: string) => Promise<UpstreamResult>,
@@ -114,6 +142,11 @@ export async function withSession(
     if (failure) return failure;
   }
   if (!accessToken) return unauthorized(tokens.session);
+  if (isAnotherUser(request, accessToken)) {
+    const response = sessionChanged();
+    if (rotated) storeTokens(response, rotated, tokens.session);
+    return response;
+  }
 
   let result = await call(accessToken);
   if (result.status === 401 && tokens.refreshToken && !rotated) {
@@ -141,7 +174,7 @@ export function relay(result: UpstreamResult): NextResponse {
 
 export function unauthorized(session?: string): NextResponse {
   const response = NextResponse.json({ message: 'Sign in to continue' }, { status: 401 });
-  if (session !== undefined) clearTokens(response, [session]);
+  if (session) clearTokens(response, [session]);
   return response;
 }
 

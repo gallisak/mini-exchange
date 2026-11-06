@@ -65,7 +65,7 @@ export async function createApp(): Promise<INestApplication> {
   return app;
 }
 
-export function accessToken(userId: string, role = 'user', sessionId?: string): string {
+export function accessToken(userId: string, role = 'user', sessionId?: string, extra: object = {}): string {
   const encode = (value: object) => Buffer.from(JSON.stringify(value)).toString('base64url');
   const now = Math.floor(Date.now() / 1000);
   const unsigned = `${encode({ alg: 'HS256', typ: 'JWT' })}.${encode({
@@ -73,6 +73,7 @@ export function accessToken(userId: string, role = 'user', sessionId?: string): 
     email: `${userId}@example.com`,
     role,
     ...(sessionId ? { sid: sessionId } : {}),
+    ...extra,
     iat: now,
     exp: now + 900,
   })}`;

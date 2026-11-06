@@ -35,7 +35,7 @@ function Wallet() {
       const { balances: loaded } = await api<{ balances: Balance[] }>('/api/wallet');
       if (turn.show()) {
         setBalances(loaded);
-        setUpdatedAt(new Date());
+        setUpdatedAt(turn.startedAt);
       }
       if (turn.latest()) setError(null);
     } catch (failure) {

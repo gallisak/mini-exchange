@@ -39,15 +39,72 @@ describe('authentication sessions', () => {
   const login = async (email: string, password = 'password123') =>
     (await http().post('/auth/login').send({ email, password }).expect(200)).body;
 
-  it('answers 409, not 500, when the same email registers twice at once', async () => {
+  it('answers 409, not 500, when the same email registers with different passwords at once', async () => {
     const email = `race-${randomUUID()}@example.com`;
     const statuses = await Promise.all(
-      Array.from({ length: 5 }, () =>
-        http().post('/auth/register').send({ email, password: 'password123' }),
+      Array.from({ length: 5 }, (_, n) =>
+        http().post('/auth/register').send({ email, password: `password-${n}` }),
       ),
     ).then((responses) => responses.map((response) => response.status).sort());
 
     expect(statuses).toEqual([201, 409, 409, 409, 409]);
+  });
+
+  it('signs in a registration repeated with the same password, so one whose answer was lost is not refused', async () => {
+    const email = `retry-${randomUUID()}@example.com`;
+    const first = await http().post('/auth/register').send({ email, password: 'password123' }).expect(201);
+
+    const again = await http().post('/auth/register').send({ email, password: 'password123' }).expect(201);
+    await http().post('/auth/register').send({ email, password: 'another-password' }).expect(409);
+
+    expect(claims(again.body.accessToken).sub).toBe(claims(first.body.accessToken).sub);
+  });
+
+  it('gives every simultaneous registration with the same password the same account', async () => {
+    const email = `same-${randomUUID()}@example.com`;
+    const responses = await Promise.all(
+      Array.from({ length: 3 }, () => http().post('/auth/register').send({ email, password: 'password123' })),
+    );
+
+    expect(responses.map((response) => response.status)).toEqual([201, 201, 201]);
+    expect(new Set(responses.map((response) => claims(response.body.accessToken).sub)).size).toBe(1);
+  });
+
+  it('does not take a refresh token for an access token even when the secrets were set the same by mistake', async () => {
+    await app.close();
+    const refreshSecret = process.env.JWT_REFRESH_SECRET;
+    process.env.JWT_REFRESH_SECRET = process.env.JWT_ACCESS_SECRET;
+    app = await createApp();
+    try {
+      const session = await signUp();
+
+      await http().get('/orders').set('authorization', `Bearer ${session.refreshToken}`).expect(401);
+      await http().get('/orders').set('authorization', `Bearer ${session.accessToken}`).expect(200);
+    } finally {
+      await app.close();
+      process.env.JWT_REFRESH_SECRET = refreshSecret;
+      app = await createApp();
+    }
+  });
+
+  it('ends the session of a refresh token a browser forgot, along with its access token', async () => {
+    const session = await signUp();
+
+    await http().post('/auth/end-session').send({ refreshToken: session.refreshToken }).expect(204);
+
+    await refresh(session.refreshToken).expect(401);
+    await http().get('/orders').set('authorization', `Bearer ${session.accessToken}`).expect(401);
+  });
+
+  it('ends only the session of that refresh token, and refuses a token that is not one', async () => {
+    const email = `two-${randomUUID()}@example.com`;
+    const forgotten = (await http().post('/auth/register').send({ email, password: 'password123' }).expect(201)).body;
+    const kept = await login(email);
+
+    await http().post('/auth/end-session').send({ refreshToken: kept.accessToken }).expect(401);
+    await http().post('/auth/end-session').send({ refreshToken: forgotten.refreshToken }).expect(204);
+
+    await refresh(kept.refreshToken).expect(200);
   });
 
   it('trades a refresh token for a new pair once', async () => {
@@ -204,7 +261,7 @@ describe('authentication sessions', () => {
       .expect(200);
     await http()
       .post('/auth/register')
-      .send({ email: 'TRADER@example.com', password: 'password123' })
+      .send({ email: 'TRADER@example.com', password: 'another-password' })
       .expect(409);
   });
 
@@ -285,7 +342,7 @@ describe('authentication sessions', () => {
 
     await http()
       .post('/auth/register')
-      .send({ email: 'legacy@example.com', password: 'password123' })
+      .send({ email: 'legacy@example.com', password: 'another-password' })
       .expect(409);
   });
 
@@ -557,6 +614,44 @@ describe('authentication sessions', () => {
       slow.mockRestore();
       slowCommit.mockRestore();
     }
+  });
+
+  const delayRecords = (ms: number) => {
+    const revocations = app.get(SessionRevocations);
+    const record = revocations.record.bind(revocations);
+    return jest.spyOn(revocations, 'record').mockImplementation(async (manager, families) => {
+      await sleep(ms);
+      return record(manager, families);
+    });
+  };
+
+  it('leaves a session as it was when a sign-out was answered 503, so 503 never hides a change', async () => {
+    const session = await signUp();
+    const slow = delayRecords(5_500);
+    try {
+      await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(503);
+      await sleep(1_000);
+    } finally {
+      slow.mockRestore();
+    }
+
+    await refresh(session.refreshToken).expect(200);
+  });
+
+  it('does not revoke behind a 503 when reuse was caught too late to answer, and catches it on the next try', async () => {
+    const session = await signUp();
+    const rotated = (await refresh(session.refreshToken).expect(200)).body;
+    const slow = delayRecords(5_500);
+    try {
+      await refresh(session.refreshToken).expect(503);
+      await sleep(1_000);
+    } finally {
+      slow.mockRestore();
+    }
+
+    await http().get('/orders').set('authorization', `Bearer ${rotated.accessToken}`).expect(200);
+    await refresh(session.refreshToken).expect(401);
+    await refresh(rotated.refreshToken).expect(401);
   });
 
   it('answers 503 within the gateway timeout when a sign-out waits for the session lock', async () => {

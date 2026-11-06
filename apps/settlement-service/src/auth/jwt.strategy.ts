@@ -20,8 +20,19 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
     });
   }
 
-  async validate(payload: { sub?: unknown; role?: unknown; aud?: unknown; sid?: unknown }): Promise<AuthUser> {
-    if (typeof payload.sub !== 'string' || !isUUID(payload.sub) || payload.aud !== undefined) {
+  async validate(payload: {
+    sub?: unknown;
+    role?: unknown;
+    aud?: unknown;
+    sid?: unknown;
+    jti?: unknown;
+  }): Promise<AuthUser> {
+    if (
+      typeof payload.sub !== 'string' ||
+      !isUUID(payload.sub) ||
+      payload.aud !== undefined ||
+      payload.jti !== undefined
+    ) {
       throw new UnauthorizedException();
     }
     if (typeof payload.sid === 'string' && (await this.revocations.isRevoked(payload.sid))) {

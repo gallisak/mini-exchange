@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
+import { sessionCookies } from './test-session';
 import { issueWsToken } from './ws-token';
 
 const token = (secondsLeft: number) =>
@@ -19,7 +20,7 @@ describe('a token for the real-time connection', () => {
 
   const incoming = (access: string) =>
     new NextRequest('http://exchange.test/api/ws-token', {
-      headers: { cookie: `mx_access=${access}; mx_refresh=refresh` },
+      headers: { cookie: sessionCookies(access, 'refresh') },
     });
 
   it('is the short ticket the engine issues', async () => {

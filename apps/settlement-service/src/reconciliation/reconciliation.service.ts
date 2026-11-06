@@ -67,7 +67,6 @@ export interface LedgerIssues {
     balance: string;
     entries: string;
   }[];
-  assetsNotBalanced: { asset: string; total: string }[];
   tradesOffEntries: string[];
 }
 
@@ -86,6 +85,8 @@ export interface ReconciliationReport {
   }[];
   unresolvedTotal?: number;
   recheckError?: string;
+  assetsNotBalanced?: { asset: string; total: string }[];
+  ledgerTotalsError?: string;
 }
 
 interface Progress {
@@ -154,7 +155,9 @@ export class ReconciliationService implements OnModuleDestroy {
     }
     const report = await this.reconcile(from, new Date(end));
     const checked = endedEarly ? { ...report, endedEarly } : report;
-    return progress.error ? this.incomplete(checked, progress.error) : checked;
+    return this.withLedgerTotals(
+      progress.error ? this.incomplete(checked, progress.error) : checked,
+    );
   }
 
   reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
@@ -182,7 +185,11 @@ export class ReconciliationService implements OnModuleDestroy {
         : await this.reconcileNext(reconciledUntil, end, progress, endedEarly);
     const { unresolved, total, error } = await this.recheckUnresolved(
       report.period,
-    );
+    ).catch((failure: Error) => ({
+      unresolved: [],
+      total: undefined,
+      error: `Could not read the unresolved periods: ${failure.message}`,
+    }));
     const status = [
       report.status,
       ...unresolved.map((row) => row.status),
@@ -190,13 +197,43 @@ export class ReconciliationService implements OnModuleDestroy {
     ].reduce((worst, next) =>
       SEVERITY[next] > SEVERITY[worst] ? next : worst,
     );
-    return {
+    return this.withLedgerTotals({
       ...report,
       status,
       unresolved,
-      unresolvedTotal: total,
+      ...(total === undefined ? {} : { unresolvedTotal: total }),
       ...(error ? { recheckError: error } : {}),
-    };
+    });
+  }
+
+  private async withLedgerTotals(
+    report: ReconciliationReport,
+  ): Promise<ReconciliationReport> {
+    try {
+      const assets: { asset: string; total: string }[] =
+        await this.dataSource.query(
+          `SELECT "asset", SUM("balance")::text AS "total"
+             FROM "accounts"
+            GROUP BY "asset"
+           HAVING SUM("balance") <> 0
+            ORDER BY "asset"`,
+        );
+      if (assets.length === 0) return report;
+      return {
+        ...report,
+        status: "mismatch",
+        assetsNotBalanced: assets.map((row) => ({
+          asset: row.asset,
+          total: money(row.total),
+        })),
+      };
+    } catch (failure) {
+      return {
+        ...report,
+        status: report.status === "mismatch" ? "mismatch" : "incomplete",
+        ledgerTotalsError: `Could not add up the balances of the whole ledger: ${(failure as Error).message}`,
+      };
+    }
   }
 
   private async reconcileNext(
@@ -296,7 +333,6 @@ export class ReconciliationService implements OnModuleDestroy {
         unbalancedTransactions: [],
         transactionsWithoutEntries: [],
         accountsOffEntries: [],
-        assetsNotBalanced: [],
         tradesOffEntries: [],
       },
       engineError: reason
@@ -559,7 +595,7 @@ export class ReconciliationService implements OnModuleDestroy {
       UNION
       SELECT t."id" FROM "ledger_transactions" t
        WHERE t."createdAt" >= $1 AND t."createdAt" < $2`;
-    const [unbalanced, withoutEntries, accounts, assets, trades] =
+    const [unbalanced, withoutEntries, accounts, trades] =
       await whenAllFinished([
         this.dataSource.query(
           `SELECT e."transactionId", e."asset", SUM(e."amount")::text AS "total"
@@ -600,13 +636,6 @@ export class ReconciliationService implements OnModuleDestroy {
           [from, to],
         ),
         this.dataSource.query(
-          `SELECT "asset", SUM("balance")::text AS "total"
-           FROM "accounts"
-          GROUP BY "asset"
-         HAVING SUM("balance") <> 0
-          ORDER BY "asset"`,
-        ),
-        this.dataSource.query(
           `SELECT st."tradeId"
            FROM "settled_trades" st
            LEFT JOIN "ledger_entries" e ON e."transactionId" = st."transactionId"
@@ -644,12 +673,6 @@ export class ReconciliationService implements OnModuleDestroy {
           ...row,
           balance: money(row.balance),
           entries: money(row.entries),
-        }),
-      ),
-      assetsNotBalanced: assets.map(
-        (row: { asset: string; total: string }) => ({
-          asset: row.asset,
-          total: money(row.total),
         }),
       ),
       tradesOffEntries: trades.map((row: { tradeId: string }) => row.tradeId),

@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { mergeTrades, newestSeq, skipsTrades } from './feeds';
+import { latestRequest } from './latest';
 import { useSocket } from './socket';
 import { ResyncScope, Trade, resyncsBook } from './types';
 
@@ -15,8 +16,10 @@ export function useTrades(instrument: string) {
   const loaded = useRef(false);
   const arrived = useRef<Trade[]>([]);
   const newest = useRef<number | null>(null);
+  const begin = useMemo(() => latestRequest(), []);
 
   const load = useCallback(async () => {
+    const turn = begin();
     try {
       const fresh = await api<Trade[]>(`/api/market/trades?instrument=${instrument}`);
       const meanwhile = arrived.current;
@@ -24,11 +27,11 @@ export function useTrades(instrument: string) {
       loaded.current = true;
       newest.current = Math.max(newest.current ?? 0, newestSeq([...fresh, ...meanwhile]) ?? 0);
       setTrades((current) => mergeTrades(current ?? [], [...fresh, ...meanwhile], KEEP));
-      setError(null);
+      if (turn.latest()) setError(null);
     } catch (failure) {
-      setError((failure as Error).message);
+      if (turn.latest()) setError((failure as Error).message);
     }
-  }, [instrument]);
+  }, [instrument, begin]);
 
   useEffect(() => {
     loaded.current = false;

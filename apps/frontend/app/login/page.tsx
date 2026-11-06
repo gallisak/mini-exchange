@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useState } from 'react';
+import { Suspense, useEffect, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { Loader2 } from 'lucide-react';
 import { Button } from '@/components/ui/button';
@@ -13,7 +13,7 @@ import { safeRedirect } from '@/lib/client/redirect';
 import { useSession } from '@/lib/client/session';
 
 function LoginForm() {
-  const { signIn } = useSession();
+  const { user, signIn } = useSession();
   const router = useRouter();
   const next = useSearchParams().get('next');
   const [mode, setMode] = useState<'login' | 'register'>('login');
@@ -22,19 +22,24 @@ function LoginForm() {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    if (user) router.replace(safeRedirect(next));
+  }, [user, next, router]);
+
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
     setBusy(true);
     setError(null);
     try {
       await signIn(mode, email, password);
-      router.push(safeRedirect(next));
     } catch (failure) {
       setError((failure as Error).message);
     } finally {
       setBusy(false);
     }
   }
+
+  if (user) return null;
 
   return (
     <Card className="mx-auto mt-10 w-full max-w-sm">

@@ -55,6 +55,34 @@ describe('a database that stops answering', () => {
     expect(limit).toEqual([{ statement_timeout: '0' }]);
   });
 
+  it('tries a migration again that gave up on a lock, so a long reconciliation does not fail a deploy', async () => {
+    const run = jest
+      .spyOn(DataSource.prototype, 'runMigrations')
+      .mockRejectedValueOnce(new Error('canceling statement due to lock timeout'))
+      .mockResolvedValue([]);
+    try {
+      await migrate(60_000, 1);
+
+      expect(run).toHaveBeenCalledTimes(2);
+    } finally {
+      run.mockRestore();
+    }
+  });
+
+  it('stops trying a migration again once its time is up, and at once on any other failure', async () => {
+    const run = jest.spyOn(DataSource.prototype, 'runMigrations');
+    try {
+      run.mockRejectedValue(new Error('canceling statement due to lock timeout'));
+      await expect(migrate(0, 1)).rejects.toThrow(/lock timeout/);
+      run.mockClear();
+      run.mockRejectedValue(new Error('column "x" does not exist'));
+      await expect(migrate(60_000, 1)).rejects.toThrow(/does not exist/);
+      expect(run).toHaveBeenCalledTimes(1);
+    } finally {
+      run.mockRestore();
+    }
+  });
+
   it('gives reconciliation its own, longer limit than every other query', async () => {
     Object.assign(process.env, { DATABASE_STATEMENT_TIMEOUT_MS: '60000', RECONCILIATION_STATEMENT_TIMEOUT_MS: '600000' });
     const reconciliation = await new DataSource(reconciliationDataSourceOptions()).initialize();

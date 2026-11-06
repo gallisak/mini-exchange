@@ -3,12 +3,13 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { setupSwagger } from './swagger';
-import { corsOrigins, refusePlaceholderSecrets, requireEnv, trustedProxies } from './common/env';
+import { corsOrigins, refusePlaceholderSecrets, refuseSharedSecret, requireEnv, trustedProxies } from './common/env';
 import { JsonLogger } from './observability/json-logger';
 
 async function bootstrap() {
   requireEnv('JWT_ACCESS_SECRET');
   requireEnv('JWT_REFRESH_SECRET');
+  refuseSharedSecret('JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET');
   refusePlaceholderSecrets(['JWT_ACCESS_SECRET', 'JWT_REFRESH_SECRET', 'FRONTEND_PROXY_KEY', 'ENGINE_INTERNAL_KEY']);
   const app = await NestFactory.create<NestExpressApplication>(AppModule, {
     logger: new JsonLogger('matching-engine-service'),

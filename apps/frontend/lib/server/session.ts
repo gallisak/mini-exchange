@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, randomUUID } from 'crypto';
+import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 
 export const ACCESS_COOKIE = 'mx_access';
@@ -30,33 +30,55 @@ export interface SessionUser {
   role: 'user' | 'admin';
 }
 
+const secureCookies = () => process.env.COOKIE_SECURE === 'true';
+
 const cookieOptions = (maxAge: number) => ({
   httpOnly: true,
   sameSite: 'lax' as const,
-  secure: process.env.COOKIE_SECURE === 'true',
-  path: '/api',
+  secure: secureCookies(),
+  path: '/',
   maxAge,
 });
 
-const SESSION_COOKIE = /^mx_(?:access|refresh)(?:_([0-9a-z]{1,40}))?$/;
+const SESSION_COOKIE = /^mx_(?:access|refresh)_([0-9a-z]{20}[0-9a-f]{16})$/;
 
-const cookieName = (base: string, session: string) => (session ? `${base}_${session}` : base);
+const cookiePrefix = () => (secureCookies() ? '__Host-' : '');
+
+export const cookieName = (base: string, session: string) => `${cookiePrefix()}${base}_${session}`;
+
+const fallbackKey = randomBytes(32);
+
+const signature = (id: string) =>
+  createHmac('sha256', process.env.FRONTEND_PROXY_KEY || fallbackKey)
+    .update(`session:${id}`)
+    .digest('hex')
+    .slice(0, 16);
+
+function isGenuine(session: string): boolean {
+  const expected = Buffer.from(signature(session.slice(0, 20)));
+  const given = Buffer.from(session.slice(20));
+  return given.length === expected.length && timingSafeEqual(given, expected);
+}
 
 export function newSession(): string {
-  return `${Date.now().toString(36).padStart(10, '0')}${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+  const id = `${Date.now().toString(36).padStart(10, '0')}${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+  return `${id}${signature(id)}`;
 }
 
 export function sessionsIn(request: NextRequest): string[] {
+  const prefix = cookiePrefix();
   const sessions = new Set<string>();
   for (const { name } of request.cookies.getAll()) {
-    const match = SESSION_COOKIE.exec(name);
-    if (match) sessions.add(match[1] ?? '');
+    if (!name.startsWith(prefix)) continue;
+    const session = SESSION_COOKIE.exec(name.slice(prefix.length))?.[1];
+    if (session && isGenuine(session)) sessions.add(session);
   }
   return [...sessions].sort();
 }
 
 export function readTokens(request: NextRequest): Partial<TokenPair> & { session: string } {
-  const session = sessionsIn(request).at(-1) ?? '';
+  const session = sessionsIn(request).at(-1);
+  if (!session) return { session: '' };
   return {
     session,
     accessToken: request.cookies.get(cookieName(ACCESS_COOKIE, session))?.value || undefined,
@@ -64,13 +86,17 @@ export function readTokens(request: NextRequest): Partial<TokenPair> & { session
   };
 }
 
-export function storeTokens(response: NextResponse, tokens: TokenPair, session = ''): void {
+export function refreshTokenOf(request: NextRequest, session: string): string | undefined {
+  return request.cookies.get(cookieName(REFRESH_COOKIE, session))?.value || undefined;
+}
+
+export function storeTokens(response: NextResponse, tokens: TokenPair, session: string): void {
   response.cookies.set(cookieName(ACCESS_COOKIE, session), tokens.accessToken, cookieOptions(REFRESH_MAX_AGE));
   response.cookies.set(cookieName(REFRESH_COOKIE, session), tokens.refreshToken, cookieOptions(REFRESH_MAX_AGE));
 }
 
 export function clearTokens(response: NextResponse, sessions: string[]): void {
-  for (const session of sessions) {
+  for (const session of sessions.filter(Boolean)) {
     response.cookies.set(cookieName(ACCESS_COOKIE, session), '', cookieOptions(0));
     response.cookies.set(cookieName(REFRESH_COOKIE, session), '', cookieOptions(0));
   }
@@ -102,7 +128,6 @@ export function isFresh(token: string | undefined): token is string {
 }
 
 const refreshes = new Map<string, Promise<Rotation>>();
-const fallbackKey = randomBytes(32);
 
 function remember<V>(map: Map<string, V>, key: string, value: V): void {
   map.delete(key);

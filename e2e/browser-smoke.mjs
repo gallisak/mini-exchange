@@ -138,6 +138,38 @@ try {
   }
   await buyer.getByLabel(/Quantity/).fill('');
   log('the quantity typed for the next order survived the answer to the previous one');
+
+  let releaseSecond;
+  const secondHeld = new Promise((resolve) => (releaseSecond = resolve));
+  await buyer.route('**/api/orders', async (route) => {
+    if (ordersApi(route.request())) await secondHeld;
+    await route.continue();
+  });
+  await buyer.getByLabel(/Quantity/).fill('2');
+  await buyer.getByRole('button', { name: /^Buy ABC$/ }).click();
+  await buyer.getByLabel(/Quantity/).press('Space');
+  releaseSecond();
+  await buyer.getByText(/Buy 2 ABC @ 1.00 accepted/).first().waitFor();
+  await buyer.unroute('**/api/orders');
+  await buyer.waitForTimeout(300);
+  if ((await buyer.getByLabel(/Quantity/).inputValue()) !== '') {
+    throw new Error('a stray key press kept the quantity of an order that was accepted');
+  }
+  log('a stray key press does not keep the quantity of the order just accepted');
+
+  await buyer.route('**/api/orders/*', (route) =>
+    route.request().method() === 'DELETE' ? route.fulfill({ status: 202, json: {} }) : route.continue(),
+  );
+  const cancelButton = buyer.getByRole('button', { name: /^Cancel buy 2\S* ABC at 1\.00/ }).first();
+  await cancelButton.click();
+  await buyer.waitForTimeout(300);
+  if (await cancelButton.isEnabled()) throw new Error('a cancel on its way could be sent again at once');
+  await buyer.waitForTimeout(5_500);
+  if (!(await cancelButton.isEnabled())) {
+    throw new Error('the Cancel button stayed off for an order that was still open');
+  }
+  await buyer.unroute('**/api/orders/*');
+  log('the Cancel button says which order it is for and comes back if the order stays open');
   await shot(seller, 'orders');
 
   const market = await (await browser.newContext()).newPage();
@@ -189,6 +221,7 @@ try {
   const resyncs = async () =>
     Number(((await market.getByText(/^Sequence \d+/).textContent()).match(/resynced (\d+)×/) ?? [0, 0])[1]);
   const resyncsBefore = await resyncs();
+  await market.route('**/api/market/trades*', (route) => route.abort());
   const reloads = [
     seller.waitForRequest((request) => new URL(request.url()).pathname === '/api/orders' && request.method() === 'GET'),
     buyer.waitForRequest((request) => new URL(request.url()).pathname === '/api/wallet'),
@@ -202,6 +235,12 @@ try {
   }
   await waitStatus(market, 'live');
   log('after the engines lost their Redis subscription, the orders, wallet, trades and book reloaded');
+  await market.getByText(/Showing the trades that loaded last/).waitFor();
+  if (!(await market.getByTestId('trade').first().isVisible())) {
+    throw new Error('a failed reload of the trades hid the trades that had loaded');
+  }
+  await market.unroute('**/api/market/trades*');
+  log('a failed reload of the trades keeps the trades that loaded');
 
   const leaving = await (await browser.newContext()).newPage();
   await register(leaving, `browser-leaving-${run}@example.com`);
@@ -235,9 +274,84 @@ try {
   }
   log("the next user of the browser does not see the answer to the previous user's order");
 
+  await leaving.unroute('**/api/orders');
+  await leaving.route('**/api/orders', (route) =>
+    ordersApi(route.request()) ? route.fulfill({ status: 401, json: { message: 'Sign in to continue' } }) : route.continue(),
+  );
+  await leaving.getByLabel('Price (USD)').fill('1.00');
+  await leaving.getByLabel(/Quantity/).fill('1');
+  await leaving.getByRole('button', { name: /^Buy ABC$/ }).click();
+  await leaving.getByRole('link', { name: 'Sign in' }).last().waitFor();
+  await leaving.waitForTimeout(300);
+  if (await leaving.locator('[data-sonner-toast]').count()) {
+    throw new Error('a session that ended flashed a toast on its way out');
+  }
+  log('a session that ended goes straight to the sign-in card, with no toast that disappears');
+
+  const shared = await browser.newContext();
+  const first = await shared.newPage();
+  await register(first, `browser-tab-a-${run}@example.com`);
+  const second = await shared.newPage();
+  await second.goto(`${BASE}/login`);
+  await second.waitForURL('**/orders');
+  log('the sign-in page sends someone already signed in onward');
+  await first.getByLabel('Price (USD)').fill('1.00');
+  await second.getByRole('button', { name: /browser-tab-a/ }).click();
+  await second.getByRole('menuitem', { name: 'Sign out' }).click();
+  await second.waitForURL('**/login');
+  await registerHere(second, `browser-tab-b-${run}@example.com`);
+  await first.getByRole('button', { name: /browser-tab-b/ }).waitFor({ timeout: 5_000 });
+  if ((await first.getByLabel('Price (USD)').inputValue()) !== '') {
+    throw new Error('a tab that switched accounts kept what was typed for the previous one');
+  }
+  log('a tab follows a sign-in in another tab, and forgets what was typed for the previous account');
+
+  const unaware = await browser.newContext();
+  await unaware.addInitScript(() => delete window.BroadcastChannel);
+  const staleTab = await unaware.newPage();
+  await register(staleTab, `browser-stale-a-${run}@example.com`);
+  const freshTab = await unaware.newPage();
+  await freshTab.goto(`${BASE}/orders`);
+  await freshTab.getByRole('button', { name: /browser-stale-a/ }).click();
+  await freshTab.getByRole('menuitem', { name: 'Sign out' }).click();
+  await freshTab.waitForURL('**/login');
+  await registerHere(freshTab, `browser-stale-b-${run}@example.com`);
+  const stalePost = staleTab.waitForResponse(
+    (response) => ordersApi(response.request()),
+  );
+  await staleTab.getByLabel('Price (USD)').fill('1.00');
+  await staleTab.getByLabel(/Quantity/).fill('1');
+  await staleTab.getByRole('button', { name: /^Buy ABC$/ }).click();
+  if ((await stalePost).status() !== 409) {
+    throw new Error('a tab that still showed the previous account placed an order on the new one');
+  }
+  await staleTab.getByRole('button', { name: /browser-stale-b/ }).waitFor({ timeout: 5_000 });
+  log('a tab that did not hear of the new sign-in cannot trade on it, and catches up');
+
   await buyer.goto(`${BASE}/ops`);
   await buyer.getByText('Admins only').waitFor();
   log('the operations panel is closed to a regular user');
+
+  const admin = await (await browser.newContext()).newPage();
+  const adminEmail = `browser-admin-${run}@example.com`;
+  await register(admin, adminEmail);
+  compose('exec', '-T', 'matching-engine-1', 'sh', '/opt/secrets/with-secrets.sh', 'node', 'dist/tools/grant-admin.js', adminEmail);
+  await admin.getByRole('button', { name: /browser-admin/ }).click();
+  await admin.getByRole('menuitem', { name: 'Sign out' }).click();
+  await admin.waitForURL('**/login');
+  await admin.getByLabel('Email').fill(adminEmail);
+  await admin.getByLabel('Password').fill('password123');
+  await admin.getByRole('button', { name: 'Sign in', exact: true }).click();
+  await admin.waitForURL('**/orders');
+  await admin.goto(`${BASE}/ops`);
+  await admin.getByTestId('reconciliation-status').waitFor({ timeout: 60_000 });
+  await admin.route('**/api/ops/reconciliation', (route) => route.abort());
+  await admin.getByRole('button', { name: 'Refresh' }).click();
+  await admin.getByTestId('reconciliation-stale').waitFor();
+  if (!(await admin.getByTestId('reconciliation-status').isVisible())) {
+    throw new Error('a failed reconciliation refresh hid the last result');
+  }
+  log('a failed reconciliation refresh keeps the last result on the operations panel');
 } catch (error) {
   console.error(`BROWSER SMOKE FAILED: ${error.message}`);
   process.exitCode = 1;

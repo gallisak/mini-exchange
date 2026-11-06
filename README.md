@@ -59,25 +59,28 @@ since giving up on it would not tell whether it happened. A commit can still end
 connection breaks after the `COMMIT` was sent, the book reloads its state from Postgres, an order
 or a rotation is retried under the same key or attempt, and a sign-out is simply sent again.
 Refresh and sign-out wait at most 2 s for the user's session lock and answer 503 after 5 s in all,
-well inside the gateway's 8 s. A rotation answered 503 rolls back instead of committing later, so
-its token stays unused and a retry works; one whose `COMMIT` has started is waited for, not answered
-503. If that `COMMIT` outlasts the gateway the outcome is unknown, so a client that retries should
-send `attempt` to `/auth/refresh`, as the frontend always does: without it the retry counts as reuse
-and ends the session. A book that is stopped waits 15 s for its batch, then lets the fence
+well inside the gateway's 8 s. A change of a session answered 503 rolls back instead of committing
+later, whether it is a rotation, a repeated rotation, a sign-out or ending a family caught reusing a
+token, so 503 means nothing changed and a retry works; one whose `COMMIT` has started is waited for,
+not answered 503. If that `COMMIT` outlasts the gateway the outcome is unknown, so a client that
+retries should send `attempt` to `/auth/refresh`, as the frontend always does: without it the retry
+counts as reuse and ends the session. A book that is stopped waits 15 s for its batch, then lets the fence
 stop it; whatever that batch or a reload still does afterwards no longer touches the book in memory,
 so a newer owner on the same engine is never overwritten. Reconciliation checks one period at a
 time and lets the next check start only once every query of the previous one finished, which keeps
-two connections free for the rest of a run. A period is moved to the back of the queue before it is
+three connections free for the rest of a run. A period is moved to the back of the queue before it is
 checked again; a run that cannot note that, or cannot take a period that matches again off the list,
 says so in `recheckError` and is `incomplete`. `replay-check` runs without a statement limit. A
 command stream that fails three reads in a row also marks its book stuck, counted in
 `book_read_failures_total`. nginx passes a request on to the other engine only when the first one
 never received it, or for reads and cancels (`DELETE` is idempotent to nginx), so an order is never
 sent twice by the gateway; a cancel may be, which is harmless, since a cancel of an order that is
-already cancelled answers 202. Only the last index migration, on `refresh_sessions`, builds its
+already cancelled answers 202. A trade summary is not repeated on the other engine when the first
+one gave up on it: it is the heaviest query of a reconciliation, and it would only load Postgres twice. Only the last index migration, on `refresh_sessions`, builds its
 index concurrently. Such a build waits for every older transaction of the database, which blocks no
 reads or writes, so it may wait `DATABASE_INDEX_LOCK_TIMEOUT_MS` (10 minutes) instead of the usual
-lock limit. One that a failed build left invalid is dropped and built again on the next run, and a
+lock limit. Settlement's migrations keep the short limit, so one waiting behind a long reconciliation
+does not hold up writes, but give up and start again for `MIGRATION_LOCK_RETRY_MS` (10 minutes). One that a failed build left invalid is dropped and built again on the next run, and a
 follow-up migration does the same for an install that had already recorded the first one as done.
 The earlier ones took a write lock on their table while it was small.
 
@@ -100,7 +103,18 @@ saving. Refresh and sign-out are not counted against the sign-in limit, and the 
 sign-out that did not go through instead of pretending it did; if the engine refuses an access
 token that looked valid, the frontend rotates it and signs out with the new one, so the refresh
 session ends too. Each sign-in gets its own pair of cookie names (`mx_access_<id>`,
-`mx_refresh_<id>`), and a session that turns out to be over is cleared only under the names the
+`mx_refresh_<id>`). The id is signed with `FRONTEND_PROXY_KEY`, so a cookie with a made-up name is
+ignored, however it sorts. With `COOKIE_SECURE=true`, which any deployment over HTTPS should set, the
+names start with `__Host-`, so a browser takes them only from this host over HTTPS and a neighbouring
+subdomain or a plain HTTP response cannot plant one; names without the prefix are ignored then. Plain
+HTTP cannot have that guarantee, so the default for `http://localhost` is the signed name alone: a
+real id of another sign-in could still be planted there. A sign-in, and a sign-out with older cookies
+around, also ends on the engine every session the browser forgets, so none lives on for its 7 days.
+All tabs share the cookies, so a sign-in or sign-out reaches the other tabs through a
+`BroadcastChannel`, and a tab checks its session when it gets focus. In case a tab hears neither,
+every request says which account the page shows and the frontend answers 409 when the cookies belong
+to another one, so a stale tab cannot trade, cancel or read on an account it does not show. A page
+keeps nothing of the account before it, and `/login` sends someone signed in onward. A session that turns out to be over is cleared only under the names the
 request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
 while a dead session is still forgotten at once; the page also ignores refusals of requests sent
 before the latest sign-in. The attempt id of a rotation is
@@ -117,7 +131,10 @@ loaded stay shown when reloading them fails. A successful answer is shown unless
 was, even while a newer reload is running, and only the latest reload sets or clears the error, so a
 late failure cannot hang an error over fresh data. A quantity typed while an order is on its way
 stays when that order is accepted. The answer to an order or a cancel is shown only to the user who
-sent it, and toasts on screen go away when the signed-in user changes. The frontend's API refuses any
+sent it, toasts on screen go away when the signed-in user changes, and a session that ended goes
+straight to the sign-in card without a toast. Recent trades stay shown when reloading them fails too,
+and the wallet's "Updated" time is when the request started, since the balances are no newer. A
+Cancel button comes back after 5 s if the order is still open. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;
 every page forbids being framed.
 
@@ -245,8 +262,8 @@ nothing:
 docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/consumer/replay-dead-letters.js [--id <dead-letter id>]
 ```
 
-**Reconciliation** checks that every ledger transaction balances, every balance equals its entries,
-every trade has the right four entries, and that the engine's trade count, quantity and
+**Reconciliation** checks that every ledger transaction balances, every balance touched in the
+period equals its entries, every trade has the right four entries, and that the engine's trade count, quantity and
 `Σ price × quantity` per instrument equal the ledger's count, quantity and USD moved. It looks at
 one period: the trades executed in it, the ledger transactions created in it, and the accounts
 they touched. A run without `from` checks at most one day (`RECONCILIATION_STEP_HOURS`), starting
@@ -268,7 +285,14 @@ lets a query run, so a slow period gets its answer instead of ending `incomplete
 transaction as the checkpoint and checked again, ten per run within a minute, those checked longest
 ago first, until it matches; the report lists them under `unresolved` with their count in
 `unresolvedTotal` and stays `mismatch` meanwhile; a period that matches again is left out of both
-even if its removal failed or its answer was lost. Pages that ask for a run while one is going get its
+even if its removal failed or its answer was lost. That every asset adds up to zero over all accounts
+is a check of the whole ledger, not of a period: a run that finds it broken is `mismatch` and lists
+it under `assetsNotBalanced`, but no period is blamed or kept for it, so an old error does not pile
+up, and a run is clean again once the ledger is. An account with an old error in it is still found
+by every period that touches that account, since a balance has no history to compare a period with.
+A saved checkpoint does not lose the report: if the unresolved periods or the totals cannot be read
+afterwards, the run says so and is `incomplete`. The operations panel keeps the last result next to
+a refresh that failed. Pages that ask for a run while one is going get its
 report instead of starting another. The operations panel waits up to five minutes for a run and gives
 up on an answer that does not come. So a
 trade that never got settled keeps showing up, the next days are still checked, a clean history is
@@ -400,6 +424,9 @@ Redis Streams is the order log and Redis is the coordinator.
 | Messages in Ukrainian | English | Language of the project |
 | Frontend on port 3000 directly | nginx in front of it on port 3000 | Trustworthy client address |
 | Postgres on host port 5433, Redis on 6379 | Not published | No passwords, and the command stream trusts its writers |
+| Session cookies `mx_access`, `mx_refresh` on `/api` | Signed names on `/`, with `__Host-` when `COOKIE_SECURE=true` | Everyone signs in once more after this change; a planted cookie must not pick the session |
+| `POST /auth/register` of a taken email → 409 | 409 only with another password; the same password signs in | A registration whose answer was lost can be repeated |
+| `ledger.assetsNotBalanced` in a reconciliation report | `assetsNotBalanced` next to `ledger`, only when something is off | It describes the whole ledger, not the period |
 
 ## Not done, or done differently next time
 
@@ -416,3 +443,6 @@ Redis Streams is the order log and Redis is the coordinator.
   skipped. A trade that can never be booked is retried for
   an hour, then dead-lettered and shown as unsettled by reconciliation until it is replayed.
 - **Order history** returns the latest 100 finished orders; paging is not built.
+- **Registration shows that an email is taken.** Someone trying a taken email with a wrong password
+  gets 409. Hiding that takes a confirmation sent by email, which this exchange does not have; signing
+  in gives nothing away, and both are held to the sign-in rate limit.

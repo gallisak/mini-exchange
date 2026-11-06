@@ -1,13 +1,15 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
+import { newSession } from './session';
+import { sessionCookies } from './test-session';
 import { upstream, withSession } from './upstream';
 
 const token = (secondsLeft: number) =>
   ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: Math.floor(Date.now() / 1000) + secondsLeft })).toString('base64url'), 's'].join('.');
 
-function request(cookies: Record<string, string>) {
+function request(access: string, refresh: string, headers: Record<string, string> = {}) {
   return new NextRequest('http://exchange.test/api/wallet', {
-    headers: { cookie: Object.entries(cookies).map(([name, value]) => `${name}=${value}`).join('; ') },
+    headers: { cookie: sessionCookies(access, refresh), ...headers },
   });
 }
 
@@ -29,12 +31,43 @@ describe('calling a service with the session', () => {
     vi.unstubAllGlobals();
   });
 
+  it('refuses a request from a page that shows another account than the cookies belong to', async () => {
+    const call = vi.fn(async () => ({ status: 202, body: {} }));
+
+    const response = await withSession(request(token(900), 'refresh', { 'x-session-user': 'user-a' }), call);
+
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ code: 'SESSION_CHANGED' });
+    expect(call).not.toHaveBeenCalled();
+  });
+
+  it('lets a request through from a page that shows the account of the cookies', async () => {
+    const call = vi.fn(async () => ({ status: 202, body: {} }));
+
+    const response = await withSession(request(token(900), 'refresh', { 'x-session-user': 'u' }), call);
+
+    expect(response.status).toBe(202);
+    expect(call).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a rotation it just made when the request turns out to come from a page of another account', async () => {
+    const fresh = { accessToken: token(900), refreshToken: 'new-refresh' };
+    upstreamAnswers(() => ({ status: 200, body: fresh }));
+    const call = vi.fn(async () => ({ status: 202, body: {} }));
+
+    const response = await withSession(request(token(-1), 'aged-refresh', { 'x-session-user': 'user-a' }), call);
+
+    expect(response.status).toBe(409);
+    expect(call).not.toHaveBeenCalled();
+    expect(response.headers.getSetCookie().some((cookie) => /^mx_refresh_[0-9a-z]+=new-refresh;/.test(cookie))).toBe(true);
+  });
+
   it('keeps a session the engine just renewed when a service still answers 401', async () => {
     const fresh = { accessToken: token(900), refreshToken: 'new-refresh' };
     upstreamAnswers((url) =>
       url.endsWith('/auth/refresh') ? { status: 200, body: fresh } : { status: 401, body: {} },
     );
-    const incoming = request({ mx_access: token(900), mx_refresh: 'old-refresh' });
+    const incoming = request(token(900), 'old-refresh');
 
     const response = await withSession(incoming, (accessToken) =>
       upstream(incoming, 'settlement', '/wallets/me', {}, accessToken),
@@ -42,14 +75,14 @@ describe('calling a service with the session', () => {
 
     expect(response.status).toBe(502);
     expect(cleared(response)).toBe(0);
-    expect(response.headers.getSetCookie().some((cookie) => cookie.startsWith('mx_refresh=new-refresh'))).toBe(true);
+    expect(response.headers.getSetCookie().some((cookie) => /^mx_refresh_[0-9a-z]+=new-refresh;/.test(cookie))).toBe(true);
   });
 
   it('signs out the session the request was sent with when it cannot be renewed', async () => {
     upstreamAnswers((url) =>
       url.endsWith('/auth/refresh') ? { status: 401, body: {} } : { status: 401, body: {} },
     );
-    const incoming = request({ mx_access: token(900), mx_refresh: 'revoked-refresh' });
+    const incoming = request(token(900), 'revoked-refresh');
 
     const response = await withSession(incoming, (accessToken) =>
       upstream(incoming, 'settlement', '/wallets/me', {}, accessToken),
@@ -63,7 +96,7 @@ describe('calling a service with the session', () => {
     upstreamAnswers((url) =>
       url.endsWith('/auth/refresh') ? { status: 409, body: {} } : { status: 401, body: {} },
     );
-    const incoming = request({ mx_access: token(900), mx_refresh: 'replaced-refresh' });
+    const incoming = request(token(900), 'replaced-refresh');
 
     const response = await withSession(incoming, (accessToken) =>
       upstream(incoming, 'settlement', '/wallets/me', {}, accessToken),
@@ -82,7 +115,7 @@ describe('calling a service with the session', () => {
       }
       return { status: 200, body: {} };
     });
-    const incoming = request({ mx_access: token(-1), mx_refresh: 'aging-refresh' });
+    const incoming = request(token(-1), 'aging-refresh');
 
     await withSession(incoming, (accessToken) =>
       upstream(incoming, 'settlement', '/wallets/me', {}, accessToken),
@@ -92,10 +125,11 @@ describe('calling a service with the session', () => {
   });
 
   it('shares a rotation with the same browser after it moved to another network', async () => {
+    const session = newSession();
     const from = (address: string) =>
       new NextRequest('http://exchange.test/api/wallet', {
         headers: {
-          cookie: `mx_access=${token(-1)}; mx_refresh=roaming-refresh`,
+          cookie: sessionCookies(token(-1), 'roaming-refresh', session),
           'x-forwarded-for': address,
           'user-agent': 'Phone Browser',
         },

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextResponse } from 'next/server';
-import { REFRESH_REUSE_WINDOW_MS, REMEMBERED_SESSIONS, Rotation, refreshOnce, storeTokens } from './session';
+import { REFRESH_REUSE_WINDOW_MS, REMEMBERED_SESSIONS, Rotation, newSession, refreshOnce, storeTokens } from './session';
 
 describe('sharing one refresh between requests', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -94,12 +94,10 @@ describe('sharing one refresh between requests', () => {
   it('keeps the access cookie as long as the refresh cookie, so a refresh can be tied to both', () => {
     const response = NextResponse.json({});
 
-    storeTokens(response, { accessToken: 'a', refreshToken: 'r' });
+    storeTokens(response, { accessToken: 'a', refreshToken: 'r' }, newSession());
 
-    const ages = response.headers
-      .getSetCookie()
-      .map((cookie) => [cookie.split('=')[0], /Max-Age=(\d+)/.exec(cookie)?.[1]]);
-    expect(Object.fromEntries(ages)).toEqual({ mx_access: '604800', mx_refresh: '604800' });
+    const ages = response.headers.getSetCookie().map((cookie) => /Max-Age=(\d+)/.exec(cookie)?.[1]);
+    expect(ages).toEqual(['604800', '604800']);
   });
 
   it('retries with the same attempt after the engine answered 429, so a used attempt is never replaced', async () => {

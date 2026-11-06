@@ -230,7 +230,6 @@ describe("reconciliation", () => {
         unbalancedTransactions: [],
         transactionsWithoutEntries: [],
         accountsOffEntries: [],
-        assetsNotBalanced: [],
         tradesOffEntries: [],
       },
     });
@@ -292,9 +291,32 @@ describe("reconciliation", () => {
         entries: "99998.7641976322",
       }),
     ]);
-    expect(response.body.ledger.assetsNotBalanced).toEqual([
+    expect(response.body.assetsNotBalanced).toEqual([
       { asset: "USD", total: "1.00" },
     ]);
+  });
+
+  it("does not hold an old imbalance of the whole ledger against every new period", async () => {
+    await corrupt(
+      `INSERT INTO "accounts" ("ownerId", "asset", "kind", "balance") VALUES ($1, 'USD', 'user', 5)`,
+      [randomUUID()],
+    );
+    engineRows = [];
+    const [{ count: before }] = await corrupt(
+      `SELECT COUNT(*)::int AS "count" FROM "reconciliation_unresolved_periods"`,
+    );
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.status).toBe("mismatch");
+    expect(response.body.assetsNotBalanced).toEqual([
+      { asset: "USD", total: "5.00" },
+    ]);
+    expect(response.body.ledger.accountsOffEntries).toEqual([]);
+    const [{ count: after }] = await corrupt(
+      `SELECT COUNT(*)::int AS "count" FROM "reconciliation_unresolved_periods"`,
+    );
+    expect(after).toBe(before);
   });
 
   it("finds a ledger entry edited by hand", async () => {
@@ -347,7 +369,6 @@ describe("reconciliation", () => {
       unbalancedTransactions: [],
       transactionsWithoutEntries: [],
       accountsOffEntries: [],
-      assetsNotBalanced: [],
       tradesOffEntries: [executed.tradeId],
     });
   });
@@ -954,6 +975,29 @@ describe("reconciliation", () => {
     expect(response.body.recheckError).toMatch(/matches now, but could not be taken off/);
   });
 
+  it("keeps the report of a period whose checkpoint is saved when the unresolved periods cannot be read", async () => {
+    await settleInPeriod();
+    engineRows = ENGINE_IN_PERIOD;
+    failQueries(/^SELECT "from", "to" FROM "reconciliation_unresolved_periods"/);
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.status).toBe("incomplete");
+    expect(response.body.instruments).not.toEqual([]);
+    expect(response.body.recheckError).toMatch(/Could not read the unresolved periods/);
+    const [checkpoint] = await corrupt(`SELECT "reconciledUntil" FROM "reconciliation_checkpoints"`);
+    expect(checkpoint).toBeDefined();
+  });
+
+  it("says so when the balances of the whole ledger cannot be added up", async () => {
+    failQueries(/^SELECT "asset", SUM\("balance"\)/);
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.status).toBe("incomplete");
+    expect(response.body.ledgerTotalsError).toMatch(/could not write/);
+  });
+
   it("counts the rest of the list correctly when a removal went through but its answer was lost", async () => {
     const period = await unresolvedPeriod();
     const broken = new Date(period.from.getTime() - 24 * 3_600_000);
@@ -1008,7 +1052,7 @@ describe("reconciliation", () => {
     jest
       .spyOn(database, "query")
       .mockImplementation(async (sql: string, parameters?: unknown[]) => {
-        if (/HAVING SUM\("balance"\)/.test(sql)) throw new Error("canceling statement due to statement timeout");
+        if (/HAVING SUM\(e\."amount"\)/.test(sql)) throw new Error("canceling statement due to statement timeout");
         running += 1;
         try {
           await pause(300);
@@ -1043,7 +1087,7 @@ describe("reconciliation", () => {
         const [{ waiting }] = await corrupt(
           `SELECT COUNT(*)::int AS "waiting" FROM pg_stat_activity WHERE "wait_event_type" = 'Lock' AND "datname" = current_database()`,
         );
-        expect(waiting).toBe(6);
+        expect(waiting).toBe(5);
       });
 
       const started = Date.now();

@@ -1,3 +1,4 @@
+import { DataSource } from 'typeorm';
 import { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import Redis from 'ioredis';
@@ -201,6 +202,24 @@ describe('trade settlement', () => {
       .get('/wallets/me')
       .set('authorization', 'Bearer not-a-token')
       .expect(401);
+  });
+
+  it('does not take a refresh token signed with the same secret for an access token', async () => {
+    await request(app.getHttpServer())
+      .get('/wallets/me')
+      .set('authorization', `Bearer ${accessToken(randomUUID(), 'user', undefined, { jti: randomUUID() })}`)
+      .expect(401);
+  });
+
+  it('opens an instrument added later for a user who has as many accounts as there are assets', async () => {
+    const owner = randomUUID();
+    for (const asset of ['USD', 'ABC', 'DEF', 'RETIRED']) {
+      await app
+        .get(DataSource)
+        .query(`INSERT INTO "accounts" ("ownerId", "asset", "kind", "balance") VALUES ($1, $2, 'user', 0)`, [owner, asset]);
+    }
+
+    expect(await balances(app, owner)).toMatchObject({ XYZ: OPENING.XYZ });
   });
 
   it('opens a new wallet once when several requests ask for it at the same time', async () => {

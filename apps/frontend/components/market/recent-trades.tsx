@@ -13,8 +13,11 @@ export function RecentTrades({ instrument }: { instrument: string }) {
       <CardHeader className="pb-3">
         <CardTitle className="text-base">Recent trades</CardTitle>
       </CardHeader>
-      <CardContent>
-        {error ? (
+      <CardContent className="space-y-4">
+        {error && trades !== null && (
+          <ErrorState message={`Showing the trades that loaded last: ${error}`} onRetry={reload} />
+        )}
+        {error && trades === null ? (
           <ErrorState message={error} onRetry={reload} />
         ) : trades === null ? (
           <LoadingRows />

@@ -45,6 +45,13 @@ export class AuthController {
     return this.auth.refresh(dto.refreshToken, dto.attempt);
   }
 
+  @Post('end-session')
+  @HttpCode(HttpStatus.NO_CONTENT)
+  @RateLimit('PUBLIC')
+  endSession(@Body() dto: RefreshDto) {
+    return this.auth.endSessionOf(dto.refreshToken);
+  }
+
   @Post('ws-ticket')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)

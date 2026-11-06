@@ -47,13 +47,8 @@ export class AuthService {
   ) {}
 
   async register(dto: RegisterDto): Promise<TokenPair> {
-    const existing = await this.users
-      .createQueryBuilder('user')
-      .where('lower(user.email) = :email', { email: dto.email })
-      .getExists();
-    if (existing) {
-      throw new ConflictException(EMAIL_TAKEN);
-    }
+    const existing = await this.accountsWith(dto.email);
+    if (existing.length > 0) return this.signInOrRefuse(dto, existing);
     const passwordHash = await bcrypt.hash(dto.password, 10);
     const user = await this.users
       .save(this.users.create({ email: dto.email, passwordHash, role: 'user' }))
@@ -62,27 +57,39 @@ export class AuthService {
           error instanceof QueryFailedError &&
           (error.driverError as { code?: string }).code === UNIQUE_VIOLATION
         ) {
-          throw new ConflictException(EMAIL_TAKEN);
+          return null;
         }
         throw error;
       });
+    if (!user) return this.signInOrRefuse(dto, await this.accountsWith(dto.email));
     return this.issueTokens(user);
   }
 
   async login(dto: LoginDto): Promise<TokenPair> {
-    const candidates = await this.users
-      .createQueryBuilder('user')
-      .where('lower(user.email) = :email', { email: dto.email })
-      .getMany();
-    candidates.sort((a, b) => Number(b.email === dto.email) - Number(a.email === dto.email));
+    const user = await this.withPassword(dto, await this.accountsWith(dto.email));
+    if (!user) {
+      throw new UnauthorizedException(INVALID_CREDENTIALS);
+    }
+    return this.issueTokens(user);
+  }
+
+  private accountsWith(email: string): Promise<User[]> {
+    return this.users.createQueryBuilder('user').where('lower(user.email) = :email', { email }).getMany();
+  }
+
+  private async withPassword(dto: LoginDto, accounts: User[]): Promise<User | undefined> {
+    const candidates = [...accounts].sort((a, b) => Number(b.email === dto.email) - Number(a.email === dto.email));
     let user: User | undefined;
     for (const candidate of candidates.length > 0 ? candidates : [undefined]) {
       const valid = await bcrypt.compare(dto.password, candidate?.passwordHash ?? DUMMY_HASH);
       if (valid && candidate && !user) user = candidate;
     }
-    if (!user) {
-      throw new UnauthorizedException(INVALID_CREDENTIALS);
-    }
+    return user;
+  }
+
+  private async signInOrRefuse(dto: RegisterDto, accounts: User[]): Promise<TokenPair> {
+    const user = await this.withPassword(dto, accounts);
+    if (!user) throw new ConflictException(EMAIL_TAKEN);
     return this.issueTokens(user);
   }
 
@@ -104,7 +111,13 @@ export class AuthService {
   }
 
   logout(userId: string, sessionId?: string): Promise<void> {
-    return this.withinBudget(() => this.endSessions(userId, sessionId));
+    return this.withinBudget((beforeCommit) => this.endSessions(userId, sessionId, beforeCommit));
+  }
+
+  async endSessionOf(refreshToken: string): Promise<void> {
+    const { userId, sessionId } = this.refreshClaims(refreshToken);
+    const session = await this.sessions.findOneBy({ id: sessionId, userId });
+    if (session) await this.logout(userId, session.familyId);
   }
 
   private withinBudget<T>(work: (beforeCommit: () => void) => Promise<T>): Promise<T> {
@@ -126,7 +139,7 @@ export class AuthService {
     });
   }
 
-  private async rotate(refreshToken: string, attempt: string | undefined, beforeCommit: () => void): Promise<TokenPair> {
+  private refreshClaims(refreshToken: string): { userId: string; sessionId: string } {
     let claims: { sub?: unknown; jti?: unknown };
     try {
       claims = this.jwt.verify<{ sub?: unknown; jti?: unknown }>(refreshToken, {
@@ -139,40 +152,55 @@ export class AuthService {
     if (typeof userId !== 'string' || !isUUID(userId) || typeof sessionId !== 'string' || !isUUID(sessionId)) {
       throw new UnauthorizedException(INVALID_REFRESH);
     }
-    const outcome = await this.sessions.manager.transaction(async (manager) => {
-      await this.lockSessionsOf(manager, userId);
-      const session = await manager.findOne(RefreshSession, {
-        where: { id: sessionId, userId },
-        lock: { mode: 'pessimistic_write' },
-      });
-      if (!session || session.revokedAt || session.tokenHash !== tokenHash(refreshToken)) return null;
-      const user = await manager.findOneBy(User, { id: userId });
-      if (session.usedAt) {
-        if (attempt && this.retriesRotation(session, attempt)) {
-          return user ? this.reissue(manager, user, session) : null;
-        }
-        await manager.update(
-          RefreshSession,
-          { familyId: session.familyId, revokedAt: IsNull() },
-          { revokedAt: () => 'now()' },
-        );
-        await this.revocations.record(manager, [session.familyId]);
-        return { reusedFamily: session.familyId };
+    return { userId, sessionId };
+  }
+
+  private async rotateWithin(
+    manager: EntityManager,
+    refreshToken: string,
+    userId: string,
+    sessionId: string,
+    attempt?: string,
+  ): Promise<TokenPair | Superseded | { reusedFamily: string } | null> {
+    await this.lockSessionsOf(manager, userId);
+    const session = await manager.findOne(RefreshSession, {
+      where: { id: sessionId, userId },
+      lock: { mode: 'pessimistic_write' },
+    });
+    if (!session || session.revokedAt || session.tokenHash !== tokenHash(refreshToken)) return null;
+    const user = await manager.findOneBy(User, { id: userId });
+    if (session.usedAt) {
+      if (attempt && this.retriesRotation(session, attempt)) {
+        return user ? this.reissue(manager, user, session) : null;
       }
-      if (!user) return null;
-      const successorId = randomUUID();
       await manager.update(
         RefreshSession,
-        { id: session.id },
-        {
-          usedAt: () => 'now()',
-          rotationAttempt: attempt ? tokenHash(attempt) : null,
-          successorId,
-        },
+        { familyId: session.familyId, revokedAt: IsNull() },
+        { revokedAt: () => 'now()' },
       );
-      const pair = await this.openSession(manager, user, session.familyId, successorId);
+      await this.revocations.record(manager, [session.familyId]);
+      return { reusedFamily: session.familyId };
+    }
+    if (!user) return null;
+    const successorId = randomUUID();
+    await manager.update(
+      RefreshSession,
+      { id: session.id },
+      {
+        usedAt: () => 'now()',
+        rotationAttempt: attempt ? tokenHash(attempt) : null,
+        successorId,
+      },
+    );
+    return this.openSession(manager, user, session.familyId, successorId);
+  }
+
+  private async rotate(refreshToken: string, attempt: string | undefined, beforeCommit: () => void): Promise<TokenPair> {
+    const { userId, sessionId } = this.refreshClaims(refreshToken);
+    const outcome = await this.sessions.manager.transaction(async (manager) => {
+      const result = await this.rotateWithin(manager, refreshToken, userId, sessionId, attempt);
       beforeCommit();
-      return pair;
+      return result;
     });
     if (outcome && 'superseded' in outcome) throw new ConflictException(SUPERSEDED_REFRESH);
     if (outcome && 'reusedFamily' in outcome) {
@@ -183,7 +211,7 @@ export class AuthService {
     return outcome;
   }
 
-  private async endSessions(userId: string, sessionId?: string): Promise<void> {
+  private async endSessions(userId: string, sessionId: string | undefined, beforeCommit: () => void): Promise<void> {
     const familyId = sessionId && isUUID(sessionId) ? sessionId : undefined;
     const families = await this.sessions.manager.transaction(async (manager) => {
       await this.lockSessionsOf(manager, userId);
@@ -198,6 +226,7 @@ export class AuthService {
       ).raw;
       const families = [...new Set([...(familyId ? [familyId] : []), ...revoked.map((row) => row.familyId)])];
       await this.revocations.record(manager, families);
+      beforeCommit();
       return families;
     });
     if (!(await this.revocations.announce(families))) {

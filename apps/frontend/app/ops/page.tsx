@@ -78,6 +78,8 @@ interface Reconciliation {
     matches: boolean;
   }[];
   ledger: Record<string, unknown[]>;
+  assetsNotBalanced?: { asset: string; total: string }[];
+  ledgerTotalsError?: string;
 }
 
 interface OpsReport {
@@ -94,7 +96,8 @@ function Unavailable({ part }: { part: Part<unknown> }) {
 
 function Ops() {
   const [report, setReport] = useState<OpsReport | null>(null);
-  const [reconciliation, setReconciliation] = useState<Part<Reconciliation> | null>(null);
+  const [reconciliation, setReconciliation] = useState<Reconciliation | null>(null);
+  const [reconcileError, setReconcileError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const load = useMemo(
@@ -114,9 +117,10 @@ function Ops() {
     () =>
       singleFlight(async () => {
         try {
-          setReconciliation({ ok: true, data: await api<Reconciliation>('/api/ops/reconciliation', { timeoutMs: RECONCILE_TIMEOUT_MS }) });
+          setReconciliation(await api<Reconciliation>('/api/ops/reconciliation', { timeoutMs: RECONCILE_TIMEOUT_MS }));
+          setReconcileError(null);
         } catch (failure) {
-          setReconciliation({ ok: false, error: { message: (failure as Error).message } });
+          setReconcileError((failure as Error).message);
         }
       }),
     [],
@@ -140,8 +144,9 @@ function Ops() {
   if (view.kind === 'error') return <ErrorState message={view.message} onRetry={load} />;
   if (view.kind === 'loading') return <LoadingRows rows={8} />;
   const { engine, settlement } = view.report;
-  const issues = reconciliation?.data
-    ? Object.entries(reconciliation.data.ledger).filter(([, rows]) => rows.length > 0)
+  const reconciled = opsView(reconciliation, reconcileError);
+  const issues = reconciliation
+    ? Object.entries(reconciliation.ledger).filter(([, rows]) => rows.length > 0)
     : [];
 
   return (
@@ -283,37 +288,52 @@ function Ops() {
               <CardTitle className="text-base">Reconciliation</CardTitle>
               <CardDescription>Engine trades against ledger postings</CardDescription>
             </div>
-            {reconciliation?.data && (
+            {reconciliation && (
               <Badge
-                variant={reconciliation.data.status === 'ok' ? 'secondary' : 'destructive'}
+                variant={reconciliation.status === 'ok' ? 'secondary' : 'destructive'}
                 className="gap-1"
                 data-testid="reconciliation-status"
               >
-                {reconciliation.data.status === 'ok' ? (
+                {reconciliation.status === 'ok' ? (
                   <CheckCircle2 className="h-3 w-3" />
                 ) : (
                   <XCircle className="h-3 w-3" />
                 )}
-                {reconciliation.data.status}
+                {reconciliation.status}
               </Badge>
             )}
           </CardHeader>
           <CardContent className="space-y-4">
-            {reconciliation === null ? (
+            {reconciled.kind === 'loading' ? (
               <LoadingRows rows={3} />
-            ) : !reconciliation.ok || !reconciliation.data ? (
-              <Unavailable part={reconciliation} />
+            ) : reconciled.kind === 'error' ? (
+              <ErrorState message={reconciled.message} />
             ) : (
               <>
-                {reconciliation.data.engineError && (
-                  <ErrorState message={reconciliation.data.engineError} />
+                {reconciled.staleBecause && (
+                  <div data-testid="reconciliation-stale">
+                    <ErrorState message={`Showing the last result: ${reconciled.staleBecause}`} />
+                  </div>
                 )}
-                {reconciliation.data.recheckError && (
-                  <ErrorState message={reconciliation.data.recheckError} />
+                {reconciled.report.engineError && (
+                  <ErrorState message={reconciled.report.engineError} />
                 )}
-                {reconciliation.data.endedEarly && (
+                {reconciled.report.recheckError && (
+                  <ErrorState message={reconciled.report.recheckError} />
+                )}
+                {reconciled.report.ledgerTotalsError && (
+                  <ErrorState message={reconciled.report.ledgerTotalsError} />
+                )}
+                {(reconciled.report.assetsNotBalanced ?? []).length > 0 && (
+                  <ErrorState
+                    message={`The whole ledger does not add up to zero: ${(reconciled.report.assetsNotBalanced ?? [])
+                      .map((row) => `${row.asset} ${row.total}`)
+                      .join(', ')}`}
+                  />
+                )}
+                {reconciled.report.endedEarly && (
                   <p className="text-xs text-muted-foreground">
-                    Checked up to {formatMoment(reconciliation.data.period.to)}: {reconciliation.data.endedEarly}.
+                    Checked up to {formatMoment(reconciled.report.period.to)}: {reconciled.report.endedEarly}.
                   </p>
                 )}
                 <Table>
@@ -327,7 +347,7 @@ function Ops() {
                     </TableRow>
                   </TableHeader>
                   <TableBody>
-                    {reconciliation.data.instruments.map((row) => (
+                    {reconciled.report.instruments.map((row) => (
                       <TableRow key={row.instrument}>
                         <TableCell className="font-medium">{row.instrument}</TableCell>
                         <TableCell className="text-right font-mono">
@@ -353,9 +373,9 @@ function Ops() {
                     message={issues.map(([check, rows]) => `${check}: ${rows.length}`).join(' · ')}
                   />
                 )}
-                {(reconciliation.data.unresolved ?? []).length > 0 && (
+                {(reconciled.report.unresolved ?? []).length > 0 && (
                   <ErrorState
-                    message={`Earlier periods that still do not match (${reconciliation.data.unresolvedTotal ?? reconciliation.data.unresolved?.length}): ${(reconciliation.data.unresolved ?? [])
+                    message={`Earlier periods that still do not match (${reconciled.report.unresolvedTotal ?? reconciled.report.unresolved?.length}): ${(reconciled.report.unresolved ?? [])
                       .map((period) => `${formatMoment(period.from)} – ${formatMoment(period.to)}`)
                       .join(', ')}`}
                   />

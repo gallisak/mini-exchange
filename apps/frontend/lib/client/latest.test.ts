@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { latestRequest, singleFlight } from './latest';
 
 describe('the latest of several overlapping requests', () => {
@@ -18,6 +18,15 @@ describe('the latest of several overlapping requests', () => {
 
     expect(older.show()).toBe(true);
     expect(newer.latest()).toBe(true);
+  });
+
+  it('remembers when it started, since that is how fresh its answer is', () => {
+    vi.useFakeTimers({ now: 5_000 });
+    const turn = latestRequest()();
+    vi.setSystemTime(9_000);
+
+    expect(turn.startedAt.getTime()).toBe(5_000);
+    vi.useRealTimers();
   });
 
   it('never replaces a newer answer with an older one', () => {

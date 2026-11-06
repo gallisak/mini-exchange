@@ -16,7 +16,7 @@ import {
 } from '@/components/ui/table';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { EmptyState, ErrorState, LoadingRows } from '@/components/states';
-import { api } from '@/lib/client/api';
+import { api, endsSession } from '@/lib/client/api';
 import { subtractDecimals } from '@/lib/client/decimal';
 import { formatDateTime, trimAmount } from '@/lib/client/format';
 import { useSession } from '@/lib/client/session';
@@ -24,6 +24,7 @@ import { Order, OrderStatus } from '@/lib/client/types';
 import { cn } from '@/lib/utils';
 
 const ACTIVE: OrderStatus[] = ['open', 'partially_filled'];
+const CANCEL_AGAIN_AFTER_MS = 5_000;
 
 const STATUS_LOOK: Record<OrderStatus, 'default' | 'secondary' | 'outline'> = {
   open: 'default',
@@ -47,19 +48,22 @@ export function OrdersTable({
 
   async function cancel(order: Order) {
     const sentBy = user?.id ?? '';
+    const enable = () =>
+      setCancelling((current) => {
+        const next = new Set(current);
+        next.delete(order.id);
+        return next;
+      });
     setCancelling((current) => new Set(current).add(order.id));
     try {
       await api(`/api/orders/${order.id}`, { method: 'DELETE' });
       if (isSignedIn(sentBy)) {
         toast.message(`Cancelling ${order.side} ${order.instrument} @ ${order.price}`);
       }
+      setTimeout(enable, CANCEL_AGAIN_AFTER_MS);
     } catch (failure) {
-      if (isSignedIn(sentBy)) toast.error((failure as Error).message);
-      setCancelling((current) => {
-        const next = new Set(current);
-        next.delete(order.id);
-        return next;
-      });
+      if (isSignedIn(sentBy) && !endsSession(failure)) toast.error((failure as Error).message);
+      enable();
     }
   }
 
@@ -134,7 +138,7 @@ export function OrdersTable({
                           size="sm"
                           disabled={cancelling.has(order.id)}
                           onClick={() => cancel(order)}
-                          aria-label={`Cancel order ${order.id}`}
+                          aria-label={`Cancel ${order.side} ${order.quantity} ${order.instrument} at ${order.price}, placed ${formatDateTime(order.createdAt)}`}
                         >
                           <X className="mr-1 h-4 w-4" />
                           Cancel

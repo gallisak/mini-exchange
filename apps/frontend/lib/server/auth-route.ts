@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { TokenPair, claimsOf, clearTokens, newSession, sessionsIn, storeTokens } from './session';
-import { upstream } from './upstream';
+import { endForgottenSessions, upstream } from './upstream';
 
 const JSON_BODY = /^application\/json(\s*;|$)/i;
 
@@ -20,7 +20,9 @@ export async function signIn(request: NextRequest, path: '/auth/login' | '/auth/
     user: claims && { id: claims.id, email: claims.email, role: claims.role },
   });
   const session = newSession();
-  clearTokens(response, sessionsIn(request));
+  const forgotten = sessionsIn(request);
+  clearTokens(response, forgotten);
   storeTokens(response, tokens, session);
+  void endForgottenSessions(request, forgotten);
   return response;
 }
