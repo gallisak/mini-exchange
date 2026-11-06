@@ -2,6 +2,7 @@ import { Injectable, OnModuleDestroy } from "@nestjs/common";
 import { INSTRUMENTS } from "../common/instruments";
 import { closeRedis, createRedis } from "../common/redis";
 import { tradeStreamKey } from "../consumer/trade-event";
+import { intEnv } from "../common/env";
 
 type StreamEntry = [id: string, fields: string[]];
 
@@ -44,6 +45,7 @@ function executedAtOf(entry: StreamEntry | undefined): number | null {
 export class SettlementBacklog implements OnModuleDestroy {
   private readonly redis = createRedis({ maxRetriesPerRequest: 1 });
   private readonly group = process.env.CONSUMER_GROUP ?? "settlement";
+  private readonly limit = intEnv("RECONCILIATION_BACKLOG_LIMIT", 10_000);
 
   async onModuleDestroy(): Promise<void> {
     await closeRedis(this.redis);
@@ -73,24 +75,48 @@ export class SettlementBacklog implements OnModuleDestroy {
       })
       .find((info) => info.name === this.group);
     const lastDelivered = group ? String(group["last-delivered-id"]) : "0-0";
-    let start = `(${lastDelivered}`;
-    if (group) {
-      const [count, smallest] = (await within(
-        this.redis.xpending(stream, this.group),
-      )) as [number, string | null];
-      if (count > 0 && smallest) start = smallest;
-    }
     let oldest: number | null = null;
-    for (;;) {
-      const entries = (await within(
-        this.redis.xrange(stream, start, "+", "COUNT", SCAN_PAGE),
-      )) as StreamEntry[];
+    let scanned = 0;
+    const consider = (entries: StreamEntry[]) => {
       for (const entry of entries) {
         const executedAt = executedAtOf(entry);
         if (executedAt !== null && (oldest === null || executedAt < oldest))
           oldest = executedAt;
       }
-      if (entries.length < SCAN_PAGE) return oldest;
+      scanned += entries.length;
+      if (scanned > this.limit)
+        throw new Error(
+          `more than ${this.limit} trades in ${stream} are waiting for settlement`,
+        );
+    };
+    const page = Math.min(SCAN_PAGE, this.limit + 1);
+    if (group && Number(group.pending) > 0) {
+      let start = "-";
+      for (;;) {
+        const pending = (await within(
+          this.redis.xpending(stream, this.group, start, "+", page),
+        )) as [id: string, ...rest: unknown[]][];
+        if (pending.length === 0) break;
+        const reads = this.redis.pipeline();
+        for (const [id] of pending) reads.xrange(stream, id, id);
+        const results = (await within(reads.exec())) ?? [];
+        const entries: StreamEntry[] = [];
+        for (const [error, found] of results) {
+          if (error) throw error;
+          entries.push(...(found as StreamEntry[]));
+        }
+        consider(entries);
+        if (pending.length < page) break;
+        start = `(${pending[pending.length - 1][0]}`;
+      }
+    }
+    let start = `(${lastDelivered}`;
+    for (;;) {
+      const entries = (await within(
+        this.redis.xrange(stream, start, "+", "COUNT", page),
+      )) as StreamEntry[];
+      consider(entries);
+      if (entries.length < page) return oldest;
       start = `(${entries[entries.length - 1][0]}`;
     }
   }

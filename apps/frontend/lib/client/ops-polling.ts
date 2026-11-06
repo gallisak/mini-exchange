@@ -1,5 +1,7 @@
 export const STATUS_REFRESH_MS = 5_000;
 export const RECONCILE_REFRESH_MS = 60_000;
+export const OPS_TIMEOUT_MS = 50_000;
+export const RECONCILE_TIMEOUT_MS = 320_000;
 
 export function startOpsPolling(loadStatus: () => void, reconcile: () => void): () => void {
   loadStatus();

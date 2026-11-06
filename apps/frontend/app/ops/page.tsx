@@ -17,11 +17,15 @@ import { ErrorState, LoadingRows } from '@/components/states';
 import { RequireSession } from '@/components/require-session';
 import { api } from '@/lib/client/api';
 import { formatTime } from '@/lib/client/format';
-import { RECONCILE_REFRESH_MS, STATUS_REFRESH_MS, opsView, startOpsPolling } from '@/lib/client/ops-polling';
+import {
+  OPS_TIMEOUT_MS,
+  RECONCILE_REFRESH_MS,
+  RECONCILE_TIMEOUT_MS,
+  STATUS_REFRESH_MS,
+  opsView,
+  startOpsPolling,
+} from '@/lib/client/ops-polling';
 import { singleFlight } from '@/lib/client/latest';
-
-const OPS_TIMEOUT_MS = 15_000;
-const RECONCILE_TIMEOUT_MS = 320_000;
 
 interface Part<T> {
   ok: boolean;

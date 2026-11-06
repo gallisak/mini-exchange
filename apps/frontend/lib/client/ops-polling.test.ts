@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { opsView, startOpsPolling } from './ops-polling';
+import { UPSTREAM_TIMEOUT_MS } from '@/lib/server/upstream';
+import { OPS_TIMEOUT_MS, opsView, startOpsPolling } from './ops-polling';
 
 describe('operations page polling', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -39,5 +40,9 @@ describe('operations page polling', () => {
       staleBecause: 'Engine answered 503',
     });
     expect(opsView(report, null)).toEqual({ kind: 'report', report, staleBecause: null });
+  });
+
+  it('waits for the status longer than the frontend may take for two rotations and two calls, so new cookies still arrive', () => {
+    expect(OPS_TIMEOUT_MS).toBeGreaterThan(4 * UPSTREAM_TIMEOUT_MS);
   });
 });

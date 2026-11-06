@@ -15,7 +15,7 @@ const SERVICES = {
   engine: () => process.env.MATCHING_ENGINE_URL ?? 'http://localhost:3001',
   settlement: () => process.env.SETTLEMENT_URL ?? 'http://localhost:3002',
 };
-const UPSTREAM_TIMEOUT_MS = 10_000;
+export const UPSTREAM_TIMEOUT_MS = 10_000;
 
 type Service = keyof typeof SERVICES;
 

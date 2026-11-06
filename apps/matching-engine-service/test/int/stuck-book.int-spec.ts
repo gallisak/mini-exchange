@@ -142,4 +142,36 @@ describe('a book whose batch keeps failing', () => {
 
     await eventually(async () => expect(await raw.get(stuckKey('ABC'))).toBeNull());
   });
+
+  it('is reported as stuck while it keeps failing to read its command stream and cleared once it reads again', async () => {
+    let broken = true;
+    const createConnection = redis.createConnection.bind(redis);
+    jest.spyOn(redis, 'createConnection').mockImplementation((options) => {
+      const connection = createConnection(options);
+      const xread = connection.xread.bind(connection) as (...args: unknown[]) => Promise<unknown>;
+      connection.xread = ((...args: unknown[]) =>
+        broken ? Promise.reject(new Error('READONLY replica')) : xread(...args)) as never;
+      return connection;
+    });
+    runner = new BookRunner('ABC', {
+      dataSource,
+      redis,
+      orderBook: new OrderBookService(),
+      batchSize: 100,
+      blockMs: 200,
+      retryDelayMs: 100,
+      fence: 1n,
+      leaseValid: () => true,
+      onFenced: () => undefined,
+    });
+    await runner.start();
+
+    await eventually(async () => {
+      const stuck = JSON.parse((await raw.get(stuckKey('ABC'))) ?? 'null');
+      expect(stuck?.error).toMatch(/READONLY replica/);
+    });
+    broken = false;
+
+    await eventually(async () => expect(await raw.get(stuckKey('ABC'))).toBeNull());
+  });
 });

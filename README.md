@@ -60,7 +60,9 @@ access token never works meanwhile. After its Redis subscription comes back an e
 connected sessions ended, and keeps checking until Redis answers instead of closing every connection. A rotation and a sign-out of the same user take one
 Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
-sign-out that did not go through instead of pretending it did. The frontend's API refuses any
+sign-out that did not go through instead of pretending it did; if the engine refuses an access
+token that looked valid, the frontend rotates it and signs out with the new one, so the refresh
+session ends too. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;
 every page forbids being framed.
 
@@ -195,7 +197,9 @@ one period: the trades executed in it, the ledger transactions created in it, an
 they touched. A run without `from` checks at most one day (`RECONCILIATION_STEP_HOURS`), starting
 where the last run ended, or at the first trade either service knows of. No period ends later than
 a minute ago or than the oldest trade that is not settled yet: a command a book has not applied, a
-trade still in the engine's outbox, or one waiting in settlement's consumer group. A trade carries
+trade still in the engine's outbox, or one waiting in settlement's consumer group (only its
+undelivered and unacknowledged trades are read, at most `RECONCILIATION_BACKLOG_LIMIT`, 10 000 by
+default, per stream; past that the run is `incomplete`). A trade carries
 the time its order entered the stream, so a book or a queue that lags behind could still add trades
 to a period checked earlier. The engine is asked first and settlement's queue after it, so a trade that leaves the outbox
 meanwhile is still seen, and the end of the period is fixed before either is asked. If either cannot
@@ -349,7 +353,8 @@ Redis Streams is the order log and Redis is the coordinator.
 - **No balance reservation.** Balances can go negative.
 - **Crossed books within one user.** Self-trade prevention skips the user's own order, so a user's
   buy can rest above their own sell.
-- **A blocking failure stops its instrument.** A batch that can never commit is retried and shown as
-  stuck on the operations panel rather than skipped. A trade that can never be booked is retried for
+- **A blocking failure stops its instrument.** A batch that can never commit, or a command stream
+  that fails three reads in a row, is retried and shown as stuck on the operations panel rather than
+  skipped. A trade that can never be booked is retried for
   an hour, then dead-lettered and shown as unsettled by reconciliation until it is replayed.
 - **Order history** returns the latest 100 finished orders; paging is not built.

@@ -49,6 +49,7 @@ const STUCK_TTL_MS = 30_000;
 const ROWS_PER_INSERT = 1_000;
 const MARKER_TIMEOUT_MS = 1_000;
 const READ_TIMEOUT_MARGIN_MS = 2_000;
+const READ_FAILURES_BEFORE_STUCK = 3;
 
 function chunks<T>(rows: T[]): T[][] {
   const result: T[][] = [];
@@ -80,6 +81,7 @@ export class BookRunner {
   private state!: EngineState;
   private stuck?: StuckBook;
   private stuckNoted = true;
+  private readFailures = 0;
   private reloadNeeded = false;
   private updatesLost = false;
 
@@ -278,11 +280,16 @@ export class BookRunner {
         let response: [string, StreamEntry[]][] | null;
         try {
           response = await this.read(batchSize, blockMs);
+          this.readFailures = 0;
         } catch (error) {
           if (!this.running) return;
+          this.readFailures += 1;
           this.logger.warn(
-            `Reading the command stream failed, reading again: ${(error as Error).message}`,
+            `Reading the command stream failed ${this.readFailures} times in a row, reading again: ${(error as Error).message}`,
           );
+          if (this.readFailures >= READ_FAILURES_BEFORE_STUCK) {
+            await this.failed(error as Error);
+          }
           await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
           continue;
         }

@@ -793,6 +793,56 @@ describe("reconciliation", () => {
     expect(response.body.period.to).toBe(older);
   });
 
+  it("reads only the trades settlement has not finished, not those it acknowledged after a stalled one", async () => {
+    await restartWith({
+      CONSUMER_ENABLED: "false",
+      RECONCILIATION_BACKLOG_LIMIT: "5",
+    });
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const stalled = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const redis = redisClient();
+    await redis
+      .xgroup("CREATE", TRADE_STREAM, GROUP, "0", "MKSTREAM")
+      .catch(() => undefined);
+    await publishTrade(redis, trade({ executedAt: stalled }));
+    await redis.xreadgroup("GROUP", GROUP, "stalled", "COUNT", 1, "STREAMS", TRADE_STREAM, ">");
+    for (let n = 0; n < 10; n += 1) await publishTrade(redis, trade());
+    const done = (await redis.xreadgroup(
+      "GROUP",
+      GROUP,
+      "busy",
+      "COUNT",
+      100,
+      "STREAMS",
+      TRADE_STREAM,
+      ">",
+    )) as [string, [string, string[]][]][];
+    await redis.xack(TRADE_STREAM, GROUP, ...done[0][1].map(([id]) => id));
+    await redis.quit();
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.period.to).toBe(stalled);
+  });
+
+  it("stops reading a settlement backlog past its limit and reports the run as incomplete", async () => {
+    await restartWith({
+      CONSUMER_ENABLED: "false",
+      RECONCILIATION_BACKLOG_LIMIT: "5",
+    });
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const redis = redisClient();
+    for (let n = 0; n < 10; n += 1) await publishTrade(redis, trade());
+    await redis.quit();
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.status).toBe("incomplete");
+    expect(response.body.engineError).toMatch(
+      /more than 5 trades in trades:ABC are waiting for settlement/,
+    );
+  });
+
   it("does not check past the oldest command a book has not applied yet", async () => {
     firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
     pendingSince = new Date(Date.now() - 2 * 3_600_000).toISOString();
