@@ -102,32 +102,28 @@ describe('sharing one refresh between requests', () => {
     expect(Object.fromEntries(ages)).toEqual({ mx_access: '604800', mx_refresh: '604800' });
   });
 
-  it('forgets the attempt of a rotation the engine refused to look at, so random cookies do not pile up', async () => {
-    const rotate = vi.fn(async (_token: string, _attempt: string): Promise<Rotation> => ({
-      kind: 'unavailable',
-      untouched: true,
-    }));
-    await refreshOnce({ refreshToken: 'limited', accessToken: 'access-h' }, rotate);
-    await refreshOnce({ refreshToken: 'limited', accessToken: 'access-h' }, rotate);
+  it('retries with the same attempt after the engine answered 429, so a used attempt is never replaced', async () => {
+    const outcomes: Rotation[] = [{ kind: 'unavailable' }, { kind: 'unavailable' }, rotated(1)];
+    const rotate = vi.fn(async (_token: string, _attempt: string) => outcomes.shift() as Rotation);
 
-    const [first, second] = rotate.mock.calls.map(([, attempt]) => attempt);
-    expect(second).not.toBe(first);
+    for (let n = 0; n < 3; n += 1) await refreshOnce({ refreshToken: 'limited', accessToken: 'access-h' }, rotate);
+
+    expect(new Set(rotate.mock.calls.map(([, attempt]) => attempt)).size).toBe(1);
   });
 
-  it('remembers a bounded number of sessions however many different cookies arrive', async () => {
+  it('keeps the attempt of a session however many other sessions rotate meanwhile', async () => {
     const rotate = vi.fn(async (_token: string, _attempt: string): Promise<Rotation> => ({ kind: 'unavailable' }));
-    const first = { refreshToken: 'flood-0', accessToken: 'flood' };
-    const attemptOf = async () => {
-      await refreshOnce(first, rotate);
-      return rotate.mock.calls.at(-1)?.[1];
-    };
-    const before = await attemptOf();
+    const victim = { refreshToken: 'victim', accessToken: 'access-v', client: 'Firefox' };
+    await refreshOnce(victim, rotate);
+    const before = rotate.mock.calls.at(-1)?.[1];
 
-    for (let n = 1; n <= REMEMBERED_SESSIONS; n += 1) {
+    for (let n = 1; n <= REMEMBERED_SESSIONS + 10; n += 1) {
       await refreshOnce({ refreshToken: `flood-${n}`, accessToken: 'flood' }, rotate);
     }
+    await refreshOnce(victim, rotate);
 
-    expect(await attemptOf()).not.toBe(before);
+    expect(rotate.mock.calls.at(-1)?.[1]).toBe(before);
+    expect(before).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-a[0-9a-f]{3}-[0-9a-f]{12}$/);
   });
 
   it('does not ask the engine again for a refresh token it just refused', async () => {

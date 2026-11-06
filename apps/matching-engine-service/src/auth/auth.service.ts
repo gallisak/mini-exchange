@@ -27,6 +27,9 @@ export const WS_AUDIENCE = 'ws';
 
 const tokenHash = (token: string) => createHash('sha256').update(token).digest('hex');
 
+const SESSION_LOCK_TIMEOUT_MS = 2_000;
+const SESSION_STATEMENT_TIMEOUT_MS = 3_000;
+
 @Injectable()
 export class AuthService {
   constructor(
@@ -168,6 +171,8 @@ export class AuthService {
   }
 
   private async lockSessionsOf(manager: EntityManager, userId: string): Promise<void> {
+    await manager.query(`SET LOCAL lock_timeout = ${SESSION_LOCK_TIMEOUT_MS}`);
+    await manager.query(`SET LOCAL statement_timeout = ${SESSION_STATEMENT_TIMEOUT_MS}`);
     await manager.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`refresh-sessions:${userId}`]);
   }
 

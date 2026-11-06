@@ -18,16 +18,14 @@ export const entities = [
   UnresolvedPeriod,
 ];
 
-function databaseTimeouts(statement: number): Record<string, number> {
+function databaseTimeouts(statement: number): Record<string, number | boolean> {
   return {
     connectionTimeoutMillis: intEnv('DATABASE_CONNECT_TIMEOUT_MS', 10_000),
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+    lock_timeout: intEnv('DATABASE_LOCK_TIMEOUT_MS', 10_000, 0),
     ...(statement > 0
-      ? {
-          statement_timeout: statement,
-          query_timeout: statement + 5_000,
-          lock_timeout: intEnv('DATABASE_LOCK_TIMEOUT_MS', 10_000),
-          idle_in_transaction_session_timeout: statement,
-        }
+      ? { statement_timeout: statement, idle_in_transaction_session_timeout: statement }
       : {}),
   };
 }

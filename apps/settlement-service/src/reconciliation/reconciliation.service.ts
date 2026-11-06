@@ -112,6 +112,7 @@ export class ReconciliationService implements OnModuleDestroy {
   private readonly lagMs = intEnv("RECONCILIATION_LAG_MS", 60_000, 0);
   private readonly stepMs = intEnv("RECONCILIATION_STEP_HOURS", 24) * 3_600_000;
   private running: Promise<ReconciliationReport> | null = null;
+  private checking: Promise<void> = Promise.resolve();
 
   constructor(
     @Inject(RECONCILIATION_DATABASE) private readonly dataSource: DataSource,
@@ -337,21 +338,28 @@ export class ReconciliationService implements OnModuleDestroy {
     const rechecked = new Map<string, ReconciliationStatus>();
     for (const period of due) {
       if (Date.now() - started >= RECHECK_BUDGET_MS) break;
-      const { status } = await this.reconcile(
+      const status = await this.reconcile(
         new Date(period.from),
         new Date(period.to),
+      ).then(
+        (report) => report.status,
+        (): ReconciliationStatus => "incomplete",
       );
-      if (status === "ok") {
+      try {
+        if (status === "ok") {
+          await this.dataSource.query(
+            `DELETE FROM "reconciliation_unresolved_periods" WHERE "from" = $1 AND "to" = $2`,
+            [period.from, period.to],
+          );
+          continue;
+        }
         await this.dataSource.query(
-          `DELETE FROM "reconciliation_unresolved_periods" WHERE "from" = $1 AND "to" = $2`,
+          `UPDATE "reconciliation_unresolved_periods" SET "checkedAt" = now() WHERE "from" = $1 AND "to" = $2`,
           [period.from, period.to],
         );
+      } catch {
         continue;
       }
-      await this.dataSource.query(
-        `UPDATE "reconciliation_unresolved_periods" SET "checkedAt" = now() WHERE "from" = $1 AND "to" = $2`,
-        [period.from, period.to],
-      );
       if (status === "mismatch") rechecked.set(keyOf(period), status);
     }
     const listed: { from: Date; to: Date }[] = await this.dataSource.query(
@@ -383,10 +391,19 @@ export class ReconciliationService implements OnModuleDestroy {
     return { unresolved, total };
   }
 
-  async reconcile(from: Date, to: Date): Promise<ReconciliationReport> {
+  reconcile(from: Date, to: Date): Promise<ReconciliationReport> {
     if (from.getTime() >= to.getTime()) {
       throw new BadRequestException("from must be earlier than to");
     }
+    const run = this.checking.then(() => this.check(from, to));
+    this.checking = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private async check(from: Date, to: Date): Promise<ReconciliationReport> {
     const [ledger, ledgerTotals, engine] = await Promise.all([
       this.ledgerIssues(from, to),
       this.ledgerTradeTotals(from, to),

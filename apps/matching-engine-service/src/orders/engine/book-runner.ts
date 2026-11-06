@@ -1,6 +1,6 @@
 import { Logger } from "@nestjs/common";
 import Redis from "ioredis";
-import { DataSource, In } from "typeorm";
+import { DataSource, EntityManager, In } from "typeorm";
 import { Order } from "../entities/order.entity";
 import { TradeRecord } from "../entities/trade-record.entity";
 import { InstrumentState } from "../entities/instrument-state.entity";
@@ -54,6 +54,7 @@ const ROWS_PER_INSERT = 1_000;
 const MARKER_TIMEOUT_MS = 1_000;
 const READ_TIMEOUT_MARGIN_MS = 2_000;
 const READ_FAILURES_BEFORE_STUCK = 3;
+const STOP_WAIT_MS = 15_000;
 
 function chunks<T>(rows: T[]): T[][] {
   const result: T[][] = [];
@@ -120,7 +121,19 @@ export class BookRunner {
     const reader = this.reader;
     this.reader = undefined;
     reader?.disconnect();
-    await this.loop;
+    let timer: NodeJS.Timeout | undefined;
+    const waited = await Promise.race([
+      this.loop?.then(() => true),
+      new Promise<false>((resolve) => {
+        timer = setTimeout(() => resolve(false), STOP_WAIT_MS);
+      }),
+    ]);
+    clearTimeout(timer);
+    if (waited === false) {
+      this.logger.warn(
+        `Stopped waiting for a batch after ${STOP_WAIT_MS} ms; the fence keeps it from committing once another owner takes over`,
+      );
+    }
     await closeRedis(reader);
   }
 
@@ -195,11 +208,17 @@ export class BookRunner {
     }
   }
 
-  private async currentFence(): Promise<bigint> {
-    const row = await this.options.dataSource
-      .getRepository(InstrumentState)
-      .findOneByOrFail({ instrument: this.instrument });
-    return BigInt(row.fence);
+  private async currentFence(
+    manager: EntityManager = this.options.dataSource.manager,
+  ): Promise<bigint | null> {
+    try {
+      const row = await manager
+        .getRepository(InstrumentState)
+        .findOneByOrFail({ instrument: this.instrument });
+      return BigInt(row.fence);
+    } catch {
+      return null;
+    }
   }
 
   private async load(): Promise<void> {
@@ -440,7 +459,7 @@ export class BookRunner {
         throw new FencedOutError(
           this.instrument,
           this.options.fence,
-          await this.currentFence(),
+          await this.currentFence(manager),
         );
       }
       for (const orders of chunks(result.orders)) {

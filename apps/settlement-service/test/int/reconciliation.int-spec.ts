@@ -7,6 +7,7 @@ import { AddressInfo } from "net";
 import { resolve } from "path";
 import request from "supertest";
 import { DataSource } from "typeorm";
+import { ReconciliationService } from "../../src/reconciliation/reconciliation.service";
 import {
   GROUP,
   TRADE_STREAM,
@@ -119,6 +120,7 @@ describe("reconciliation", () => {
   });
 
   afterEach(async () => {
+    jest.restoreAllMocks();
     await app.close();
   });
 
@@ -890,6 +892,58 @@ describe("reconciliation", () => {
       ),
     ).toBe(true);
     expect(checked).toBe(10);
+  });
+
+  it("keeps going when checking one unresolved period again fails, and checks the others first next time", async () => {
+    const day = 24 * 3_600_000;
+    const broken = new Date(Date.now() - 300 * day);
+    await corrupt(
+      `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2)`,
+      [broken, new Date(broken.getTime() + 3_600_000)],
+    );
+    const service = app.get(ReconciliationService);
+    const original = service.reconcile.bind(service);
+    jest
+      .spyOn(service, "reconcile")
+      .mockImplementation((from: Date, to: Date) =>
+        from.getTime() === broken.getTime()
+          ? Promise.reject(new Error("canceling statement due to statement timeout"))
+          : original(from, to),
+      );
+
+    const response = await reconcile({}).expect(200);
+    const [{ checkedAt }] = await corrupt(
+      `SELECT "checkedAt" FROM "reconciliation_unresolved_periods"`,
+    );
+
+    expect(response.body.unresolvedTotal).toBe(1);
+    expect(checkedAt).not.toBeNull();
+  });
+
+  it("runs one period check at a time, so parallel runs do not starve each other of connections", async () => {
+    const service = app.get(ReconciliationService) as unknown as {
+      check: (from: Date, to: Date) => Promise<unknown>;
+    };
+    const original = service.check.bind(service);
+    let running = 0;
+    let most = 0;
+    jest.spyOn(service, "check").mockImplementation(async (from: Date, to: Date) => {
+      running += 1;
+      most = Math.max(most, running);
+      try {
+        return await original(from, to);
+      } finally {
+        running -= 1;
+      }
+    });
+
+    await Promise.all([
+      reconcile().expect(200),
+      reconcile().expect(200),
+      reconcile({}).expect(200),
+    ]);
+
+    expect(most).toBe(1);
   });
 
   it("does not check past the oldest command a book has not applied yet", async () => {

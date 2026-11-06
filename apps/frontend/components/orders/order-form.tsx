@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -19,6 +19,7 @@ import {
   saveAttempt,
   sentAgain,
 } from '@/lib/client/order-attempt';
+import { isSending, onSendingChange, startSending } from '@/lib/client/sending';
 import { useSession } from '@/lib/client/session';
 import { cn } from '@/lib/utils';
 
@@ -58,6 +59,19 @@ export function OrderForm({ instrument }: { instrument: string }) {
     quantity && !(QUANTITY.test(quantity) && positive(quantity))
       ? 'Up to 8 decimals, above zero'
       : null;
+  const stillSending = useSyncExternalStore(
+    onSendingChange,
+    () => isSending(attempt?.key),
+    () => false,
+  );
+  const [waitedFor, setWaitedFor] = useState<string | null>(null);
+  useEffect(() => {
+    if (stillSending && attempt) setWaitedFor(attempt.key);
+    if (stillSending || waitedFor === null) return;
+    setWaitedFor(null);
+    const store = sessionStore();
+    if (owner && store) setAttempt(loadAttempt(store, owner, instrument));
+  }, [stillSending, attempt, waitedFor, owner, instrument]);
   const pending =
     !busy && attempt?.unconfirmed && attempt.draft.instrument === instrument ? attempt.draft : null;
   const ready = pending || (price && quantity && !priceError && !quantityError);
@@ -79,6 +93,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
       setAttempt((shown) => (shown?.key === current.key && shown.sends === current.sends ? next : shown));
     };
     setBusy(true);
+    const sent = startSending(current.key);
     try {
       await api('/api/orders', {
         method: 'POST',
@@ -92,6 +107,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
       settle(afterFailure(current, failure instanceof ApiError ? failure.status : 0, resent));
       toast.error((failure as Error).message);
     } finally {
+      sent();
       setBusy(false);
     }
   }
@@ -112,10 +128,17 @@ export function OrderForm({ instrument }: { instrument: string }) {
             <Alert>
               <AlertDescription className="space-y-2">
                 <p>
-                  {describe(pending)} may have been placed. Send it again to find out: it will not be
-                  placed twice. Discard it only after checking your open orders.
+                  {stillSending
+                    ? `${describe(pending)} is still on its way. Wait for its answer before doing anything else with it.`
+                    : `${describe(pending)} may have been placed. Send it again to find out: it will not be placed twice. Discard it only after checking your open orders.`}
                 </p>
-                <Button type="button" variant="outline" size="sm" onClick={() => setAttempt(null)}>
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={stillSending}
+                  onClick={() => setAttempt(null)}
+                >
                   Discard
                 </Button>
               </AlertDescription>
@@ -162,7 +185,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
           </div>
           <Button
             type="submit"
-            disabled={!ready || busy}
+            disabled={!ready || busy || stillSending}
             className={cn(
               'w-full',
               (pending?.side ?? side) === 'buy' ? 'bg-buy hover:bg-buy/90' : 'bg-sell hover:bg-sell/90',

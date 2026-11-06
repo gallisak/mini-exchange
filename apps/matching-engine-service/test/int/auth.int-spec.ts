@@ -488,4 +488,23 @@ describe('authentication sessions', () => {
     expect((await repository.find()).map((row) => row.id)).toEqual([kept.id]);
     await refresh(session.refreshToken).expect(200);
   });
+
+  it('gives up on a refresh that waits for the session lock instead of outlasting the gateway', async () => {
+    const session = await signUp();
+    const [{ userId }] = await app.get(DataSource).getRepository(RefreshSession).find();
+    const holder = app.get(DataSource).createQueryRunner();
+    await holder.connect();
+    await holder.query('SELECT pg_advisory_lock(hashtext($1))', [`refresh-sessions:${userId}`]);
+    try {
+      const started = Date.now();
+      const response = await refresh(session.refreshToken);
+
+      expect(response.status).toBeGreaterThanOrEqual(500);
+      expect(Date.now() - started).toBeLessThan(6_000);
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock(hashtext($1))', [`refresh-sessions:${userId}`]);
+      await holder.release();
+    }
+    await refresh(session.refreshToken).expect(200);
+  });
 });

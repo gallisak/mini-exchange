@@ -45,8 +45,13 @@ relay batch whose `EXEC` timed out may still reach the stream later and be publi
 settlement books each trade once, so that only costs a duplicate event. Postgres queries in both
 services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it, and
 reconciliation uses its own pool limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`, 10 minutes), lock waits
-after `DATABASE_LOCK_TIMEOUT_MS` (10 s), and a server that does not answer at all after five seconds
-more, so a stalled database shows up as a stuck book instead of a silent one. A command stream that
+after `DATABASE_LOCK_TIMEOUT_MS` (10 s, migrations included; new indexes are built concurrently),
+and dead connections are found by TCP keepalive rather than abandoned mid-query, so a stalled
+database shows up as a stuck book instead of a silent one and a commit is never left half-known.
+Refresh and sign-out wait at most 2 s for the user's session lock, well inside the gateway's 8 s.
+A book that is stopped waits 15 s for its batch, then lets the fence stop it. Reconciliation checks
+one period at a time, and a recheck that fails only moves that period to the back of the queue.
+`replay-check` runs without a statement limit. A command stream that
 fails three reads in a row also marks its book stuck, counted in `book_read_failures_total`. nginx
 passes a request on to the other engine only when the first one never received it, or for reads,
 so an order or cancel is never sent twice by the gateway; a cancel of an order that is already
@@ -74,9 +79,11 @@ session ends too. Each sign-in gets its own pair of cookie names (`mx_access_<id
 `mx_refresh_<id>`), and a session that turns out to be over is cleared only under the names the
 request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
 while a dead session is still forgotten at once; the page also ignores refusals of requests sent
-before the latest sign-in. Rotations it remembers to
-retry are capped at 10 000, and one the engine refused with 429 is not remembered at all. An order
-answer only changes the stored attempt of the same send. The frontend's API refuses any
+before the latest sign-in. The attempt id of a rotation is
+an HMAC of the cookies and the browser, so a retry always repeats it, whatever happened in between,
+without keeping anything in memory that other sessions could push out. An order
+answer only changes the stored attempt of the same send, and while an order is still on its way
+any other form for it can neither discard nor resend it. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;
 every page forbids being framed.
 

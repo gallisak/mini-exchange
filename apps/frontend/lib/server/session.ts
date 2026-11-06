@@ -1,11 +1,10 @@
-import { randomUUID } from 'crypto';
+import { createHmac, randomBytes, randomUUID } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 
 export const ACCESS_COOKIE = 'mx_access';
 export const REFRESH_COOKIE = 'mx_refresh';
 const REFRESH_MAX_AGE = 7 * 24 * 60 * 60;
 export const REFRESH_REUSE_WINDOW_MS = 5_000;
-export const ROTATION_RETRY_MS = 10 * 60_000;
 export const REMEMBERED_SESSIONS = 10_000;
 const INVALID_REMEMBERED_MS = 60_000;
 
@@ -23,7 +22,7 @@ export interface SessionTokens {
 export type Rotation =
   | { kind: 'rotated'; tokens: TokenPair }
   | { kind: 'invalid' }
-  | { kind: 'unavailable'; untouched?: boolean };
+  | { kind: 'unavailable' };
 
 export interface SessionUser {
   id: string;
@@ -103,7 +102,7 @@ export function isFresh(token: string | undefined): token is string {
 }
 
 const refreshes = new Map<string, Promise<Rotation>>();
-const attempts = new Map<string, string>();
+const fallbackKey = randomBytes(32);
 
 function remember<V>(map: Map<string, V>, key: string, value: V): void {
   map.delete(key);
@@ -114,6 +113,12 @@ function remember<V>(map: Map<string, V>, key: string, value: V): void {
 const sessionKey = ({ refreshToken, accessToken, client }: SessionTokens) =>
   JSON.stringify([refreshToken, accessToken ?? '', client ?? '']);
 
+export function rotationAttempt(tokens: SessionTokens): string {
+  const secret = process.env.FRONTEND_PROXY_KEY || fallbackKey;
+  const digest = createHmac('sha256', secret).update(`rotation:${sessionKey(tokens)}`).digest('hex');
+  return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
+}
+
 export function refreshOnce(
   tokens: SessionTokens,
   rotate: (token: string, attempt: string) => Promise<Rotation>,
@@ -121,21 +126,16 @@ export function refreshOnce(
   const key = sessionKey(tokens);
   const pending = refreshes.get(key);
   if (pending) return pending;
-  const attempt = attempts.get(key) ?? randomUUID();
-  remember(attempts, key, attempt);
-  const outcome = rotate(tokens.refreshToken, attempt).catch((): Rotation => ({ kind: 'unavailable' }));
+  const outcome = rotate(tokens.refreshToken, rotationAttempt(tokens)).catch(
+    (): Rotation => ({ kind: 'unavailable' }),
+  );
   remember(refreshes, key, outcome);
   void outcome.then((result) => {
-    const forget = (map: Map<string, unknown>, value: unknown) => {
-      if (map.get(key) === value) map.delete(key);
+    const forget = () => {
+      if (refreshes.get(key) === outcome) refreshes.delete(key);
     };
-    if (result.kind === 'invalid' || (result.kind === 'unavailable' && result.untouched)) forget(attempts, attempt);
-    else setTimeout(() => forget(attempts, attempt), ROTATION_RETRY_MS).unref?.();
-    if (result.kind === 'unavailable') forget(refreshes, outcome);
-    else {
-      const keep = result.kind === 'invalid' ? INVALID_REMEMBERED_MS : REFRESH_REUSE_WINDOW_MS;
-      setTimeout(() => forget(refreshes, outcome), keep).unref?.();
-    }
+    if (result.kind === 'unavailable') forget();
+    else setTimeout(forget, result.kind === 'invalid' ? INVALID_REMEMBERED_MS : REFRESH_REUSE_WINDOW_MS).unref?.();
   });
   return outcome;
 }

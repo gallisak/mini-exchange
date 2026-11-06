@@ -20,22 +20,21 @@ export const entities = [
   OutboxMessage,
 ];
 
-function databaseTimeouts(): Record<string, number> {
-  const statement = intEnv('DATABASE_STATEMENT_TIMEOUT_MS', 60_000, 0);
+function databaseTimeouts(statement: number): Record<string, number | boolean> {
   return {
     connectionTimeoutMillis: intEnv('DATABASE_CONNECT_TIMEOUT_MS', 10_000),
+    keepAlive: true,
+    keepAliveInitialDelayMillis: 10_000,
+    lock_timeout: intEnv('DATABASE_LOCK_TIMEOUT_MS', 10_000, 0),
     ...(statement > 0
-      ? {
-          statement_timeout: statement,
-          query_timeout: statement + 5_000,
-          lock_timeout: intEnv('DATABASE_LOCK_TIMEOUT_MS', 10_000),
-          idle_in_transaction_session_timeout: statement,
-        }
+      ? { statement_timeout: statement, idle_in_transaction_session_timeout: statement }
       : {}),
   };
 }
 
-export function buildDataSourceOptions(): DataSourceOptions {
+export function buildDataSourceOptions(
+  statementTimeoutMs = intEnv('DATABASE_STATEMENT_TIMEOUT_MS', 60_000, 0),
+): DataSourceOptions {
   return {
     type: 'postgres',
     host: process.env.DATABASE_HOST,
@@ -45,8 +44,9 @@ export function buildDataSourceOptions(): DataSourceOptions {
     database: process.env.DATABASE_NAME,
     entities,
     migrations: [join(__dirname, 'migrations', '*.{ts,js}')],
+    migrationsTransactionMode: 'each',
     synchronize: false,
-    extra: databaseTimeouts(),
+    extra: databaseTimeouts(statementTimeoutMs),
   };
 }
 

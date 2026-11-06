@@ -132,7 +132,7 @@ export async function replayInstrument(
 }
 
 async function main(): Promise<number> {
-  const dataSource = await new DataSource(buildDataSourceOptions()).initialize();
+  const dataSource = await new DataSource(buildDataSourceOptions(0)).initialize();
   const redis = new Redis({
     host: process.env.REDIS_HOST ?? 'localhost',
     port: intEnv('REDIS_PORT', 6379),

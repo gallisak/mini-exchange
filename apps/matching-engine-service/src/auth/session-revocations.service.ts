@@ -30,7 +30,8 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
   private readonly retryMs = intEnv('SESSION_REVOCATION_RETRY_MS', 2_000);
   private timer?: NodeJS.Timeout;
   private retrying?: Promise<void>;
-  private lastCleanup = 0;
+  private cleanupTimer?: NodeJS.Timeout;
+  private cleaning?: Promise<void>;
 
   constructor(
     private readonly redis: RedisService,
@@ -42,11 +43,18 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
       this.retrying ??= this.announcePending().finally(() => (this.retrying = undefined));
     }, this.retryMs);
     this.timer.unref?.();
+    this.cleanupTimer = setInterval(() => {
+      this.cleaning ??= this.cleanUp()
+        .catch((error: Error) => this.logger.warn(`Could not clean up ended sessions: ${error.message}`))
+        .finally(() => (this.cleaning = undefined));
+    }, CLEANUP_EVERY_MS);
+    this.cleanupTimer.unref?.();
   }
 
   async onModuleDestroy(): Promise<void> {
     clearInterval(this.timer);
-    await this.retrying;
+    clearInterval(this.cleanupTimer);
+    await Promise.all([this.retrying, this.cleaning]);
   }
 
   async record(manager: EntityManager, familyIds: string[]): Promise<void> {
@@ -90,10 +98,6 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
         [REVOCATION_TTL_MS / 1000],
       );
       await this.send(rows.map((row) => row.familyId));
-      if (Date.now() - this.lastCleanup >= CLEANUP_EVERY_MS) {
-        this.lastCleanup = Date.now();
-        await this.cleanUp();
-      }
     } catch (error) {
       this.logger.warn(`Could not announce ended sessions, retrying: ${(error as Error).message}`);
     }
