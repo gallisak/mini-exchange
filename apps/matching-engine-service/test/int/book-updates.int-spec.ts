@@ -2,7 +2,7 @@ import { randomUUID } from 'crypto';
 import Redis from 'ioredis';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/data-source';
-import { BookRunner, BookRunnerOptions } from '../../src/orders/engine/book-runner';
+import { BookRunner, BookRunnerOptions, stuckKey } from '../../src/orders/engine/book-runner';
 import { commandStreamKey, encodeCommand } from '../../src/orders/engine/order-command';
 import { InstrumentState } from '../../src/orders/entities/instrument-state.entity';
 import { Order, OrderSide } from '../../src/orders/entities/order.entity';
@@ -296,6 +296,12 @@ describe('a running book', () => {
       }
       return connection;
     });
+    const set = redis.client.set.bind(redis.client) as (...args: unknown[]) => Promise<unknown>;
+    const stuckNotes: unknown[] = [];
+    jest.spyOn(redis.client, 'set').mockImplementation(((...args: unknown[]) => {
+      if (String(args[0]) === stuckKey('ABC')) stuckNotes.push(args[1]);
+      return set(...args);
+    }) as never);
     runner = new BookRunner('ABC', options({ publish: async () => undefined }));
     await runner.start();
 
@@ -308,5 +314,6 @@ describe('a running book', () => {
         ).toBe('1'),
       10_000,
     );
+    expect(stuckNotes).toEqual([]);
   });
 });

@@ -6,6 +6,7 @@ import { tradeStreamKey } from "../consumer/trade-event";
 type StreamEntry = [id: string, fields: string[]];
 
 const REDIS_TIMEOUT_MS = 2_000;
+const SCAN_PAGE = 1_000;
 
 async function within<T>(command: Promise<T>): Promise<T> {
   let timer: NodeJS.Timeout | undefined;
@@ -72,22 +73,25 @@ export class SettlementBacklog implements OnModuleDestroy {
       })
       .find((info) => info.name === this.group);
     const lastDelivered = group ? String(group["last-delivered-id"]) : "0-0";
-    const [undelivered] = (await within(
-      this.redis.xrange(stream, `(${lastDelivered}`, "+", "COUNT", 1),
-    )) as StreamEntry[];
-    let pending: StreamEntry | undefined;
+    let start = `(${lastDelivered}`;
     if (group) {
       const [count, smallest] = (await within(
         this.redis.xpending(stream, this.group),
       )) as [number, string | null];
-      if (count > 0 && smallest)
-        [pending] = (await within(
-          this.redis.xrange(stream, smallest, smallest),
-        )) as StreamEntry[];
+      if (count > 0 && smallest) start = smallest;
     }
-    const times = [executedAtOf(undelivered), executedAtOf(pending)].filter(
-      (time): time is number => time !== null,
-    );
-    return times.length > 0 ? Math.min(...times) : null;
+    let oldest: number | null = null;
+    for (;;) {
+      const entries = (await within(
+        this.redis.xrange(stream, start, "+", "COUNT", SCAN_PAGE),
+      )) as StreamEntry[];
+      for (const entry of entries) {
+        const executedAt = executedAtOf(entry);
+        if (executedAt !== null && (oldest === null || executedAt < oldest))
+          oldest = executedAt;
+      }
+      if (entries.length < SCAN_PAGE) return oldest;
+      start = `(${entries[entries.length - 1][0]}`;
+    }
   }
 }

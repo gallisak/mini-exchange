@@ -18,8 +18,10 @@ import { uuidV5 } from '../common/uuid';
 import { currentTraceId } from '../observability/trace-context';
 import { ordersAccepted } from '../observability/metrics';
 import { intEnv } from '../common/env';
+import { withTimeout } from '../common/with-timeout';
 
 const IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60;
+const IDEMPOTENCY_TIMEOUT_MS = 2_000;
 const ACTIVE_STATUSES: OrderStatus[] = ['open', 'partially_filled'];
 
 const IDEMPOTENCY_MISMATCH = 'Idempotency-Key was already used for a different order';
@@ -74,15 +76,11 @@ export class OrdersService {
       throw new UnprocessableEntityException(IDEMPOTENCY_MISMATCH);
     }
     const recordKey = `orders:idempotency:${ownerId}:${idempotencyKey}`;
-    const claimed = await this.redis.client.set(
-      recordKey,
-      fingerprint,
-      'EX',
-      IDEMPOTENCY_TTL_SECONDS,
-      'NX',
+    const claimed = await this.queue(
+      this.redis.client.set(recordKey, fingerprint, 'EX', IDEMPOTENCY_TTL_SECONDS, 'NX'),
     );
     if (claimed !== 'OK') {
-      const previous = await this.redis.client.get(recordKey);
+      const previous = await this.queue(this.redis.client.get(recordKey));
       if (previous !== null && previous !== fingerprint) {
         throw new UnprocessableEntityException(IDEMPOTENCY_MISMATCH);
       }
@@ -117,6 +115,12 @@ export class OrdersService {
       traceId: currentTraceId(),
     });
     return { orderId, status: 'cancel_requested' };
+  }
+
+  private queue<T>(command: Promise<T>): Promise<T> {
+    return withTimeout(command, IDEMPOTENCY_TIMEOUT_MS, 'Redis').catch(() => {
+      throw new ServiceUnavailableException('The order queue did not answer, send the order again');
+    });
   }
 
   private assertQueueAvailable(): void {

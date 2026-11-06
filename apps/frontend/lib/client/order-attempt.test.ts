@@ -79,15 +79,14 @@ describe('Idempotency-Key of an order attempt', () => {
     expect(loadAttempt(broken, 'alice', 'ABC')).toBeNull();
   });
 
-  it('settles a first send on any refusal, but a resent order only on an answer about the order itself', () => {
+  it('settles a first send on any refusal, but never a resent order, whose first send may be on the book', () => {
     const sent = unconfirmed(attemptFor(null, draft, newKey));
 
     expect(afterFailure(sent, 429, false).unconfirmed).toBe(false);
     expect(afterFailure(sent, 401, false).unconfirmed).toBe(false);
+    expect(afterFailure(sent, 400, false).unconfirmed).toBe(false);
     expect(afterFailure(sent, 503, false).unconfirmed).toBe(true);
-    expect(afterFailure(sent, 400, true).unconfirmed).toBe(false);
-    expect(afterFailure(sent, 422, true).unconfirmed).toBe(false);
-    for (const status of [0, 401, 403, 409, 429, 503]) {
+    for (const status of [0, 400, 401, 403, 409, 422, 429, 503]) {
       expect(afterFailure(sent, status, true).unconfirmed, String(status)).toBe(true);
     }
   });
@@ -105,9 +104,25 @@ describe('Idempotency-Key of an order attempt', () => {
 
     expect(replaceAttempt(store, 'alice', 'ABC', first.key, null)).toBe(false);
     expect(loadAttempt(store, 'alice', 'ABC')?.key).toBe('k2');
-    saveAttempt(store, 'alice', 'ABC', null);
+    saveAttempt(store, 'alice', 'ABC', first);
     expect(replaceAttempt(store, 'alice', 'ABC', first.key, afterFailure(first, 503, true))).toBe(true);
     expect(replaceAttempt(store, 'alice', 'ABC', first.key, null)).toBe(true);
+    expect(loadAttempt(store, 'alice', 'ABC')).toBeNull();
+  });
+
+  it('does not bring back an attempt that was discarded or accepted while its answer was on the way', () => {
+    const storage = new Map<string, string>();
+    const store = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+      removeItem: (key: string) => void storage.delete(key),
+    };
+    const sent = unconfirmed(attemptFor(null, draft, () => 'k1'));
+    saveAttempt(store, 'alice', 'ABC', sent);
+
+    saveAttempt(store, 'alice', 'ABC', null);
+
+    expect(replaceAttempt(store, 'alice', 'ABC', sent.key, afterFailure(sent, 503, true))).toBe(false);
     expect(loadAttempt(store, 'alice', 'ABC')).toBeNull();
   });
 

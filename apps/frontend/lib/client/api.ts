@@ -19,18 +19,27 @@ function messageOf(body: unknown, status: number): string {
   return `Request failed (${status})`;
 }
 
-export async function api<T>(path: string, init: RequestInit = {}): Promise<T> {
+export async function api<T>(
+  path: string,
+  { timeoutMs, ...init }: RequestInit & { timeoutMs?: number } = {},
+): Promise<T> {
+  const signal = timeoutMs === undefined ? init.signal : AbortSignal.timeout(timeoutMs);
   let response: Response;
+  let text: string;
   try {
     response = await fetch(path, {
       ...init,
+      signal,
       headers: { 'content-type': 'application/json', ...(init.headers ?? {}) },
       cache: 'no-store',
     });
+    text = await response.text();
   } catch {
+    if (signal?.aborted && timeoutMs !== undefined) {
+      throw new ApiError(408, `The exchange did not answer within ${Math.round(timeoutMs / 1000)} s`);
+    }
     throw new ApiError(0, 'Cannot reach the exchange, check your connection');
   }
-  const text = await response.text();
   let body: unknown = null;
   try {
     body = text ? JSON.parse(text) : null;

@@ -1,3 +1,4 @@
+import { ServiceUnavailableException } from '@nestjs/common';
 import { Repository } from 'typeorm';
 import { OrdersService } from '../src/orders/orders.service';
 import { Order } from '../src/orders/entities/order.entity';
@@ -75,4 +76,25 @@ describe('submit order response', () => {
     expect(retry.orderId).toBe(first.orderId);
     expect(otherUser.orderId).not.toBe(first.orderId);
   });
+
+  it('answers 503 instead of waiting forever when Redis never answers the idempotency check', async () => {
+    const never = () => new Promise(() => undefined);
+    const claimHangs = new OrdersService(
+      { findOne: async () => null } as unknown as Repository<Order>,
+      { append: async () => '1-0' } as unknown as CommandStreamService,
+      { isReady: () => true, client: { set: never, get: never } } as unknown as RedisService,
+    );
+    const lookupHangs = new OrdersService(
+      { findOne: async () => null } as unknown as Repository<Order>,
+      { append: async () => '1-0' } as unknown as CommandStreamService,
+      { isReady: () => true, client: { set: async () => null, get: never } } as unknown as RedisService,
+    );
+
+    await expect(claimHangs.submitOrder(order, 'user-a', 'key-1')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+    await expect(lookupHangs.submitOrder(order, 'user-a', 'key-1')).rejects.toBeInstanceOf(
+      ServiceUnavailableException,
+    );
+  }, 10_000);
 });

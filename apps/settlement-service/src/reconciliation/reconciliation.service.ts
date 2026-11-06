@@ -71,6 +71,7 @@ export interface ReconciliationReport {
   instruments: InstrumentReconciliation[];
   ledger: LedgerIssues;
   engineError?: string;
+  endedEarly?: string;
   unresolved?: {
     from: string;
     to: string;
@@ -78,6 +79,12 @@ export interface ReconciliationReport {
     rechecked: boolean;
   }[];
   unresolvedTotal?: number;
+}
+
+interface Progress {
+  known: EngineProgress | null;
+  waiting?: string;
+  error?: string;
 }
 
 const units = (value: string | null | undefined) =>
@@ -98,6 +105,7 @@ const EMPTY_LEDGER_TOTALS: LedgerTradeTotals = {
 export class ReconciliationService {
   private readonly lagMs = intEnv("RECONCILIATION_LAG_MS", 60_000, 0);
   private readonly stepMs = intEnv("RECONCILIATION_STEP_HOURS", 24) * 3_600_000;
+  private running: Promise<ReconciliationReport> | null = null;
 
   constructor(
     private readonly dataSource: DataSource,
@@ -106,14 +114,35 @@ export class ReconciliationService {
   ) {}
 
   async reconcileUntil(from: Date, to?: Date): Promise<ReconciliationReport> {
+    if (to && from.getTime() >= to.getTime()) {
+      throw new BadRequestException("from must be earlier than to");
+    }
+    const latest = Date.now() - this.lagMs;
     const progress = await this.progress();
-    const report = await this.reconcile(from, this.endOf(to, progress.known));
-    return progress.error ? this.incomplete(report, progress.error) : report;
+    const { end, endedEarly } = this.endOf(latest, to, progress);
+    if (from.getTime() >= end) {
+      return this.nothingNew(
+        from,
+        progress.error ?? endedEarly ?? "it is later than the last minute",
+      );
+    }
+    const report = await this.reconcile(from, new Date(end));
+    const checked = endedEarly ? { ...report, endedEarly } : report;
+    return progress.error ? this.incomplete(checked, progress.error) : checked;
   }
 
-  async reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
+  reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
+    if (to) return this.runSinceCheckpoint(to);
+    this.running ??= this.runSinceCheckpoint().finally(() => {
+      this.running = null;
+    });
+    return this.running;
+  }
+
+  private async runSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
+    const latest = Date.now() - this.lagMs;
     const progress = await this.progress();
-    const end = this.endOf(to, progress.known).getTime();
+    const { end, endedEarly } = this.endOf(latest, to, progress);
     const checkpoint = await this.dataSource
       .getRepository(ReconciliationCheckpoint)
       .findOneBy({ name: CHECKPOINT });
@@ -122,9 +151,9 @@ export class ReconciliationService {
       reconciledUntil !== null && reconciledUntil >= end
         ? this.nothingNew(
             new Date(reconciledUntil),
-            progress.known?.pendingSince ?? null,
+            progress.error ?? endedEarly ?? null,
           )
-        : await this.reconcileNext(reconciledUntil, end, progress);
+        : await this.reconcileNext(reconciledUntil, end, progress, endedEarly);
     const { unresolved, total } = await this.recheckUnresolved(report.period);
     const status = [
       report.status,
@@ -138,7 +167,8 @@ export class ReconciliationService {
   private async reconcileNext(
     reconciledUntil: number | null,
     end: number,
-    progress: { known: EngineProgress | null; error?: string },
+    progress: Progress,
+    endedEarly: string | undefined,
   ): Promise<ReconciliationReport> {
     let from =
       reconciledUntil ??
@@ -149,14 +179,18 @@ export class ReconciliationService {
       to: new Date(Math.min(end, from + this.stepMs)),
     };
     const checked = await this.reconcile(period.from, period.to);
+    const shortened =
+      endedEarly && period.to.getTime() === end
+        ? { ...checked, endedEarly }
+        : checked;
     const report = progress.error
-      ? this.incomplete(checked, progress.error)
-      : checked;
+      ? this.incomplete(shortened, progress.error)
+      : shortened;
     if (progress.error || report.status === "incomplete") return report;
     await this.dataSource.transaction(async (manager) => {
       if (report.status === "mismatch") {
         await manager.query(
-          `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          `INSERT INTO "reconciliation_unresolved_periods" ("from", "to", "checkedAt") VALUES ($1, $2, now()) ON CONFLICT DO NOTHING`,
           [period.from, period.to],
         );
       }
@@ -170,36 +204,36 @@ export class ReconciliationService {
     return report;
   }
 
-  private async progress(): Promise<{
-    known: EngineProgress | null;
-    error?: string;
-  }> {
-    const [engine, backlog] = await Promise.all([
-      this.engine.progress().then(
-        (known) => ({ known }),
-        (error: Error) => ({
-          error: `Could not ask the engine which commands it has not applied: ${error.message}`,
-        }),
-      ),
-      this.backlog.oldestUnsettled().then(
-        (oldest) => ({ oldest }),
-        (error: Error) => ({
-          error: `Could not read which trades settlement has not settled yet: ${error.message}`,
-        }),
-      ),
-    ]);
-    if ("error" in engine) return { known: null, error: engine.error };
-    if ("error" in backlog)
-      return { known: engine.known, error: backlog.error };
-    const pending = [engine.known.pendingSince, backlog.oldest]
-      .filter((date): date is Date => date !== null)
-      .map((date) => date.getTime());
+  private async progress(): Promise<Progress> {
+    let engine: EngineProgress;
+    try {
+      engine = await this.engine.progress();
+    } catch (error) {
+      return {
+        known: null,
+        error: `Could not ask the engine which commands it has not applied: ${(error as Error).message}`,
+      };
+    }
+    let oldest: Date | null;
+    try {
+      oldest = await this.backlog.oldestUnsettled();
+    } catch (error) {
+      return {
+        known: engine,
+        error: `Could not read which trades settlement has not settled yet: ${(error as Error).message}`,
+      };
+    }
+    const engineFirst =
+      engine.pendingSince !== null &&
+      (oldest === null || engine.pendingSince.getTime() <= oldest.getTime());
+    const pendingSince = engineFirst ? engine.pendingSince : oldest;
     return {
-      known: {
-        firstTradeAt: engine.known.firstTradeAt,
-        pendingSince:
-          pending.length > 0 ? new Date(Math.min(...pending)) : null,
-      },
+      known: { firstTradeAt: engine.firstTradeAt, pendingSince },
+      waiting: !pendingSince
+        ? undefined
+        : engineFirst
+          ? `the engine has not applied or published everything queued since ${pendingSince.toISOString()}`
+          : `settlement has not settled a trade executed at ${pendingSince.toISOString()} yet`,
     };
   }
 
@@ -214,14 +248,11 @@ export class ReconciliationService {
     };
   }
 
-  private nothingNew(
-    reconciledUntil: Date,
-    pendingSince: Date | null,
-  ): ReconciliationReport {
-    const at = reconciledUntil.toISOString();
+  private nothingNew(at: Date, reason: string | null): ReconciliationReport {
+    const iso = at.toISOString();
     return {
       status: "incomplete",
-      period: { from: at, to: at },
+      period: { from: iso, to: iso },
       instruments: [],
       ledger: {
         unbalancedTransactions: [],
@@ -230,16 +261,28 @@ export class ReconciliationService {
         assetsNotBalanced: [],
         tradesOffEntries: [],
       },
-      engineError: pendingSince
-        ? `Nothing new to check: a book has not applied commands queued since ${pendingSince.toISOString()}`
-        : `Nothing new to check after ${at}`,
+      engineError: reason
+        ? `Nothing new to check from ${iso}: ${reason}`
+        : `Nothing new to check after ${iso}`,
     };
   }
 
-  private endOf(to: Date | undefined, progress: EngineProgress | null): Date {
-    const latest = Date.now() - this.lagMs;
-    const pending = progress?.pendingSince?.getTime() ?? Infinity;
-    return new Date(Math.min(to?.getTime() ?? latest, latest, pending));
+  private endOf(
+    latest: number,
+    to: Date | undefined,
+    progress: Progress,
+  ): { end: number; endedEarly?: string } {
+    const asked = to?.getTime() ?? latest;
+    const pending = progress.known?.pendingSince?.getTime() ?? Infinity;
+    const end = Math.min(asked, latest, pending);
+    if (end >= asked) return { end };
+    return {
+      end,
+      endedEarly:
+        end === pending && progress.waiting
+          ? progress.waiting
+          : `trades of the last ${Math.round(this.lagMs / 1000)} s may still be settling`,
+    };
   }
 
   private async firstActivity(
@@ -267,22 +310,23 @@ export class ReconciliationService {
     total: number;
   }> {
     const exceptCurrent = `NOT ("from" = $1::timestamptz AND "to" = $2::timestamptz)`;
-    const periods: { from: Date; to: Date }[] = await this.dataSource.query(
+    const keyOf = (period: { from: Date; to: Date }) =>
+      `${new Date(period.from).toISOString()}/${new Date(period.to).toISOString()}`;
+    const due: { from: Date; to: Date }[] = await this.dataSource.query(
       `SELECT "from", "to" FROM "reconciliation_unresolved_periods"
         WHERE ${exceptCurrent}
-        ORDER BY "from"
-        LIMIT ${UNRESOLVED_LISTED}`,
+        ORDER BY "checkedAt" ASC NULLS FIRST, "from"
+        LIMIT ${RECHECK_LIMIT}`,
       [current.from, current.to],
     );
     const started = Date.now();
-    const unresolved: NonNullable<ReconciliationReport["unresolved"]> = [];
-    for (const [index, period] of periods.entries()) {
-      const due =
-        index < RECHECK_LIMIT && Date.now() - started < RECHECK_BUDGET_MS;
-      const status = due
-        ? (await this.reconcile(new Date(period.from), new Date(period.to)))
-            .status
-        : "mismatch";
+    const rechecked = new Map<string, ReconciliationStatus>();
+    for (const period of due) {
+      if (Date.now() - started >= RECHECK_BUDGET_MS) break;
+      const { status } = await this.reconcile(
+        new Date(period.from),
+        new Date(period.to),
+      );
       if (status === "ok") {
         await this.dataSource.query(
           `DELETE FROM "reconciliation_unresolved_periods" WHERE "from" = $1 AND "to" = $2`,
@@ -290,13 +334,36 @@ export class ReconciliationService {
         );
         continue;
       }
-      unresolved.push({
+      if (status === "mismatch") {
+        await this.dataSource.query(
+          `UPDATE "reconciliation_unresolved_periods" SET "checkedAt" = now() WHERE "from" = $1 AND "to" = $2`,
+          [period.from, period.to],
+        );
+      }
+      rechecked.set(keyOf(period), status);
+    }
+    const listed: { from: Date; to: Date }[] = await this.dataSource.query(
+      `SELECT "from", "to" FROM "reconciliation_unresolved_periods"
+        WHERE ${exceptCurrent}
+        ORDER BY "from"
+        LIMIT ${UNRESOLVED_LISTED}`,
+      [current.from, current.to],
+    );
+    const shown = new Map<string, { from: Date; to: Date }>();
+    for (const period of [
+      ...due.filter((row) => rechecked.has(keyOf(row))),
+      ...listed,
+    ])
+      shown.set(keyOf(period), period);
+    const unresolved = [...shown.entries()]
+      .slice(0, UNRESOLVED_LISTED)
+      .map(([key, period]) => ({
         from: new Date(period.from).toISOString(),
         to: new Date(period.to).toISOString(),
-        status,
-        rechecked: due,
-      });
-    }
+        status: rechecked.get(key) ?? ("mismatch" as ReconciliationStatus),
+        rechecked: rechecked.has(key),
+      }))
+      .sort((x, y) => x.from.localeCompare(y.from));
     const [{ total }]: { total: number }[] = await this.dataSource.query(
       `SELECT COUNT(*)::int AS "total" FROM "reconciliation_unresolved_periods" WHERE ${exceptCurrent}`,
       [current.from, current.to],

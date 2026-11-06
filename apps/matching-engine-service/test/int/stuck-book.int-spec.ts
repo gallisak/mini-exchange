@@ -124,4 +124,22 @@ describe('a book whose batch keeps failing', () => {
 
     await eventually(async () => expect(await dataSource.getRepository(TradeRecord).count()).toBe(1), 10_000);
   });
+
+  it('clears a note that it is stuck once it has nothing left to apply, even when no new command arrives', async () => {
+    await raw.set(stuckKey('ABC'), JSON.stringify({ since: new Date().toISOString(), failures: 3, error: 'x' }));
+    runner = new BookRunner('ABC', {
+      dataSource,
+      redis,
+      orderBook: new OrderBookService(),
+      batchSize: 100,
+      blockMs: 200,
+      retryDelayMs: 100,
+      fence: 1n,
+      leaseValid: () => true,
+      onFenced: () => undefined,
+    });
+    await runner.start();
+
+    await eventually(async () => expect(await raw.get(stuckKey('ABC'))).toBeNull());
+  });
 });

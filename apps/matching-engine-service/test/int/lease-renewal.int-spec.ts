@@ -28,7 +28,9 @@ describe('lease renewal while Redis does not answer', () => {
     jest.spyOn(client, 'eval').mockImplementation(((...args: unknown[]) =>
       hanging && String(args[0]).includes('PEXPIRE') ? new Promise(() => undefined) : evaluate(...args)) as never);
 
-    await eventually(async () => expect(ownership.ownedInstruments()).not.toContain('ABC'), 10_000);
+    const demoted = jest.spyOn(ownership as unknown as { demote: (instrument: string) => void }, 'demote');
+
+    await eventually(async () => expect(demoted).toHaveBeenCalledWith('ABC', expect.any(String)), 10_000);
     hanging = false;
 
     await eventually(async () => expect(ownership.ownedInstruments()).toContain('ABC'), 10_000);

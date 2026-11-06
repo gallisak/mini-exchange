@@ -56,6 +56,7 @@ export class OrdersGateway
   private readonly logger = new Logger(OrdersGateway.name);
   private subscriber?: Redis;
   private subscribeRetry?: NodeJS.Timeout;
+  private sessionCheckRetry?: NodeJS.Timeout;
   private closing = false;
   private readonly expiries = new Map<string, NodeJS.Timeout>();
   private readonly snapshots = new Map<string, { windowStart: number; count: number }>();
@@ -132,6 +133,7 @@ export class OrdersGateway
   async onModuleDestroy(): Promise<void> {
     this.closing = true;
     clearTimeout(this.subscribeRetry);
+    clearTimeout(this.sessionCheckRetry);
     this.expiries.forEach((timer) => clearTimeout(timer));
     this.expiries.clear();
     await closeRedis(this.subscriber);
@@ -246,11 +248,19 @@ export class OrdersGateway
   }
 
   private async closeEndedSessions(): Promise<void> {
-    const sockets = await this.server.local.fetchSockets();
-    const sessions = [...new Set(sockets.map((socket) => socket.data.sessionId as string | undefined))];
-    for (const sessionId of sessions) {
-      if (!sessionId || !(await this.revocations.isRevoked(sessionId).catch(() => true))) continue;
-      this.server.local.in(sessionRoom(sessionId)).disconnectSockets(true);
+    clearTimeout(this.sessionCheckRetry);
+    try {
+      const sockets = await this.server.local.fetchSockets();
+      const sessions = new Set(sockets.map((socket) => socket.data.sessionId as string | undefined));
+      for (const sessionId of sessions) {
+        if (!sessionId || !(await this.revocations.isRevoked(sessionId))) continue;
+        this.server.local.in(sessionRoom(sessionId)).disconnectSockets(true);
+      }
+    } catch (error) {
+      this.logger.warn(`Could not check which sessions ended, checking again: ${(error as Error).message}`);
+      if (!this.closing) {
+        this.sessionCheckRetry = setTimeout(() => void this.closeEndedSessions(), SUBSCRIBE_RETRY_MS);
+      }
     }
   }
 

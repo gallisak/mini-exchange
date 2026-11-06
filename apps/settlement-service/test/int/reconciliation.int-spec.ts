@@ -8,10 +8,13 @@ import { resolve } from "path";
 import request from "supertest";
 import { DataSource } from "typeorm";
 import {
+  GROUP,
+  TRADE_STREAM,
   TradeBody,
   accessToken,
   createApp,
   publishTrade,
+  range,
   redisClient,
   resetState,
   settle,
@@ -52,10 +55,11 @@ describe("reconciliation", () => {
   let firstTradeAt: string | null;
   let pendingSince: string | null;
   let progressDown: boolean;
+  let beforeProgress: (() => Promise<void>) | null;
   let engineUrl: string;
 
   beforeAll(async () => {
-    engine = createServer((req, res) => {
+    engine = createServer(async (req, res) => {
       const url = new URL(req.url ?? "/", "http://engine");
       if (url.pathname.startsWith("/auth/admins/")) {
         res.writeHead(200, { "content-type": "application/json" });
@@ -65,6 +69,7 @@ describe("reconciliation", () => {
       engineQueries.push(url.searchParams);
       const progressProbe =
         url.searchParams.get("from") === new Date(0).toISOString();
+      if (progressProbe && beforeProgress) await beforeProgress();
       if (
         engineRows === "down" ||
         url.pathname !== "/trades/summary" ||
@@ -109,6 +114,7 @@ describe("reconciliation", () => {
     firstTradeAt = null;
     pendingSince = null;
     progressDown = false;
+    beforeProgress = null;
     app = await createApp();
   });
 
@@ -121,6 +127,25 @@ describe("reconciliation", () => {
       .get("/admin/reconciliation")
       .set("authorization", `Bearer ${accessToken(randomUUID(), "admin")}`)
       .query(query);
+
+  async function restartWith(env: Record<string, string>): Promise<void> {
+    await app.close();
+    const saved = Object.fromEntries(
+      Object.keys(env).map((name) => [name, process.env[name]]),
+    );
+    Object.assign(process.env, env);
+    try {
+      app = await createApp();
+    } finally {
+      for (const [name, value] of Object.entries(saved)) {
+        if (value === undefined) delete process.env[name];
+        else process.env[name] = value;
+      }
+    }
+  }
+
+  const pause = (ms: number) =>
+    new Promise<void>((resolve) => setTimeout(resolve, ms));
 
   const corrupt = (sql: string, parameters: unknown[] = []) =>
     app.get(DataSource).query(sql, parameters);
@@ -591,6 +616,183 @@ describe("reconciliation", () => {
     });
   });
 
+  it("rechecks the periods it checked longest ago, so newer ones that match again are dropped while older ones never do", async () => {
+    const cutoff = new Date(Date.now() - 100 * 24 * 3_600_000);
+    engineRows = (from) =>
+      from < cutoff
+        ? [
+            {
+              instrument: "ABC",
+              count: 1,
+              quantity: "1.00000000",
+              notional: "10.0000000000",
+            },
+          ]
+        : [];
+    const day = 24 * 3_600_000;
+    const starts = [
+      ...range(10).map((n) => cutoff.getTime() - (n + 2) * day),
+      cutoff.getTime() + day,
+      cutoff.getTime() + 2 * day,
+    ];
+    for (const start of starts) {
+      await corrupt(
+        `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2)`,
+        [new Date(start), new Date(start + 3_600_000)],
+      );
+    }
+
+    const first = await reconcile({}).expect(200);
+    const second = await reconcile({}).expect(200);
+
+    expect(first.body.unresolvedTotal).toBe(12);
+    expect(second.body.unresolvedTotal).toBe(10);
+    expect(
+      second.body.unresolved.every(
+        (row: { from: string }) => new Date(row.from) < cutoff,
+      ),
+    ).toBe(true);
+  });
+
+  it("reads what settlement has not settled only after the engine answered, so a trade published meanwhile is not missed", async () => {
+    await restartWith({ CONSUMER_ENABLED: "false" });
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const executedAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const redis = redisClient();
+    beforeProgress = async () => {
+      await pause(300);
+      await publishTrade(redis, trade({ executedAt }));
+    };
+
+    const response = await reconcile({}).expect(200);
+    await redis.quit();
+
+    expect(response.body.period).toEqual({
+      from: firstTradeAt,
+      to: executedAt,
+    });
+  });
+
+  it("ends a period where it started asking what is still on the way, not where the answers came back", async () => {
+    await restartWith({ RECONCILIATION_LAG_MS: "0" });
+    beforeProgress = () => pause(400);
+    const from = new Date(Date.now() - 3_600_000).toISOString();
+
+    const asked = Date.now();
+    const response = await reconcile({ from }).expect(200);
+
+    expect(new Date(response.body.period.to).getTime()).toBeLessThan(
+      asked + 200,
+    );
+  });
+
+  it("runs one default check at a time, however many pages ask for it", async () => {
+    beforeProgress = () => pause(200);
+
+    const [first, second] = await Promise.all([
+      reconcile({}).expect(200),
+      reconcile({}).expect(200),
+    ]);
+
+    expect(second.body).toEqual(first.body);
+    expect(
+      engineQueries.filter(
+        (query) => query.get("from") === new Date(0).toISOString(),
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("says it is settlement that is behind when there is nothing new to check because of it", async () => {
+    await restartWith({ CONSUMER_ENABLED: "false" });
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const executedAt = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const redis = redisClient();
+    await publishTrade(redis, trade({ executedAt }));
+    await redis.quit();
+
+    await reconcile({}).expect(200);
+    const second = await reconcile({}).expect(200);
+
+    expect(second.body.status).toBe("incomplete");
+    expect(second.body.engineError).toMatch(/settlement has not settled/);
+  });
+
+  it("says why there is nothing new to check when it could not read what settlement has not settled", async () => {
+    await restartWith({ CONSUMER_ENABLED: "false" });
+    await corrupt(
+      `INSERT INTO "reconciliation_checkpoints" ("name", "reconciledUntil") VALUES ('default', now())`,
+    );
+    const redis = redisClient();
+    await redis.set("trades:ABC", "not a stream");
+    await redis.quit();
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.status).toBe("incomplete");
+    expect(response.body.engineError).toMatch(
+      /Could not read which trades settlement has not settled/,
+    );
+  });
+
+  it("answers a check that starts after what is still on the way with the reason instead of an error", async () => {
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    pendingSince = new Date(Date.now() - 2 * 3_600_000).toISOString();
+
+    const response = await reconcile({
+      from: new Date(Date.now() - 3_600_000).toISOString(),
+    }).expect(200);
+
+    expect(response.body.status).toBe("incomplete");
+    expect(response.body.engineError).toMatch(/engine has not applied/);
+  });
+
+  it("does not check past the trade settlement has waited longest for, whatever order the trades were published in", async () => {
+    await restartWith({ CONSUMER_ENABLED: "false" });
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const older = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const redis = redisClient();
+    await publishTrade(
+      redis,
+      trade({ executedAt: new Date(Date.now() - 3_600_000).toISOString() }),
+    );
+    await publishTrade(redis, trade({ executedAt: older }));
+    await redis.quit();
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.period.to).toBe(older);
+  });
+
+  it("does not check past a delivered trade settlement has not acknowledged, even if it is not the first one delivered", async () => {
+    await restartWith({ CONSUMER_ENABLED: "false" });
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    const older = new Date(Date.now() - 2 * 3_600_000).toISOString();
+    const redis = redisClient();
+    await redis
+      .xgroup("CREATE", TRADE_STREAM, GROUP, "0", "MKSTREAM")
+      .catch(() => undefined);
+    await publishTrade(
+      redis,
+      trade({ executedAt: new Date(Date.now() - 3_600_000).toISOString() }),
+    );
+    await publishTrade(redis, trade({ executedAt: older }));
+    await redis.xreadgroup(
+      "GROUP",
+      GROUP,
+      "someone",
+      "COUNT",
+      10,
+      "STREAMS",
+      TRADE_STREAM,
+      ">",
+    );
+    await redis.quit();
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.period.to).toBe(older);
+  });
+
   it("does not check past the oldest command a book has not applied yet", async () => {
     firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
     pendingSince = new Date(Date.now() - 2 * 3_600_000).toISOString();
@@ -600,6 +802,7 @@ describe("reconciliation", () => {
 
     expect(first.body.period).toEqual({ from: firstTradeAt, to: pendingSince });
     expect(asked.body.period.to).toBe(pendingSince);
+    expect(asked.body.endedEarly).toMatch(/engine has not applied/);
   });
 
   it("checks only the ledger activity of the period it was asked about", async () => {

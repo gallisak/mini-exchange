@@ -79,6 +79,7 @@ export class BookRunner {
   private heartbeat?: NodeJS.Timeout;
   private state!: EngineState;
   private stuck?: StuckBook;
+  private stuckNoted = true;
   private reloadNeeded = false;
   private updatesLost = false;
 
@@ -274,8 +275,21 @@ export class BookRunner {
           await this.load();
           this.reloadNeeded = false;
         }
-        const response = await this.read(batchSize, blockMs);
-        if (!response) continue;
+        let response: [string, StreamEntry[]][] | null;
+        try {
+          response = await this.read(batchSize, blockMs);
+        } catch (error) {
+          if (!this.running) return;
+          this.logger.warn(
+            `Reading the command stream failed, reading again: ${(error as Error).message}`,
+          );
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+        if (!response) {
+          await this.recovered();
+          continue;
+        }
         const entries = response[0][1];
         await this.process(
           entries.map(([id, fields]) => ({
@@ -337,6 +351,7 @@ export class BookRunner {
       failures: (this.stuck?.failures ?? 0) + 1,
       error: error.message.slice(0, 500),
     };
+    this.stuckNoted = true;
     await withTimeout(
       this.options.redis.client.set(
         stuckKey(this.instrument),
@@ -350,16 +365,21 @@ export class BookRunner {
   }
 
   private async recovered(): Promise<void> {
-    if (!this.stuck) return;
-    this.logger.log(
-      `Batch committed again after ${this.stuck.failures} failed attempts`,
-    );
+    if (!this.stuckNoted) return;
+    if (this.stuck) {
+      this.logger.log(
+        `Batch committed again after ${this.stuck.failures} failed attempts`,
+      );
+    }
     this.stuck = undefined;
-    await withTimeout(
+    this.stuckNoted = await withTimeout(
       this.options.redis.client.del(stuckKey(this.instrument)),
       MARKER_TIMEOUT_MS,
       "Redis",
-    ).catch(() => undefined);
+    ).then(
+      () => false,
+      () => true,
+    );
   }
 
   private async process(commands: StreamCommand[]): Promise<void> {

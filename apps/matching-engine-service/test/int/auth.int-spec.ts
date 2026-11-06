@@ -454,15 +454,12 @@ describe('authentication sessions', () => {
     }, 10_000);
   });
 
-  it('does not report a sign-out as done while its access token still works, and finishes it on a retry', async () => {
+  it('reports a sign-out as done once it is recorded, and ends its access token as soon as Redis takes the note', async () => {
     const session = await signUp();
     failNextRedisTransaction();
 
-    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(503);
+    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(204);
     await refresh(session.refreshToken).expect(401);
-    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect((response) => {
-      expect([204, 401]).toContain(response.status);
-    });
 
     await eventually(async () => {
       await http().get('/orders').set('authorization', `Bearer ${session.accessToken}`).expect(401);

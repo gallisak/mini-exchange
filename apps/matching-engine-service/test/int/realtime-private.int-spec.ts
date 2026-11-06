@@ -1,4 +1,4 @@
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, ServiceUnavailableException } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import Redis from 'ioredis';
 import { AddressInfo } from 'net';
@@ -7,6 +7,7 @@ import request from 'supertest';
 import { WALLET_CHANNEL, marketChannel } from '../../src/orders/realtime/market-events';
 import { RedisService } from '../../src/redis/redis.service';
 import { OrdersGateway } from '../../src/orders/gateway/orders.gateway';
+import { SessionRevocations, revokedSessionKey } from '../../src/auth/session-revocations.service';
 import { TestUser, createApp, eventually, register, resetState, submit } from './harness';
 
 interface OrderEvent {
@@ -279,5 +280,33 @@ describe('private real-time updates', () => {
       .expect(204);
 
     expect(await disconnected).toBe('io server disconnect');
+  });
+
+  it('keeps connections open while it cannot check which sessions ended after a reconnect, and closes only the ended ones once it can', async () => {
+    const bob = await register(app);
+    const alice = await register(app);
+    const bobSocket = (await connect(bob)).socket;
+    const aliceSocket = (await connect(alice)).socket;
+    const sessionOf = (user: TestUser) =>
+      (JSON.parse(Buffer.from(user.token.split('.')[1], 'base64url').toString()) as { sid: string }).sid;
+    const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT) });
+    await redis.set(revokedSessionKey(sessionOf(alice)), '1', 'PX', 60_000);
+    const check = jest
+      .spyOn(app.get(SessionRevocations), 'isRevoked')
+      .mockRejectedValueOnce(new ServiceUnavailableException('Could not check the session, try again'));
+    const bobDropped = jest.fn();
+    bobSocket.on('disconnect', bobDropped);
+    const aliceDropped = new Promise<string>((resolve) => {
+      aliceSocket.once('disconnect', resolve);
+      setTimeout(() => resolve('still connected'), 8000);
+    });
+
+    await redis.client('KILL', 'TYPE', 'pubsub');
+    await redis.quit();
+
+    expect(await aliceDropped).toBe('io server disconnect');
+    expect(check.mock.calls.length).toBeGreaterThan(1);
+    expect(bobDropped).not.toHaveBeenCalled();
+    expect(bobSocket.connected).toBe(true);
   });
 });

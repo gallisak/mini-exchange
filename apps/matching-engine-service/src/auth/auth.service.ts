@@ -1,4 +1,4 @@
-import { ConflictException, Injectable, ServiceUnavailableException, UnauthorizedException } from '@nestjs/common';
+import { ConflictException, Injectable, UnauthorizedException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { EntityManager, IsNull, QueryFailedError, Repository } from 'typeorm';
 import { isUUID } from 'class-validator';
@@ -160,9 +160,7 @@ export class AuthService {
       await this.revocations.record(manager, families);
       return families;
     });
-    if (!(await this.revocations.announce(families))) {
-      throw new ServiceUnavailableException('Signed out, but the access of this session could not be ended yet, try again');
-    }
+    await this.revocations.announce(families);
   }
 
   private async lockSessionsOf(manager: EntityManager, userId: string): Promise<void> {

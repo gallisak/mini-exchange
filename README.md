@@ -54,9 +54,10 @@ docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget 
 token at once (a note in Redis for 30 minutes, twice the life of an access token, checked by both
 services and by every WebSocket connection) and closes its WebSocket connections. The ended session
 is recorded in Postgres in the same transaction, and every engine retries the Redis note until it is
-written. A sign-out answers 503 until the note is written, so the page never says it signed out
-while the access token still works; while Redis is down the services cannot check a token and answer
-503. A rotation and a sign-out of the same user take one
+written. A sign-out is done once Postgres has it: if the Redis note fails, the engines write it
+within seconds, and while Redis is down the services cannot check a token and answer 503, so the
+access token never works meanwhile. After its Redis subscription comes back an engine checks which
+connected sessions ended, and keeps checking until Redis answers instead of closing every connection. A rotation and a sign-out of the same user take one
 Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
 sign-out that did not go through instead of pretending it did. The frontend's API refuses any
@@ -196,13 +197,18 @@ where the last run ended, or at the first trade either service knows of. No peri
 a minute ago or than the oldest trade that is not settled yet: a command a book has not applied, a
 trade still in the engine's outbox, or one waiting in settlement's consumer group. A trade carries
 the time its order entered the stream, so a book or a queue that lags behind could still add trades
-to a period checked earlier. If the engine cannot say which commands it has not applied, the run is `incomplete` and
-does not move on; while a book has not applied a command the checkpoint is already past, a run says
-there is nothing new to check instead of checking anything again. A period that does not match is
-saved in the same transaction as the checkpoint and checked again on every run, the oldest ten
-within a minute, until it matches; the report lists them under `unresolved` with their count in
-`unresolvedTotal` and stays `mismatch` meanwhile. The operations panel waits up to five minutes for a
-run. So a
+to a period checked earlier. The engine is asked first and settlement's queue after it, so a trade that leaves the outbox
+meanwhile is still seen, and the end of the period is fixed before either is asked. If either cannot
+say what it has not finished, the run is `incomplete` and does not move on; while something the
+checkpoint is already past is unfinished, a run says there is nothing new to check and names what it
+waits for (the engine, settlement, or the error it got) instead of checking anything again. A period
+cut short of the `to` it was asked for says why in `endedEarly`, and a `from` past that point is
+answered as `incomplete` with the reason. A period that does not match is saved in the same
+transaction as the checkpoint and checked again, ten per run within a minute, those checked longest
+ago first, until it matches; the report lists them under `unresolved` with their count in
+`unresolvedTotal` and stays `mismatch` meanwhile. Pages that ask for a run while one is going get its
+report instead of starting another. The operations panel waits up to five minutes for a run and gives
+up on an answer that does not come. So a
 trade that never got settled keeps showing up, the next days are still checked, a clean history is
 not checked again, and no run scans everything. Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
 

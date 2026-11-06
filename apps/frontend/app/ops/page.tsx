@@ -20,6 +20,9 @@ import { formatTime } from '@/lib/client/format';
 import { RECONCILE_REFRESH_MS, STATUS_REFRESH_MS, opsView, startOpsPolling } from '@/lib/client/ops-polling';
 import { singleFlight } from '@/lib/client/latest';
 
+const OPS_TIMEOUT_MS = 15_000;
+const RECONCILE_TIMEOUT_MS = 320_000;
+
 interface Part<T> {
   ok: boolean;
   data?: T;
@@ -60,6 +63,7 @@ interface Reconciliation {
   status: 'ok' | 'mismatch' | 'incomplete';
   period: { from: string; to: string };
   engineError?: string;
+  endedEarly?: string;
   unresolved?: { from: string; to: string; status: string }[];
   unresolvedTotal?: number;
   instruments: {
@@ -92,7 +96,7 @@ function Ops() {
     () =>
       singleFlight(async () => {
         try {
-          setReport(await api<OpsReport>('/api/ops'));
+          setReport(await api<OpsReport>('/api/ops', { timeoutMs: OPS_TIMEOUT_MS }));
           setError(null);
         } catch (failure) {
           setError((failure as Error).message);
@@ -105,7 +109,7 @@ function Ops() {
     () =>
       singleFlight(async () => {
         try {
-          setReconciliation({ ok: true, data: await api<Reconciliation>('/api/ops/reconciliation') });
+          setReconciliation({ ok: true, data: await api<Reconciliation>('/api/ops/reconciliation', { timeoutMs: RECONCILE_TIMEOUT_MS }) });
         } catch (failure) {
           setReconciliation({ ok: false, error: { message: (failure as Error).message } });
         }
@@ -298,6 +302,11 @@ function Ops() {
               <>
                 {reconciliation.data.engineError && (
                   <ErrorState message={reconciliation.data.engineError} />
+                )}
+                {reconciliation.data.endedEarly && (
+                  <p className="text-xs text-muted-foreground">
+                    Checked up to {formatMoment(reconciliation.data.period.to)}: {reconciliation.data.endedEarly}.
+                  </p>
                 )}
                 <Table>
                   <TableHeader>
