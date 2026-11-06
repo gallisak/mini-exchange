@@ -1,7 +1,8 @@
 import { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import request from 'supertest';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
+import { RefreshSession } from '../../src/auth/entities/refresh-session.entity';
 import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793781500000-LowercaseEmails';
 import { setAdmin } from '../../src/tools/grant-admin';
 import { createApp, resetState } from './harness';
@@ -361,5 +362,70 @@ describe('authentication sessions', () => {
     expect(ticket.until).toBe(claims(session.accessToken).exp);
     await http().get('/orders').set('authorization', `Bearer ${response.body.ticket}`).expect(401);
     await http().post('/auth/ws-ticket').expect(401);
+  });
+
+  it('ends a session for good even while one of its rotations is being saved', async () => {
+    const session = await signUp();
+    const insert = EntityManager.prototype.insert;
+    let saved!: () => void;
+    const rotationSaved = new Promise<void>((resolve) => (saved = resolve));
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const spy = jest.spyOn(EntityManager.prototype, 'insert').mockImplementation(async function (
+      this: EntityManager,
+      ...args: Parameters<EntityManager['insert']>
+    ) {
+      const result = await insert.apply(this, args);
+      if (args[0] === RefreshSession) {
+        saved();
+        await gate;
+      }
+      return result;
+    });
+
+    const rotating = refresh(session.refreshToken).then((response) => response);
+    await rotationSaved;
+    spy.mockRestore();
+    const loggingOut = http()
+      .post('/auth/logout')
+      .set('authorization', `Bearer ${session.accessToken}`)
+      .then((response) => response);
+    await sleep(300);
+    release();
+    const [rotated, loggedOut] = await Promise.all([rotating, loggingOut]);
+
+    expect(rotated.status).toBe(200);
+    expect(loggedOut.status).toBe(204);
+    await refresh(rotated.body.refreshToken).expect(401);
+  });
+
+  it('stops accepting the access token of a session that logged out, and only of that session', async () => {
+    const email = `revoked-${randomUUID()}@example.com`;
+    const laptop = await signUp(email);
+    const phone = await login(email);
+
+    await http().post('/auth/logout').set('authorization', `Bearer ${laptop.accessToken}`).expect(204);
+
+    await http().get('/orders').set('authorization', `Bearer ${laptop.accessToken}`).expect(401);
+    await http().post('/auth/ws-ticket').set('authorization', `Bearer ${laptop.accessToken}`).expect(401);
+    await http().get('/orders').set('authorization', `Bearer ${phone.accessToken}`).expect(200);
+  });
+
+  it('does not count silent refreshes and logouts against the sign-in limit', async () => {
+    const limit = process.env.AUTH_RATE_LIMIT;
+    process.env.AUTH_RATE_LIMIT = '2';
+    try {
+      const email = `limited-${randomUUID()}@example.com`;
+      let session = await signUp(email);
+      for (let i = 0; i < 3; i += 1) {
+        session = (await refresh(session.refreshToken).expect(200)).body;
+      }
+      await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(204);
+
+      await http().post('/auth/login').send({ email, password: 'password123' }).expect(200);
+      await http().post('/auth/login').send({ email, password: 'password123' }).expect(429);
+    } finally {
+      process.env.AUTH_RATE_LIMIT = limit;
+    }
   });
 });

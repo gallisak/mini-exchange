@@ -228,4 +228,43 @@ describe('a running book', () => {
 
     expect(await raw.get('book:published:ABC')).toBeNull();
   });
+
+  it('does not note a later batch as published while an earlier one was lost, until clients were told to reload', async () => {
+    const events: MarketEvent[] = [];
+    let losses = 1;
+    runner = new BookRunner(
+      'ABC',
+      options({
+        publish: (async (event: MarketEvent) => {
+          if (event.type === 'book_delta' && losses > 0) {
+            losses -= 1;
+            return false;
+          }
+          events.push(event);
+          return true;
+        }) as never,
+      }),
+    );
+    await runner.start();
+
+    await place(uuidV5('lost'), 'seller', 'sell');
+    await eventually(async () =>
+      expect(
+        (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
+      ).toBe('1'),
+    );
+    await place(uuidV5('later'), 'seller', 'sell');
+    await eventually(async () =>
+      expect(
+        (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
+      ).toBe('2'),
+    );
+    await sleep(300);
+
+    const marker = await raw.get('book:published:ABC');
+    const told = events.some(
+      (event) => event.type === 'resync' && event.resync.allOwners === true,
+    );
+    expect({ marker, told }).toEqual({ marker: told ? '2' : null, told: true });
+  });
 });

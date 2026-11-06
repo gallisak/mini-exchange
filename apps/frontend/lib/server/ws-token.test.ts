@@ -30,13 +30,13 @@ describe('a token for the real-time connection', () => {
     expect(await response.json()).toEqual({ token: 'ticket-1' });
   });
 
-  it('is still the access token while the engine does not issue tickets yet', async () => {
+  it('never hands the access token to the page, even while the engine does not issue tickets', async () => {
     const access = token(900);
     engineAnswers(404, { message: 'Cannot POST /auth/ws-ticket' });
 
     const response = await issueWsToken(incoming(access));
 
-    expect(response.status).toBe(200);
-    expect(await response.json()).toEqual({ token: access });
+    expect(response.status).toBeGreaterThanOrEqual(500);
+    expect(await response.text()).not.toContain(access);
   });
 });

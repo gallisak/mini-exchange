@@ -219,4 +219,20 @@ describe('trade settlement', () => {
     expect(statuses).toEqual(range(20).map(() => 200));
     expect(await balances(app, owner)).toEqual(OPENING);
   });
+
+  it('refuses the access token of a session that logged out', async () => {
+    const [owner, session, other] = [randomUUID(), randomUUID(), randomUUID()];
+    const redis = redisClient();
+    await redis.set(`auth:revoked-session:${session}`, '1', 'PX', 60_000);
+    await redis.quit();
+
+    await request(app.getHttpServer())
+      .get('/wallets/me')
+      .set('authorization', `Bearer ${accessToken(owner, 'user', session)}`)
+      .expect(401);
+    await request(app.getHttpServer())
+      .get('/wallets/me')
+      .set('authorization', `Bearer ${accessToken(owner, 'user', other)}`)
+      .expect(200);
+  });
 });

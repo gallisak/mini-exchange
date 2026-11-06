@@ -1,7 +1,10 @@
 import { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'crypto';
+import Redis from 'ioredis';
 import request from 'supertest';
 import { DataSource } from 'typeorm';
+import { instrumentLockKey } from '../../src/orders/engine/instrument-ownership.service';
+import { commandStreamKey, encodeCommand } from '../../src/orders/engine/order-command';
 import { TradeRecord } from '../../src/orders/entities/trade-record.entity';
 import { createApp, resetState } from './harness';
 
@@ -53,6 +56,7 @@ describe('trade summary', () => {
       from: '2026-11-04T10:00:00.000Z',
       to: '2026-11-04T11:00:00.000Z',
       firstTradeAt: '2026-11-04T10:00:00.000Z',
+      pendingSince: null,
       instruments: [
         { instrument: 'ABC', count: 2, quantity: '2.12345678', notional: '7.2358023678' },
         { instrument: 'DEF', count: 1, quantity: '0.00000001', notional: '0.0000000001' },
@@ -101,5 +105,29 @@ describe('trade summary', () => {
       .set('x-internal-key', 'wrong')
       .query(period)
       .expect(401);
+  });
+
+  it('tells from when trades may still be missing because a book has not applied its commands yet', async () => {
+    await app.close();
+    const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT) });
+    await redis.set(instrumentLockKey('ABC'), 'another-engine', 'PX', 60_000);
+    app = await createApp();
+    const id = (await redis.xadd(
+      commandStreamKey('ABC'),
+      '*',
+      ...encodeCommand({
+        type: 'submit',
+        orderId: randomUUID(),
+        ownerId: randomUUID(),
+        side: 'buy',
+        price: '10.00',
+        quantity: '1',
+      }),
+    )) as string;
+    await redis.quit();
+
+    const response = await summary('2026-11-04T10:00:00.000Z', '2026-11-04T11:00:00.000Z').expect(200);
+
+    expect(response.body.pendingSince).toBe(new Date(Number(id.split('-')[0])).toISOString());
   });
 });

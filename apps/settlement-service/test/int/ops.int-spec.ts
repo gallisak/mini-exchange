@@ -51,7 +51,11 @@ describe('settlement operations endpoints', () => {
   it('counts settled, duplicate and dead-lettered trade events', async () => {
     const redis = redisClient();
     const executed = trade();
-    const before = await http().get('/metrics').expect(200);
+    await http().get('/metrics').expect(401);
+    await http().get('/metrics').set('authorization', 'Bearer wrong-key').expect(401);
+    const metrics = () =>
+      http().get('/metrics').set('authorization', `Bearer ${process.env.SETTLEMENT_INTERNAL_KEY}`);
+    const before = await metrics().expect(200);
     const count = (text: string, result: string) =>
       Number(new RegExp(`settlement_trade_events_total\\{result="${result}"\\} (\\d+)`).exec(text)?.[1] ?? 0);
 
@@ -61,7 +65,7 @@ describe('settlement operations endpoints', () => {
     await eventually(async () => expect(await groupState(redis)).toEqual({ pending: 0, read: 3 }));
     await redis.quit();
 
-    const after = (await http().get('/metrics').expect(200)).text;
+    const after = (await metrics().expect(200)).text;
     expect(count(after, 'settled') - count(before.text, 'settled')).toBe(1);
     expect(count(after, 'duplicate') - count(before.text, 'duplicate')).toBe(1);
     expect(count(after, 'dead_lettered') - count(before.text, 'dead_lettered')).toBe(1);

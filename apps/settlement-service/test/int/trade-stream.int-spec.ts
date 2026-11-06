@@ -194,4 +194,27 @@ describe('trade stream consumer', () => {
 
     expect(await groupState(redis)).toEqual({ pending: 0, read: 3 });
   });
+
+  it('dead-letters a trade the ledger keeps failing to settle once it has been retried long enough', async () => {
+    const saved = { ...process.env };
+    process.env.CONSUMER_MAX_DELIVERIES = '3';
+    process.env.CONSUMER_GIVE_UP_AFTER_MS = '1000';
+    try {
+      app = await createApp();
+    } finally {
+      process.env = saved;
+    }
+    jest.spyOn(app.get(LedgerService), 'settle').mockRejectedValue(new Error('numeric field overflow'));
+    const executed = trade();
+
+    const id = await publishTrade(redis, executed);
+
+    await eventually(async () => {
+      expect(await groupState(redis)).toEqual({ pending: 0, read: 1 });
+    }, 15000);
+    const dead = (await redis.xrange(DEAD_LETTER_STREAM, '-', '+')) as [string, string[]][];
+    expect(dead).toHaveLength(1);
+    expect(dead[0][1].slice(0, 4)).toEqual(['stream', TRADE_STREAM, 'id', id]);
+    expect(dead[0][1][5]).toContain('numeric field overflow');
+  });
 });

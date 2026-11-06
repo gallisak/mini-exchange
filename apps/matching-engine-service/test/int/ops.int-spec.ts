@@ -50,7 +50,13 @@ describe('operations endpoints', () => {
         expect((await listOrders(app, buyer))[0]?.status).toBe('filled'),
       );
 
-      const response = await http().get('/metrics').expect(200);
+      await http().get('/metrics').expect(401);
+      await http().get('/metrics').set('authorization', 'Bearer wrong-key').expect(401);
+      await http().get('/metrics').set('x-internal-key', process.env.ENGINE_INTERNAL_KEY as string).expect(200);
+      const response = await http()
+        .get('/metrics')
+        .set('authorization', `Bearer ${process.env.ENGINE_INTERNAL_KEY}`)
+        .expect(200);
 
       expect(response.headers['content-type']).toContain('text/plain');
       expect(response.text).toMatch(/orders_accepted_total\{instrument="ABC"\} \d+/);

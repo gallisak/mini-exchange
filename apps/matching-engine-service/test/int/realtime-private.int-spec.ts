@@ -234,4 +234,22 @@ describe('private real-time updates', () => {
       delete process.env.WS_ACCEPT_ACCESS_TOKENS;
     }
   });
+
+  it('disconnects the real-time connections of a session that logs out and refuses its unused tickets', async () => {
+    const alice = await register(app);
+    const spare = await ticketFor(alice);
+    const { socket } = await connect(alice);
+    const disconnected = new Promise<string>((resolve) => {
+      socket.once('disconnect', resolve);
+      setTimeout(() => resolve('still connected'), 3000);
+    });
+
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('authorization', `Bearer ${alice.token}`)
+      .expect(204);
+
+    expect(await disconnected).toBe('io server disconnect');
+    await expect(connect(spare)).rejects.toThrow('Unauthorized');
+  });
 });

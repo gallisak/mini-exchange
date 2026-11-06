@@ -10,6 +10,10 @@ describe('redirect after sign-in', () => {
   it('refuses anything that would leave the app', () => {
     for (const target of [
       '//evil.example',
+      '/.//evil.example',
+      '/./\\evil.example',
+      '/%2e//evil.example',
+      '/a/..//evil.example',
       '/\\evil.example',
       'https://evil.example',
       'javascript:alert(1)',

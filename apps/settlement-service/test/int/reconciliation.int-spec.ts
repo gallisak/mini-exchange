@@ -30,6 +30,7 @@ describe('reconciliation', () => {
   let engineRows: EngineRow[] | 'down' | 'malformed' | ((from: Date) => EngineRow[]);
   let engineQueries: URLSearchParams[];
   let firstTradeAt: string | null;
+  let pendingSince: string | null;
   let engineUrl: string;
 
   beforeAll(async () => {
@@ -53,6 +54,7 @@ describe('reconciliation', () => {
       res.end(
         JSON.stringify({
           firstTradeAt,
+          pendingSince,
           instruments:
             engineRows === 'malformed'
               ? [{ instrument: 'ABC', count: '2', quantity: 'lots' }]
@@ -78,6 +80,7 @@ describe('reconciliation', () => {
     engineRows = [];
     engineQueries = [];
     firstTradeAt = null;
+    pendingSince = null;
     app = await createApp();
   });
 
@@ -359,7 +362,40 @@ describe('reconciliation', () => {
       new Date(period.to).getTime() - new Date(period.from).getTime();
     expect(first.body.period.from).toBe(executedAt.toISOString());
     expect(span(first.body.period)).toBeLessThanOrEqual(24 * 3_600_000);
-    expect(second.body.period).toEqual(first.body.period);
+    expect(second.body.period.from).toBe(first.body.period.to);
+  });
+
+  it('moves on after a mismatch and keeps checking the mismatched period until it matches', async () => {
+    const executedAt = new Date(Date.now() - 30 * 3_600_000);
+    firstTradeAt = executedAt.toISOString();
+    engineRows = (from) =>
+      from <= executedAt
+        ? [{ instrument: 'ABC', count: 1, quantity: '1.00000000', notional: '10.0000000000' }]
+        : [];
+
+    const first = await reconcile({}).expect(200);
+    const second = await reconcile({}).expect(200);
+    engineRows = [];
+    const third = await reconcile({}).expect(200);
+    const fourth = await reconcile({}).expect(200);
+
+    expect(first.body.status).toBe('mismatch');
+    expect(second.body.period.from).toBe(first.body.period.to);
+    expect(second.body.status).toBe('mismatch');
+    expect(second.body.unresolved).toEqual([{ ...first.body.period, status: 'mismatch' }]);
+    expect(third.body.unresolved).toEqual([]);
+    expect(fourth.body.status).toBe('ok');
+  });
+
+  it('does not check past the oldest command a book has not applied yet', async () => {
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    pendingSince = new Date(Date.now() - 2 * 3_600_000).toISOString();
+
+    const first = await reconcile({}).expect(200);
+    const asked = await reconcile({ from: firstTradeAt }).expect(200);
+
+    expect(first.body.period).toEqual({ from: firstTradeAt, to: pendingSince });
+    expect(asked.body.period.to).toBe(pendingSince);
   });
 
   it('checks only the ledger activity of the period it was asked about', async () => {

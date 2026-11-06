@@ -44,4 +44,22 @@ describe('numeric settings of a running engine', () => {
     expect(code).not.toBe(0);
     expect(output).toContain('ORDER_HISTORY_LIMIT');
   });
+
+  it('refuses to start in production with a placeholder secret from the example configuration', async () => {
+    const engine = spawn(process.execPath, ['dist/main'], {
+      cwd: resolve(__dirname, '../..'),
+      env: { ...process.env, PORT: '0', NODE_ENV: 'production', JWT_REFRESH_SECRET: 'change-me-refresh' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    let output = '';
+    engine.stdout?.on('data', (chunk: Buffer) => (output += chunk.toString()));
+    engine.stderr?.on('data', (chunk: Buffer) => (output += chunk.toString()));
+    const timer = setTimeout(() => engine.kill('SIGKILL'), 20_000);
+
+    const [code] = await once(engine, 'exit');
+    clearTimeout(timer);
+
+    expect(code).not.toBe(0);
+    expect(output).toContain('JWT_REFRESH_SECRET');
+  });
 });
