@@ -1,4 +1,5 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
+import { intEnv } from '../../common/env';
 
 export class RefreshSessionsCreatedIndex1793845000000 implements MigrationInterface {
   name = 'RefreshSessionsCreatedIndex1793845000000';
@@ -12,8 +13,13 @@ export class RefreshSessionsCreatedIndex1793845000000 implements MigrationInterf
         WHERE c.relname = 'IDX_refresh_sessions_created' AND n.nspname = current_schema()`,
     );
     if (existing?.valid) return;
-    if (existing) await queryRunner.query(`DROP INDEX CONCURRENTLY IF EXISTS "IDX_refresh_sessions_created"`);
-    await queryRunner.query(`CREATE INDEX CONCURRENTLY "IDX_refresh_sessions_created" ON "refresh_sessions" ("createdAt")`);
+    await queryRunner.query(`SET lock_timeout = ${intEnv('DATABASE_INDEX_LOCK_TIMEOUT_MS', 600_000, 0)}`);
+    try {
+      if (existing) await queryRunner.query(`DROP INDEX CONCURRENTLY IF EXISTS "IDX_refresh_sessions_created"`);
+      await queryRunner.query(`CREATE INDEX CONCURRENTLY "IDX_refresh_sessions_created" ON "refresh_sessions" ("createdAt")`);
+    } finally {
+      await queryRunner.query(`RESET lock_timeout`);
+    }
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {

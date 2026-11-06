@@ -2,6 +2,7 @@ import { INestApplication } from '@nestjs/common';
 import { randomUUID } from 'crypto';
 import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
+import { PostgresQueryRunner } from 'typeorm/driver/postgres/PostgresQueryRunner';
 import { RefreshSession } from '../../src/auth/entities/refresh-session.entity';
 import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793781500000-LowercaseEmails';
 import { setAdmin } from '../../src/tools/grant-admin';
@@ -509,6 +510,55 @@ describe('authentication sessions', () => {
     await refresh(session.refreshToken).expect(200);
   });
 
+  const delayNewSessions = (ms: number) => {
+    const insert = EntityManager.prototype.insert;
+    return jest.spyOn(EntityManager.prototype, 'insert').mockImplementation(async function (
+      this: EntityManager,
+      ...args: Parameters<typeof insert>
+    ) {
+      await sleep(ms);
+      return insert.apply(this, args);
+    } as never);
+  };
+
+  it('rolls a rotation back once it was answered 503, so a retry without an attempt is not taken for reuse', async () => {
+    const session = await signUp();
+    const repository = app.get(DataSource).getRepository(RefreshSession);
+    const slow = delayNewSessions(5_500);
+    try {
+      await refresh(session.refreshToken).expect(503);
+      await eventually(async () => expect(slow.mock.results[0]).toBeDefined());
+      await sleep(1_000);
+    } finally {
+      slow.mockRestore();
+    }
+
+    const [row, ...others] = await repository.find();
+    expect(others).toEqual([]);
+    expect(row.usedAt).toBeNull();
+    await refresh(session.refreshToken).expect(200);
+  });
+
+  it('does not answer 503 while the commit of a rotation is under way, since the rotation may land', async () => {
+    const session = await signUp();
+    const slow = delayNewSessions(4_800);
+    const commit = PostgresQueryRunner.prototype.commitTransaction;
+    const slowCommit = jest
+      .spyOn(PostgresQueryRunner.prototype, 'commitTransaction')
+      .mockImplementation(async function (this: PostgresQueryRunner) {
+        await sleep(500);
+        return commit.apply(this);
+      });
+    try {
+      const rotated = await refresh(session.refreshToken).expect(200);
+
+      expect(rotated.body.refreshToken).toEqual(expect.any(String));
+    } finally {
+      slow.mockRestore();
+      slowCommit.mockRestore();
+    }
+  });
+
   it('answers 503 within the gateway timeout when a sign-out waits for the session lock', async () => {
     const session = await signUp();
     const [{ userId }] = await app.get(DataSource).getRepository(RefreshSession).find();
@@ -547,6 +597,77 @@ describe('authentication sessions', () => {
       expect((await restarted.find()).map((row) => row.id)).toEqual([kept.id]);
     });
     await refresh(session.refreshToken).expect(200);
+  });
+
+  it('keeps the connection of a cleanup until a cancel sent for it is through, so the cancel cannot hit another request', async () => {
+    await app.close();
+    const dataSource = await new DataSource(buildDataSourceOptions()).initialize();
+    const familyId = randomUUID();
+    await dataSource.query(
+      `INSERT INTO "session_revocations" ("familyId", "revokedAt") VALUES ($1, now() - interval '2 days')`,
+      [familyId],
+    );
+    const holder = dataSource.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    await holder.query(`SELECT 1 FROM "session_revocations" WHERE "familyId" = $1 FOR UPDATE`, [familyId]);
+    let cancelSeen = () => undefined as void;
+    const cancelAsked = new Promise<void>((resolve) => (cancelSeen = resolve));
+    let letCancelThrough = () => undefined as void;
+    const cancelHeld = new Promise<void>((resolve) => (letCancelThrough = resolve));
+    try {
+      app = await createApp();
+      const engine = app.get(DataSource);
+      const engineQuery = engine.query.bind(engine);
+      const slowCancel = jest.spyOn(engine, 'query').mockImplementation((async (sql: string, parameters?: unknown[]) => {
+        if (sql.includes('pg_cancel_backend')) {
+          cancelSeen();
+          await cancelHeld;
+        }
+        return engineQuery(sql, parameters);
+      }) as never);
+      const release = jest.spyOn(PostgresQueryRunner.prototype, 'release');
+      let cleanupBackend = 0;
+      await eventually(async () => {
+        const rows: { pid: number }[] = await dataSource.query(
+          `SELECT "pid" FROM pg_stat_activity
+            WHERE "query" LIKE 'DELETE FROM "session_revocations"%' AND "wait_event_type" = 'Lock'`,
+        );
+        expect(rows).toHaveLength(1);
+        cleanupBackend = rows[0].pid;
+      });
+      const cleanupReleased = () =>
+        release.mock.contexts.some(
+          (runner) =>
+            (runner as unknown as { databaseConnection?: { processID: number } }).databaseConnection?.processID ===
+            cleanupBackend,
+        );
+
+      const closing = app.close();
+      await cancelAsked;
+      await holder.rollbackTransaction();
+      await eventually(async () => {
+        const [{ running }] = await dataSource.query(
+          `SELECT COUNT(*)::int AS "running" FROM pg_stat_activity
+            WHERE "query" LIKE 'DELETE FROM%' AND "state" = 'active'`,
+        );
+        expect(running).toBe(0);
+      });
+      await sleep(200);
+      expect(cleanupReleased()).toBe(false);
+
+      letCancelThrough();
+      await closing;
+      expect(cleanupReleased()).toBe(true);
+      slowCancel.mockRestore();
+      release.mockRestore();
+    } finally {
+      letCancelThrough();
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await holder.release();
+      await dataSource.destroy();
+      app = await createApp();
+    }
   });
 
   it('stops at once while a cleanup is waiting on the database', async () => {

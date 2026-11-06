@@ -63,4 +63,13 @@ describe('operations page polling', () => {
       longestAnswer(RECONCILIATION_UPSTREAM_TIMEOUT_MS),
     );
   });
+
+  it('waits for a run that asks the engine for its progress, its period and one last recheck at full length', () => {
+    const settings = readFileSync(resolve(__dirname, '../../../settlement-service/.env.example'), 'utf8');
+    const engineWait = Number(/^ENGINE_TIMEOUT_MS=(\d+)$/m.exec(settings)?.[1]);
+    const recheckBudget = 60_000;
+
+    expect(engineWait).toBeGreaterThan(0);
+    expect(RECONCILIATION_UPSTREAM_TIMEOUT_MS).toBeGreaterThan(3 * engineWait + recheckBudget);
+  });
 });

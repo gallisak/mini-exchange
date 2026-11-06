@@ -19,6 +19,7 @@ import { EmptyState, ErrorState, LoadingRows } from '@/components/states';
 import { api } from '@/lib/client/api';
 import { subtractDecimals } from '@/lib/client/decimal';
 import { formatDateTime, trimAmount } from '@/lib/client/format';
+import { useSession } from '@/lib/client/session';
 import { Order, OrderStatus } from '@/lib/client/types';
 import { cn } from '@/lib/utils';
 
@@ -42,14 +43,18 @@ export function OrdersTable({
 }) {
   const [view, setView] = useState<'active' | 'history'>('active');
   const [cancelling, setCancelling] = useState<Set<string>>(new Set());
+  const { user, isSignedIn } = useSession();
 
   async function cancel(order: Order) {
+    const sentBy = user?.id ?? '';
     setCancelling((current) => new Set(current).add(order.id));
     try {
       await api(`/api/orders/${order.id}`, { method: 'DELETE' });
-      toast.message(`Cancelling ${order.side} ${order.instrument} @ ${order.price}`);
+      if (isSignedIn(sentBy)) {
+        toast.message(`Cancelling ${order.side} ${order.instrument} @ ${order.price}`);
+      }
     } catch (failure) {
-      toast.error((failure as Error).message);
+      if (isSignedIn(sentBy)) toast.error((failure as Error).message);
       setCancelling((current) => {
         const next = new Set(current);
         next.delete(order.id);

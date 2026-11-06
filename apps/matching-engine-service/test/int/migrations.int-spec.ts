@@ -1,12 +1,24 @@
 import { randomUUID } from 'crypto';
-import { DataSource } from 'typeorm';
-import { buildDataSourceOptions } from '../../src/database/data-source';
+import { DataSource, DataSourceOptions } from 'typeorm';
+import migrationDataSource, { buildDataSourceOptions } from '../../src/database/data-source';
 import { RefreshSessionsCreatedIndex1793845000000 } from '../../src/database/migrations/1793845000000-RefreshSessionsCreatedIndex';
 import { RepairRefreshSessionsCreatedIndex1793846000000 } from '../../src/database/migrations/1793846000000-RepairRefreshSessionsCreatedIndex';
 import { resetState } from './harness';
 
+describe('the data source of the migration commands', () => {
+  it('has no statement limit, whichever way the migrations are started', async () => {
+    const connected = await migrationDataSource.initialize();
+    try {
+      expect(await connected.query('SHOW statement_timeout')).toEqual([{ statement_timeout: '0' }]);
+    } finally {
+      await connected.destroy();
+    }
+  });
+});
+
 describe('an index built concurrently', () => {
   let dataSource: DataSource;
+  const savedLockTimeout = process.env.DATABASE_INDEX_LOCK_TIMEOUT_MS;
 
   beforeEach(async () => {
     await resetState();
@@ -14,6 +26,8 @@ describe('an index built concurrently', () => {
   });
 
   afterEach(async () => {
+    if (savedLockTimeout === undefined) delete process.env.DATABASE_INDEX_LOCK_TIMEOUT_MS;
+    else process.env.DATABASE_INDEX_LOCK_TIMEOUT_MS = savedLockTimeout;
     await dataSource.query(`DROP INDEX IF EXISTS "IDX_refresh_sessions_created"`);
     await dataSource.query(`CREATE INDEX "IDX_refresh_sessions_created" ON "refresh_sessions" ("createdAt")`);
     await dataSource.destroy();
@@ -66,21 +80,53 @@ describe('an index built concurrently', () => {
       randomUUID(),
       randomUUID(),
     ]);
+    process.env.DATABASE_INDEX_LOCK_TIMEOUT_MS = '300';
     const migration = new RefreshSessionsCreatedIndex1793845000000();
     const runner = dataSource.createQueryRunner();
     await runner.connect();
-    await runner.query(`SET lock_timeout = 300`);
     try {
       await expect(migration.up(runner)).rejects.toThrow(/lock timeout/);
     } finally {
       await holder.rollbackTransaction();
       await holder.release();
-      await runner.query(`RESET lock_timeout`);
       await runner.release();
     }
 
     expect((await index())?.valid).toBe(false);
     await run(migration);
+    expect((await index())?.valid).toBe(true);
+  });
+
+  it('outwaits a transaction longer than the lock limit of every other statement, then restores that limit', async () => {
+    await dataSource.query(`DROP INDEX "IDX_refresh_sessions_created"`);
+    const holder = dataSource.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    await holder.query(`INSERT INTO "refresh_sessions" ("id", "userId", "familyId", "tokenHash") VALUES ($1, $2, $3, 'hash')`, [
+      randomUUID(),
+      randomUUID(),
+      randomUUID(),
+    ]);
+    const shortLocks = await new DataSource({
+      ...buildDataSourceOptions(),
+      extra: { ...buildDataSourceOptions().extra, lock_timeout: 300 },
+    } as DataSourceOptions).initialize();
+    const runner = shortLocks.createQueryRunner();
+    await runner.connect();
+    try {
+      const building = new RefreshSessionsCreatedIndex1793845000000().up(runner);
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      await holder.rollbackTransaction();
+      await building;
+
+      expect(await runner.query('SHOW lock_timeout')).toEqual([{ lock_timeout: '300ms' }]);
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await holder.release();
+      await runner.release();
+      await shortLocks.destroy();
+    }
+
     expect((await index())?.valid).toBe(true);
   });
 

@@ -54,4 +54,4 @@ export function buildDataSourceOptions(
   };
 }
 
-export default new DataSource(buildDataSourceOptions());
+export default new DataSource(buildDataSourceOptions(0));

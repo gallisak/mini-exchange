@@ -33,6 +33,7 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
   private cleanupTimer?: NodeJS.Timeout;
   private cleaning?: Promise<void>;
   private cleanupBackend?: number;
+  private cancellingCleanup?: Promise<unknown>;
   private stopping = false;
 
   constructor(
@@ -63,7 +64,9 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
     clearInterval(this.cleanupTimer);
     const backend = this.cleanupBackend;
     if (backend !== undefined) {
-      await this.dataSource.query('SELECT pg_cancel_backend($1)', [backend]).catch(() => undefined);
+      this.cancellingCleanup = this.dataSource
+        .query('SELECT pg_cancel_backend($1)', [backend])
+        .catch(() => undefined);
     }
     await Promise.all([this.retrying, this.cleaning]);
   }
@@ -138,6 +141,7 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
       }
     } finally {
       this.cleanupBackend = undefined;
+      await this.cancellingCleanup;
       await runner.release();
     }
   }

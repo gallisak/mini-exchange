@@ -1,6 +1,7 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { toast } from 'sonner';
 import { UNAUTHORIZED_EVENT, UnauthorizedDetail, api } from './api';
 import { checkSession } from './session-check';
 import { answeredForCurrentSession } from './session-order';
@@ -9,6 +10,7 @@ import { User } from './types';
 interface SessionValue {
   user: User | null;
   loading: boolean;
+  isSignedIn: (userId: string) => boolean;
   signIn: (mode: 'login' | 'register', email: string, password: string) => Promise<User>;
   signOut: () => Promise<void>;
   refresh: () => Promise<void>;
@@ -21,6 +23,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [loading, setLoading] = useState(true);
   const generation = useRef(0);
   const signedInAt = useRef(0);
+  const latestUser = useRef<User | null>(null);
+  latestUser.current = user;
+
+  const isSignedIn = useCallback((userId: string) => latestUser.current?.id === userId, []);
+
+  useEffect(() => {
+    toast.dismiss();
+  }, [user?.id]);
 
   const refresh = useCallback(async () => {
     const started = generation.current;
@@ -65,7 +75,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   return (
-    <SessionContext.Provider value={{ user, loading, signIn, signOut, refresh }}>
+    <SessionContext.Provider value={{ user, loading, isSignedIn, signIn, signOut, refresh }}>
       {children}
     </SessionContext.Provider>
   );

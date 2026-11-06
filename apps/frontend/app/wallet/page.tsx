@@ -30,15 +30,16 @@ function Wallet() {
   const begin = useMemo(() => latestRequest(), []);
 
   const load = useCallback(async () => {
-    const latest = begin();
+    const turn = begin();
     try {
       const { balances: loaded } = await api<{ balances: Balance[] }>('/api/wallet');
-      if (!latest()) return;
-      setBalances(loaded);
-      setUpdatedAt(new Date());
-      setError(null);
+      if (turn.show()) {
+        setBalances(loaded);
+        setUpdatedAt(new Date());
+      }
+      if (turn.latest()) setError(null);
     } catch (failure) {
-      if (latest()) setError((failure as Error).message);
+      if (turn.latest()) setError((failure as Error).message);
     }
   }, [begin]);
 
@@ -83,8 +84,11 @@ function Wallet() {
             Refresh
           </Button>
         </CardHeader>
-        <CardContent>
-          {error ? (
+        <CardContent className="space-y-4">
+          {error && balances !== null && (
+            <ErrorState message={`Showing the balances that loaded last: ${error}`} onRetry={load} />
+          )}
+          {error && balances === null ? (
             <ErrorState message={error} onRetry={load} />
           ) : balances === null ? (
             <LoadingRows rows={4} />

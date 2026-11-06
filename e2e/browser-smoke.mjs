@@ -14,6 +14,10 @@ async function shot(page, name) {
 
 async function register(page, email, next = '') {
   await page.goto(`${BASE}/login${next}`);
+  await registerHere(page, email);
+}
+
+async function registerHere(page, email) {
   await page.getByRole('tab', { name: 'Register' }).click();
   await page.getByLabel('Email').fill(email);
   await page.getByLabel('Password').fill('password123');
@@ -114,6 +118,26 @@ try {
   await buyer.getByRole('button', { name: 'Discard' }).click();
   await pickInstrument(buyer, 'ABC');
   log('an answer for one instrument kept the unconfirmed order of another');
+
+  let releaseOrder;
+  const orderHeld = new Promise((resolve) => (releaseOrder = resolve));
+  await buyer.route('**/api/orders', async (route) => {
+    if (ordersApi(route.request())) await orderHeld;
+    await route.continue();
+  });
+  await buyer.getByLabel('Price (USD)').fill('1.00');
+  await buyer.getByLabel(/Quantity/).fill('1');
+  await buyer.getByRole('button', { name: /^Buy ABC$/ }).click();
+  await buyer.getByLabel(/Quantity/).fill('7');
+  releaseOrder();
+  await buyer.getByText(/Buy 1 ABC @ 1.00 accepted/).first().waitFor();
+  await buyer.unroute('**/api/orders');
+  await buyer.waitForTimeout(300);
+  if ((await buyer.getByLabel(/Quantity/).inputValue()) !== '7') {
+    throw new Error('the answer to an order wiped the quantity typed for the next one');
+  }
+  await buyer.getByLabel(/Quantity/).fill('');
+  log('the quantity typed for the next order survived the answer to the previous one');
   await shot(seller, 'orders');
 
   const market = await (await browser.newContext()).newPage();
@@ -144,6 +168,24 @@ try {
   log('the buyer wallet shows the 3 ABC bought');
   await shot(buyer, 'wallet');
 
+  const walletCalls = [];
+  await buyer.route('**/api/wallet', (route) => walletCalls.push(route));
+  await buyer.getByRole('button', { name: 'Refresh' }).click();
+  await buyer.getByRole('button', { name: 'Refresh' }).click();
+  for (const deadline = Date.now() + 5_000; walletCalls.length < 2; ) {
+    if (Date.now() > deadline) throw new Error('the wallet did not reload twice');
+    await buyer.waitForTimeout(50);
+  }
+  await walletCalls[0].continue();
+  await buyer.waitForTimeout(300);
+  await walletCalls[1].abort();
+  await buyer.getByText(/Showing the balances that loaded last/).waitFor();
+  if (!(await buyer.getByTestId('balance-row').first().isVisible())) {
+    throw new Error('a failed wallet reload replaced the balances that had loaded');
+  }
+  await buyer.unroute('**/api/wallet');
+  log('a failed wallet reload keeps the balances that loaded');
+
   const resyncs = async () =>
     Number(((await market.getByText(/^Sequence \d+/).textContent()).match(/resynced (\d+)×/) ?? [0, 0])[1]);
   const resyncsBefore = await resyncs();
@@ -160,6 +202,38 @@ try {
   }
   await waitStatus(market, 'live');
   log('after the engines lost their Redis subscription, the orders, wallet, trades and book reloaded');
+
+  const leaving = await (await browser.newContext()).newPage();
+  await register(leaving, `browser-leaving-${run}@example.com`);
+  await placeOrder(leaving, 'buy', '1.00', '1');
+  await leaving.getByRole('button', { name: /browser-leaving/ }).click();
+  await leaving.getByRole('menuitem', { name: 'Sign out' }).click();
+  await leaving.waitForURL('**/login');
+  await leaving.waitForTimeout(500);
+  if (await leaving.getByText(/accepted/).count()) {
+    throw new Error('an order toast stayed on screen after its user signed out');
+  }
+  await register(leaving, `browser-staying-${run}@example.com`);
+  let answerOrder;
+  const unanswered = new Promise((resolve) => (answerOrder = resolve));
+  await leaving.route('**/api/orders', async (route) => {
+    if (!ordersApi(route.request())) return route.continue();
+    await unanswered;
+    return route.fulfill({ status: 202, json: { orderId: crypto.randomUUID(), status: 'accepted' } });
+  });
+  await leaving.getByLabel('Price (USD)').fill('1.00');
+  await leaving.getByLabel(/Quantity/).fill('1');
+  await leaving.getByRole('button', { name: /^Buy ABC$/ }).click();
+  await leaving.getByRole('button', { name: /browser-staying/ }).click();
+  await leaving.getByRole('menuitem', { name: 'Sign out' }).click();
+  await leaving.waitForURL('**/login');
+  await registerHere(leaving, `browser-next-${run}@example.com`);
+  answerOrder();
+  await leaving.waitForTimeout(1_000);
+  if (await leaving.getByText(/accepted/).count()) {
+    throw new Error('the next user of the browser was told about the order of the previous one');
+  }
+  log("the next user of the browser does not see the answer to the previous user's order");
 
   await buyer.goto(`${BASE}/ops`);
   await buyer.getByText('Admins only').waitFor();

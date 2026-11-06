@@ -954,6 +954,36 @@ describe("reconciliation", () => {
     expect(response.body.recheckError).toMatch(/matches now, but could not be taken off/);
   });
 
+  it("counts the rest of the list correctly when a removal went through but its answer was lost", async () => {
+    const period = await unresolvedPeriod();
+    const broken = new Date(period.from.getTime() - 24 * 3_600_000);
+    await corrupt(
+      `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2)`,
+      [broken, new Date(broken.getTime() + 3_600_000)],
+    );
+    engineRows = (from) =>
+      from.getTime() === broken.getTime()
+        ? [{ instrument: "ABC", count: 1, quantity: "1.00000000", notional: "10.0000000000" }]
+        : [];
+    const database = app.get<DataSource>(RECONCILIATION_DATABASE);
+    const query = database.query.bind(database);
+    jest
+      .spyOn(database, "query")
+      .mockImplementation(async (sql: string, parameters?: unknown[]) => {
+        const result = await query(sql, parameters);
+        if (/^DELETE FROM "reconciliation_unresolved_periods"/.test(sql)) {
+          throw new Error("Query read timeout: Postgres did not answer within 605000 ms");
+        }
+        return result;
+      });
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.unresolved).toHaveLength(1);
+    expect(response.body.unresolvedTotal).toBe(1);
+    expect(response.body.recheckError).toMatch(/could not be taken off/);
+  });
+
   it("stops rechecking and says so when it cannot note which period it checks, instead of keeping that period first", async () => {
     const period = await unresolvedPeriod();
     const service = app.get(ReconciliationService);

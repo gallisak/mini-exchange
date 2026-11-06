@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState, useSyncExternalStore } from 'react';
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -25,7 +25,9 @@ export function OrderForm({ instrument }: { instrument: string }) {
   const [price, setPrice] = useState('');
   const [quantity, setQuantity] = useState('');
   const [busy, setBusy] = useState(false);
-  const owner = useSession().user?.id ?? null;
+  const quantityEdits = useRef(0);
+  const { user, isSignedIn } = useSession();
+  const owner = user?.id ?? null;
   const attempt = useSyncExternalStore(
     orderAttempts.subscribe,
     useCallback(() => (owner ? orderAttempts.get(owner, instrument) : null), [owner, instrument]),
@@ -53,6 +55,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
     event.preventDefault();
     if (!ready || !owner) return;
     const sentBy = owner;
+    const editsWhenSent = quantityEdits.current;
     const chosen = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
     const resent = Boolean(attempt?.unconfirmed && attempt.key === chosen.key);
     const sentFor = chosen.draft.instrument;
@@ -69,12 +72,12 @@ export function OrderForm({ instrument }: { instrument: string }) {
         headers: { 'idempotency-key': current.key },
         body: JSON.stringify(current.draft),
       });
-      toast.success(`${describe(current.draft)} accepted`);
+      if (isSignedIn(sentBy)) toast.success(`${describe(current.draft)} accepted`);
       settle(null);
-      setQuantity('');
+      if (quantityEdits.current === editsWhenSent) setQuantity('');
     } catch (failure) {
       settle(afterFailure(current, failure instanceof ApiError ? failure.status : 0, resent));
-      toast.error((failure as Error).message);
+      if (isSignedIn(sentBy)) toast.error((failure as Error).message);
     } finally {
       sent();
       setBusy(false);
@@ -146,7 +149,10 @@ export function OrderForm({ instrument }: { instrument: string }) {
               inputMode="decimal"
               placeholder="1.5"
               value={pending ? pending.quantity : quantity}
-              onChange={edit(setQuantity)}
+              onChange={edit((value) => {
+                quantityEdits.current += 1;
+                setQuantity(value);
+              })}
               disabled={Boolean(pending)}
               aria-invalid={Boolean(quantityError)}
             />

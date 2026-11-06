@@ -34,7 +34,7 @@ for path in /orders /auth/refresh; do
   dropped=0
   for n in 1 2 3 4; do
     status=$(curl -s -o /dev/null -w '%{http_code}' -X "$method" "http://127.0.0.1:$port$path" -H 'content-type: application/json' -d '{}')
-    if [ "$status" = 502 ]; then
+    if [ "$status" = 503 ]; then
       dropped=1
       break
     fi
@@ -73,6 +73,35 @@ if [ "$status" != 200 ]; then
   exit 1
 fi
 echo "OK: one slow request does not take both engines out of rotation"
+
+sleep 3
+answer=$(curl -s -w ' %{http_code}' "http://127.0.0.1:$port/slow")
+case "$answer" in
+  *'"statusCode":503'*' 503') ;;
+  *)
+    echo "FAIL: a request both engines left unanswered got: $answer"
+    exit 1
+    ;;
+esac
+echo "OK: a request no engine answers in time is told 503, as the API promises, not 504"
+
+sleep 3
+for n in 1 2 3 4; do
+  curl -s -o /dev/null -X POST "http://127.0.0.1:$port/slow" &
+done
+wait
+status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/orders/book")
+if [ "$status" != 503 ]; then
+  echo "FAIL: with both engines out of rotation the API answered $status"
+  exit 1
+fi
+echo "OK: with both engines out of rotation the API still answers 503, not 502"
+status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/socket.io/?EIO=4&transport=polling")
+if [ "$status" != 200 ]; then
+  echo "FAIL: API timeouts took the WebSocket connections down too: $status"
+  exit 1
+fi
+echo "OK: API timeouts do not take the engines out of rotation for WebSocket connections"
 
 docker rm -f "$name-nginx" "$name-slow-1" "$name-slow-2" >/dev/null
 engine hanging matching-engine-1 "if (req.url.startsWith('/slow')) return; res.end('engine-1');"

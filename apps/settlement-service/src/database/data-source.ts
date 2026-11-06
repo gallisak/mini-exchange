@@ -57,4 +57,8 @@ export function buildDataSourceOptions(
   };
 }
 
-export default new DataSource(buildDataSourceOptions());
+export function migrationDataSourceOptions(database?: string): DataSourceOptions {
+  return buildDataSourceOptions(database, 0);
+}
+
+export default new DataSource(migrationDataSourceOptions());

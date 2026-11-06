@@ -361,7 +361,7 @@ export class ReconciliationService implements OnModuleDestroy {
     const started = Date.now();
     const rechecked = new Map<string, ReconciliationStatus>();
     const matchedNow = new Set<string>();
-    let notRemoved = 0;
+    const notRemoved: { from: Date; to: Date }[] = [];
     let error: string | undefined;
     const describe = (period: { from: Date; to: Date }) =>
       `${new Date(period.from).toISOString()} – ${new Date(period.to).toISOString()}`;
@@ -392,7 +392,7 @@ export class ReconciliationService implements OnModuleDestroy {
           [period.from, period.to],
         )
         .catch((failure: Error) => {
-          notRemoved += 1;
+          notRemoved.push(period);
           error ??= `${describe(period)} matches now, but could not be taken off the unresolved periods, so it will be checked again: ${failure.message}`;
         });
     }
@@ -419,12 +419,21 @@ export class ReconciliationService implements OnModuleDestroy {
       }))
       .sort((x, y) => x.from.localeCompare(y.from));
     const [{ total }]: { total: number }[] = await this.dataSource.query(
-      `SELECT COUNT(*)::int AS "total" FROM "reconciliation_unresolved_periods" WHERE ${exceptCurrent}`,
-      [current.from, current.to],
+      `SELECT COUNT(*)::int AS "total" FROM "reconciliation_unresolved_periods" period
+        WHERE ${exceptCurrent}
+          AND NOT EXISTS (
+            SELECT 1 FROM unnest($3::timestamptz[], $4::timestamptz[]) AS matched("from", "to")
+             WHERE matched."from" = period."from" AND matched."to" = period."to")`,
+      [
+        current.from,
+        current.to,
+        notRemoved.map((period) => period.from),
+        notRemoved.map((period) => period.to),
+      ],
     );
     return {
       unresolved,
-      total: Math.max(0, total - notRemoved),
+      total,
       ...(error ? { error } : {}),
     };
   }

@@ -43,7 +43,7 @@ function dateOf(value: unknown): Date | null {
 
 @Injectable()
 export class EngineClient {
-  private readonly timeoutMs = intEnv("ENGINE_TIMEOUT_MS", 30_000);
+  private readonly timeoutMs = intEnv("ENGINE_TIMEOUT_MS", 75_000);
 
   async tradeTotals(from: Date, to: Date): Promise<EngineInstrumentTotals[]> {
     return (await this.summary(from, to)).instruments;

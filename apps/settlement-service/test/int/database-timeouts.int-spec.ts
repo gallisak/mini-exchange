@@ -1,5 +1,6 @@
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions, reconciliationDataSourceOptions } from '../../src/database/data-source';
+import { migrate } from '../../src/database/migrate';
 
 describe('a database that stops answering', () => {
   const saved = { ...process.env };
@@ -35,6 +36,23 @@ describe('a database that stops answering', () => {
       await holder.query('SELECT pg_advisory_unlock(424242)');
       await holder.release();
     }
+  });
+
+  it('runs migrations without the statement limit, however they are started', async () => {
+    let limit: unknown;
+    const run = jest.spyOn(DataSource.prototype, 'runMigrations').mockImplementation(async function (
+      this: DataSource,
+    ) {
+      limit = await this.query('SHOW statement_timeout');
+      return [];
+    });
+    try {
+      await migrate();
+    } finally {
+      run.mockRestore();
+    }
+
+    expect(limit).toEqual([{ statement_timeout: '0' }]);
   });
 
   it('gives reconciliation its own, longer limit than every other query', async () => {

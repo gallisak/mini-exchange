@@ -15,15 +15,16 @@ export function useOrders() {
   const begin = useMemo(() => latestRequest(), []);
 
   const load = useCallback(async () => {
-    const latest = begin();
+    const turn = begin();
     try {
       const fresh = await api<Order[]>('/api/orders');
-      if (!latest()) return;
-      setOrders((current) => mergeOrders(current ?? [], fresh));
-      loaded.current = true;
-      setError(null);
+      if (turn.show()) {
+        setOrders((current) => mergeOrders(current ?? [], fresh));
+        loaded.current = true;
+      }
+      if (turn.latest()) setError(null);
     } catch (failure) {
-      if (latest()) setError((failure as Error).message);
+      if (turn.latest()) setError((failure as Error).message);
     }
   }, [begin]);
 

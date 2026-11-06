@@ -1,8 +1,21 @@
-export function latestRequest(): () => () => boolean {
+export interface RequestTurn {
+  latest: () => boolean;
+  show: () => boolean;
+}
+
+export function latestRequest(): () => RequestTurn {
   let last = 0;
+  let shown = 0;
   return () => {
     const mine = ++last;
-    return () => mine === last;
+    return {
+      latest: () => mine === last,
+      show: () => {
+        if (mine < shown) return false;
+        shown = mine;
+        return true;
+      },
+    };
   };
 }
 

@@ -11,7 +11,6 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { requireEnv } from '../common/env';
 import { SessionRevocations } from './session-revocations.service';
-import { withTimeout } from '../common/with-timeout';
 
 interface TokenPair {
   accessToken: string;
@@ -101,23 +100,33 @@ export class AuthService {
   }
 
   refresh(refreshToken: string, attempt?: string): Promise<TokenPair> {
-    return this.withinBudget(this.rotate(refreshToken, attempt));
+    return this.withinBudget((beforeCommit) => this.rotate(refreshToken, attempt, beforeCommit));
   }
 
   logout(userId: string, sessionId?: string): Promise<void> {
-    return this.withinBudget(this.endSessions(userId, sessionId));
+    return this.withinBudget(() => this.endSessions(userId, sessionId));
   }
 
-  private async withinBudget<T>(work: Promise<T>): Promise<T> {
-    return withTimeout(work, SESSION_CHANGE_BUDGET_MS, 'The session store').catch((error: unknown) => {
-      if (error instanceof Error && error.message.startsWith('The session store did not answer')) {
-        throw new ServiceUnavailableException(SESSION_BUSY);
-      }
-      throw error;
+  private withinBudget<T>(work: (beforeCommit: () => void) => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      let answered = false;
+      let committing = false;
+      const timer = setTimeout(() => {
+        if (committing) return;
+        answered = true;
+        reject(new ServiceUnavailableException(SESSION_BUSY));
+      }, SESSION_CHANGE_BUDGET_MS);
+      const beforeCommit = () => {
+        if (answered) throw new ServiceUnavailableException(SESSION_BUSY);
+        committing = true;
+      };
+      work(beforeCommit)
+        .then(resolve, reject)
+        .finally(() => clearTimeout(timer));
     });
   }
 
-  private async rotate(refreshToken: string, attempt?: string): Promise<TokenPair> {
+  private async rotate(refreshToken: string, attempt: string | undefined, beforeCommit: () => void): Promise<TokenPair> {
     let claims: { sub?: unknown; jti?: unknown };
     try {
       claims = this.jwt.verify<{ sub?: unknown; jti?: unknown }>(refreshToken, {
@@ -161,7 +170,9 @@ export class AuthService {
           successorId,
         },
       );
-      return this.openSession(manager, user, session.familyId, successorId);
+      const pair = await this.openSession(manager, user, session.familyId, successorId);
+      beforeCommit();
+      return pair;
     });
     if (outcome && 'superseded' in outcome) throw new ConflictException(SUPERSEDED_REFRESH);
     if (outcome && 'reusedFamily' in outcome) {

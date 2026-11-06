@@ -7,8 +7,35 @@ describe('the latest of several overlapping requests', () => {
     const older = begin();
     const newer = begin();
 
-    expect(newer()).toBe(true);
-    expect(older()).toBe(false);
+    expect(newer.latest()).toBe(true);
+    expect(older.latest()).toBe(false);
+  });
+
+  it('shows a success that arrives while a newer request is still running, so its failure has data to sit next to', () => {
+    const begin = latestRequest();
+    const older = begin();
+    const newer = begin();
+
+    expect(older.show()).toBe(true);
+    expect(newer.latest()).toBe(true);
+  });
+
+  it('never replaces a newer answer with an older one', () => {
+    const begin = latestRequest();
+    const older = begin();
+    const newer = begin();
+
+    expect(newer.show()).toBe(true);
+    expect(older.show()).toBe(false);
+  });
+
+  it('shows the newer of two answers that arrive in order', () => {
+    const begin = latestRequest();
+    const older = begin();
+    const newer = begin();
+
+    expect(older.show()).toBe(true);
+    expect(newer.show()).toBe(true);
   });
 
   it('is not started again while the previous one is still running, so a slow answer is still shown', async () => {

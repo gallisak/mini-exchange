@@ -43,18 +43,27 @@ Redis command a book, an order submission, the outbox relay or a lease depends o
 a Redis that stops answering is treated as a failure and retried rather than waited on forever. A
 relay batch whose `EXEC` timed out may still reach the stream later and be published twice;
 settlement books each trade once, so that only costs a duplicate event. Postgres queries in both
-services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it, and
-reconciliation uses its own pool of 8 connections limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`,
+services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it, however they
+are started, and reconciliation uses its own pool of 8 connections limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`,
 10 minutes), and lock waits after `DATABASE_LOCK_TIMEOUT_MS` (10 s, migrations included). A Postgres
 that stops answering altogether, dead or frozen, is given up on 5 s after the statement limit: the
 query fails, its connection is closed and left out of the pool, so a stalled database shows up as a
-stuck book within about 65 s and an API answers 503. A `COMMIT` is the one statement waited on
+stuck book within about 65 s. The gateway does not wait that long: it gives up on an engine after
+4 s (8 s under `/auth/`, 70 s for `/trades/summary`) and answers 503 itself, with the body an engine
+would send, so a client sees 503 whether an engine or the gateway gave up. Timeouts count against an
+engine, so a few within 2 s can take both out of rotation for the API for 2 s; requests are then
+answered 503 at once, also those that need no Postgres. WebSocket connections have their own
+upstream and are not affected. A `COMMIT` is the one statement waited on
 however long it takes (TCP keepalive still finds a dead connection, after the kernel's minutes),
 since giving up on it would not tell whether it happened. A commit can still end unknown: when the
 connection breaks after the `COMMIT` was sent, the book reloads its state from Postgres, an order
 or a rotation is retried under the same key or attempt, and a sign-out is simply sent again.
 Refresh and sign-out wait at most 2 s for the user's session lock and answer 503 after 5 s in all,
-well inside the gateway's 8 s. A book that is stopped waits 15 s for its batch, then lets the fence
+well inside the gateway's 8 s. A rotation answered 503 rolls back instead of committing later, so
+its token stays unused and a retry works; one whose `COMMIT` has started is waited for, not answered
+503. If that `COMMIT` outlasts the gateway the outcome is unknown, so a client that retries should
+send `attempt` to `/auth/refresh`, as the frontend always does: without it the retry counts as reuse
+and ends the session. A book that is stopped waits 15 s for its batch, then lets the fence
 stop it; whatever that batch or a reload still does afterwards no longer touches the book in memory,
 so a newer owner on the same engine is never overwritten. Reconciliation checks one period at a
 time and lets the next check start only once every query of the previous one finished, which keeps
@@ -66,8 +75,10 @@ command stream that fails three reads in a row also marks its book stuck, counte
 never received it, or for reads and cancels (`DELETE` is idempotent to nginx), so an order is never
 sent twice by the gateway; a cancel may be, which is harmless, since a cancel of an order that is
 already cancelled answers 202. Only the last index migration, on `refresh_sessions`, builds its
-index concurrently; one that a failed build left invalid is dropped and built again on the next run,
-and a follow-up migration does the same for an install that had already recorded the first one as done.
+index concurrently. Such a build waits for every older transaction of the database, which blocks no
+reads or writes, so it may wait `DATABASE_INDEX_LOCK_TIMEOUT_MS` (10 minutes) instead of the usual
+lock limit. One that a failed build left invalid is dropped and built again on the next run, and a
+follow-up migration does the same for an install that had already recorded the first one as done.
 The earlier ones took a write lock on their table while it was small.
 
 `/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
@@ -82,7 +93,7 @@ services and by every WebSocket connection) and closes its WebSocket connections
 is recorded in Postgres in the same transaction, and every engine retries the Redis note until it is
 written. A sign-out answers 503 until the note is written, since an access token is refused only
 through that note (a Redis that refuses writes but still answers reads would otherwise let it work
-for up to 15 minutes); signing out again finishes it. Expired refresh sessions are deleted when an engine starts and hourly after that, skipping rows another engine is deleting; a stopping engine cancels a cleanup still running instead of waiting for it. After its Redis subscription comes back an engine checks which
+for up to 15 minutes); signing out again finishes it. Expired refresh sessions are deleted when an engine starts and hourly after that, skipping rows another engine is deleting; a stopping engine cancels a cleanup still running instead of waiting for it, and the cleanup keeps its connection until the cancel went through, so the cancel cannot reach a request that got that connection next. After its Redis subscription comes back an engine checks which
 connected sessions ended, and keeps checking until Redis answers instead of closing every connection. A rotation and a sign-out of the same user take one
 Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
@@ -101,9 +112,12 @@ the attempt in memory, which `sessionStorage` only mirrors for a reload, so a br
 to store it still keeps the warning and the key. A refresh token a newer rotation already replaced
 is answered 409, and the frontend keeps the cookies and answers 503, so a late request cannot sign
 out a session that moved on. A wrong password on `/login` does not sign out the session already open,
-a sign-in ends the loading state of a session check still retrying, and orders that loaded stay
-shown when reloading them fails; only the answer to the latest reload counts, so a late failure
-cannot hang an error over fresh orders. The frontend's API refuses any
+a sign-in ends the loading state of a session check still retrying, and orders and balances that
+loaded stay shown when reloading them fails. A successful answer is shown unless a newer one already
+was, even while a newer reload is running, and only the latest reload sets or clears the error, so a
+late failure cannot hang an error over fresh data. A quantity typed while an order is on its way
+stays when that order is accepted. The answer to an order or a cancel is shown only to the user who
+sent it, and toasts on screen go away when the signed-in user changes. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;
 every page forbids being framed.
 
@@ -248,10 +262,13 @@ say what it has not finished, the run is `incomplete` and does not move on; whil
 checkpoint is already past is unfinished, a run says there is nothing new to check and names what it
 waits for (the engine, settlement, or the error it got) instead of checking anything again. A period
 cut short of the `to` it was asked for says why in `endedEarly`, and a `from` past that point is
-answered as `incomplete` with the reason. A period that does not match is saved in the same
+answered as `incomplete` with the reason. Settlement waits for the engine's totals for
+`ENGINE_TIMEOUT_MS` (75 s), longer than the gateway (70 s), and the gateway longer than the engine
+lets a query run, so a slow period gets its answer instead of ending `incomplete`. A period that does not match is saved in the same
 transaction as the checkpoint and checked again, ten per run within a minute, those checked longest
 ago first, until it matches; the report lists them under `unresolved` with their count in
-`unresolvedTotal` and stays `mismatch` meanwhile. Pages that ask for a run while one is going get its
+`unresolvedTotal` and stays `mismatch` meanwhile; a period that matches again is left out of both
+even if its removal failed or its answer was lost. Pages that ask for a run while one is going get its
 report instead of starting another. The operations panel waits up to five minutes for a run and gives
 up on an answer that does not come. So a
 trade that never got settled keeps showing up, the next days are still checked, a clean history is
