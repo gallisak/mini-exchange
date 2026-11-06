@@ -66,7 +66,8 @@ command stream that fails three reads in a row also marks its book stuck, counte
 never received it, or for reads and cancels (`DELETE` is idempotent to nginx), so an order is never
 sent twice by the gateway; a cancel may be, which is harmless, since a cancel of an order that is
 already cancelled answers 202. Only the last index migration, on `refresh_sessions`, builds its
-index concurrently; one that a failed build left invalid is dropped and built again on the next run.
+index concurrently; one that a failed build left invalid is dropped and built again on the next run,
+and a follow-up migration does the same for an install that had already recorded the first one as done.
 The earlier ones took a write lock on their table while it was small.
 
 `/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
@@ -101,7 +102,8 @@ to store it still keeps the warning and the key. A refresh token a newer rotatio
 is answered 409, and the frontend keeps the cookies and answers 503, so a late request cannot sign
 out a session that moved on. A wrong password on `/login` does not sign out the session already open,
 a sign-in ends the loading state of a session check still retrying, and orders that loaded stay
-shown when reloading them fails. The frontend's API refuses any
+shown when reloading them fails; only the answer to the latest reload counts, so a late failure
+cannot hang an error over fresh orders. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;
 every page forbids being framed.
 

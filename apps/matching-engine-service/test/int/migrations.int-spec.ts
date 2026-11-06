@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto';
 import { DataSource } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/data-source';
 import { RefreshSessionsCreatedIndex1793845000000 } from '../../src/database/migrations/1793845000000-RefreshSessionsCreatedIndex';
+import { RepairRefreshSessionsCreatedIndex1793846000000 } from '../../src/database/migrations/1793846000000-RepairRefreshSessionsCreatedIndex';
 import { resetState } from './harness';
 
 describe('an index built concurrently', () => {
@@ -27,7 +28,7 @@ describe('an index built concurrently', () => {
     return rows[0] ?? null;
   };
 
-  async function run(migration: RefreshSessionsCreatedIndex1793845000000) {
+  async function run(migration: { up(runner: ReturnType<DataSource['createQueryRunner']>): Promise<void> }) {
     const runner = dataSource.createQueryRunner();
     try {
       await migration.up(runner);
@@ -87,5 +88,27 @@ describe('an index built concurrently', () => {
     await run(new RefreshSessionsCreatedIndex1793845000000());
 
     expect((await index())?.valid).toBe(true);
+  });
+
+  it('repairs an index left invalid by an install that already recorded the first index migration as done', async () => {
+    const user = randomUUID();
+    for (let n = 0; n < 2; n += 1) {
+      await dataSource.query(
+        `INSERT INTO "refresh_sessions" ("id", "userId", "familyId", "tokenHash") VALUES ($1, $2, $3, 'hash')`,
+        [randomUUID(), user, randomUUID()],
+      );
+    }
+    await dataSource.query(`DROP INDEX "IDX_refresh_sessions_created"`);
+    await expect(
+      dataSource.query(`CREATE UNIQUE INDEX CONCURRENTLY "IDX_refresh_sessions_created" ON "refresh_sessions" ("userId")`),
+    ).rejects.toThrow();
+    const [{ recorded }] = await dataSource.query(
+      `SELECT COUNT(*)::int AS "recorded" FROM "migrations" WHERE "name" = 'RefreshSessionsCreatedIndex1793845000000'`,
+    );
+    expect(recorded).toBe(1);
+
+    await run(new RepairRefreshSessionsCreatedIndex1793846000000());
+
+    expect(await index()).toMatchObject({ valid: true, definition: expect.stringContaining('("createdAt")') });
   });
 });

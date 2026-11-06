@@ -1,8 +1,9 @@
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
 import { mergeOrders } from './feeds';
+import { latestRequest } from './latest';
 import { useSocket } from './socket';
 import { Order, ResyncScope, resyncsOrders } from './types';
 
@@ -11,17 +12,20 @@ export function useOrders() {
   const [orders, setOrders] = useState<Order[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loaded = useRef(false);
+  const begin = useMemo(() => latestRequest(), []);
 
   const load = useCallback(async () => {
+    const latest = begin();
     try {
       const fresh = await api<Order[]>('/api/orders');
+      if (!latest()) return;
       setOrders((current) => mergeOrders(current ?? [], fresh));
       loaded.current = true;
       setError(null);
     } catch (failure) {
-      setError((failure as Error).message);
+      if (latest()) setError((failure as Error).message);
     }
-  }, []);
+  }, [begin]);
 
   useEffect(() => {
     void load();
