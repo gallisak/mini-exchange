@@ -6,6 +6,7 @@ import { Socket, io } from 'socket.io-client';
 import request from 'supertest';
 import { WALLET_CHANNEL, marketChannel } from '../../src/orders/realtime/market-events';
 import { RedisService } from '../../src/redis/redis.service';
+import { OrdersGateway } from '../../src/orders/gateway/orders.gateway';
 import { TestUser, createApp, eventually, register, resetState, submit } from './harness';
 
 interface OrderEvent {
@@ -251,5 +252,32 @@ describe('private real-time updates', () => {
 
     expect(await disconnected).toBe('io server disconnect');
     await expect(connect(spare)).rejects.toThrow('Unauthorized');
+  });
+
+  it('closes the connections of a session that logged out while the Redis subscription was down', async () => {
+    const alice = await register(app);
+    const { socket } = await connect(alice);
+    const subscriber = (app.get(OrdersGateway) as unknown as { subscriber: Redis }).subscriber;
+    let refused!: () => void;
+    const subscriptionDown = new Promise<void>((resolve) => (refused = resolve));
+    jest.spyOn(subscriber, 'subscribe').mockImplementationOnce((async () => {
+      refused();
+      throw new Error('Connection is closed.');
+    }) as never);
+    const disconnected = new Promise<string>((resolve) => {
+      socket.once('disconnect', resolve);
+      setTimeout(() => resolve('still connected'), 8000);
+    });
+    const redis = new Redis({ host: process.env.REDIS_HOST, port: Number(process.env.REDIS_PORT) });
+    await redis.client('KILL', 'TYPE', 'pubsub');
+    await redis.quit();
+    await subscriptionDown;
+
+    await request(app.getHttpServer())
+      .post('/auth/logout')
+      .set('authorization', `Bearer ${alice.token}`)
+      .expect(204);
+
+    expect(await disconnected).toBe('io server disconnect');
   });
 });

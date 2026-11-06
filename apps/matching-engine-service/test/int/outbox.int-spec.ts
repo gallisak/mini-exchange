@@ -118,3 +118,46 @@ describe('trade events outbox', () => {
     });
   });
 });
+
+describe('trade events outbox while Redis does not answer', () => {
+  let dataSource: DataSource;
+  let redis: RedisService;
+
+  beforeEach(async () => {
+    await resetState();
+    dataSource = await new DataSource(buildDataSourceOptions()).initialize();
+    redis = new RedisService();
+  });
+
+  afterEach(async () => {
+    jest.restoreAllMocks();
+    await redis.onApplicationShutdown();
+    await dataSource.destroy();
+  });
+
+  it('gives up on a publish Redis never answers instead of holding the relay forever', async () => {
+    const relay = new OutboxRelayService(dataSource, redis);
+    await dataSource.getRepository(OutboxMessage).insert({
+      stream: tradeStreamKey('ABC'),
+      type: 'trade.executed',
+      payload: { tradeId: 'hanging' },
+    });
+    const multi = redis.client.multi.bind(redis.client);
+    jest.spyOn(redis.client, 'multi').mockImplementationOnce(((...args: unknown[]) => {
+      const batch = (multi as (...a: unknown[]) => ReturnType<typeof multi>)(...args);
+      batch.exec = (() => new Promise(() => undefined)) as never;
+      return batch;
+    }) as never);
+
+    const first = await Promise.race([
+      relay.publishPending().then(
+        () => 'published',
+        () => 'failed',
+      ),
+      new Promise((resolve) => setTimeout(() => resolve('still waiting'), 10_000)),
+    ]);
+
+    expect(first).toBe('failed');
+    expect(await relay.publishPending()).toBe(1);
+  });
+});

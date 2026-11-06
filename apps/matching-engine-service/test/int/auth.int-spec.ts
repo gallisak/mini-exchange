@@ -5,7 +5,8 @@ import { DataSource, EntityManager } from 'typeorm';
 import { RefreshSession } from '../../src/auth/entities/refresh-session.entity';
 import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793781500000-LowercaseEmails';
 import { setAdmin } from '../../src/tools/grant-admin';
-import { createApp, resetState } from './harness';
+import { RedisService } from '../../src/redis/redis.service';
+import { createApp, eventually, resetState } from './harness';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -427,5 +428,41 @@ describe('authentication sessions', () => {
     } finally {
       process.env.AUTH_RATE_LIMIT = limit;
     }
+  });
+
+  function failNextRedisTransaction() {
+    const client = app.get(RedisService).client;
+    const multi = client.multi.bind(client) as (...args: unknown[]) => ReturnType<typeof client.multi>;
+    jest.spyOn(client, 'multi').mockImplementationOnce(((...args: unknown[]) => {
+      const batch = multi(...args);
+      batch.exec = (async () => {
+        throw new Error('Connection is closed.');
+      }) as never;
+      return batch;
+    }) as never);
+  }
+
+  it('ends the access of a family caught reusing a token even when Redis failed at that moment', async () => {
+    const session = await signUp();
+    const rotated = (await refresh(session.refreshToken).expect(200)).body;
+    failNextRedisTransaction();
+
+    await refresh(session.refreshToken).expect(401);
+
+    await eventually(async () => {
+      await http().get('/orders').set('authorization', `Bearer ${rotated.accessToken}`).expect(401);
+    }, 10_000);
+  });
+
+  it('signs a session out for good even when Redis failed at that moment', async () => {
+    const session = await signUp();
+    failNextRedisTransaction();
+
+    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(204);
+
+    await refresh(session.refreshToken).expect(401);
+    await eventually(async () => {
+      await http().get('/orders').set('authorization', `Bearer ${session.accessToken}`).expect(401);
+    }, 10_000);
   });
 });

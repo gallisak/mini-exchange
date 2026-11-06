@@ -265,4 +265,23 @@ describe('a running book', () => {
     expect(whileLost).toBeNull();
     expect(await raw.get('book:published:ABC')).toBe('3');
   });
+
+  it('does not note a book it took over as published when it could not tell clients to reload', async () => {
+    await dataSource.getRepository(InstrumentState).insert({ instrument: 'ABC', bookSeq: '3' });
+    runner = new BookRunner(
+      'ABC',
+      options({ fence: 2n, publish: (async (event: MarketEvent) => event.type !== 'resync') as never }),
+    );
+    await runner.start();
+
+    await place(uuidV5('after the takeover'), 'seller', 'sell');
+    await eventually(async () =>
+      expect(
+        (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
+      ).toBe('4'),
+    );
+    await sleep(300);
+
+    expect(await raw.get('book:published:ABC')).toBeNull();
+  });
 });

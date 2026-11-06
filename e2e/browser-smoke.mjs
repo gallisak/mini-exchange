@@ -66,6 +66,42 @@ try {
   await placeOrder(buyer, 'buy', '1.00', '1');
   await buyer.getByTestId('order-row').first().getByText('open', { exact: true }).waitFor({ timeout: 10_000 });
   log('the buyer still got live order updates after 3 failed socket token requests');
+
+  const pickInstrument = async (page, name) => {
+    await page.getByRole('combobox', { name: 'Instrument' }).click();
+    await page.getByRole('option', { name, exact: true }).click();
+    await page.getByText(`Quantity (${name})`).waitFor();
+  };
+  const ordersApi = (request) => new URL(request.url()).pathname === '/api/orders' && request.method() === 'POST';
+  await pickInstrument(buyer, 'DEF');
+  await buyer.route('**/api/orders', (route) => (ordersApi(route.request()) ? route.abort() : route.continue()));
+  await buyer.getByLabel('Price (USD)').fill('2.00');
+  await buyer.getByLabel(/Quantity/).fill('1');
+  await buyer.getByRole('button', { name: /^Buy DEF$/ }).click();
+  await buyer.getByText(/may have been placed/).waitFor();
+  await buyer.unroute('**/api/orders');
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  await buyer.route('**/api/orders', async (route) => {
+    if (ordersApi(route.request())) await held;
+    await route.continue();
+  });
+  await pickInstrument(buyer, 'ABC');
+  await buyer.getByLabel('Price (USD)').fill('1.00');
+  await buyer.getByLabel(/Quantity/).fill('1');
+  await buyer.getByRole('button', { name: /^Buy ABC$/ }).click();
+  await buyer.waitForTimeout(300);
+  await pickInstrument(buyer, 'DEF');
+  release();
+  await buyer.getByText(/ABC @ 1.00 accepted/).waitFor();
+  await buyer.unroute('**/api/orders');
+  await buyer.waitForTimeout(500);
+  if (!(await buyer.getByText(/may have been placed/).isVisible())) {
+    throw new Error('an order answered for ABC made the form forget the unconfirmed DEF order');
+  }
+  await buyer.getByRole('button', { name: 'Discard' }).click();
+  await pickInstrument(buyer, 'ABC');
+  log('an answer for one instrument kept the unconfirmed order of another');
   await shot(seller, 'orders');
 
   const market = await (await browser.newContext()).newPage();

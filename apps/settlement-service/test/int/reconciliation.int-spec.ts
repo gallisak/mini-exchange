@@ -31,6 +31,7 @@ describe('reconciliation', () => {
   let engineQueries: URLSearchParams[];
   let firstTradeAt: string | null;
   let pendingSince: string | null;
+  let progressDown: boolean;
   let engineUrl: string;
 
   beforeAll(async () => {
@@ -42,7 +43,8 @@ describe('reconciliation', () => {
         return;
       }
       engineQueries.push(url.searchParams);
-      if (engineRows === 'down' || url.pathname !== '/trades/summary') {
+      const progressProbe = url.searchParams.get('from') === new Date(0).toISOString();
+      if (engineRows === 'down' || url.pathname !== '/trades/summary' || (progressDown && progressProbe)) {
         res.writeHead(503).end();
         return;
       }
@@ -81,6 +83,7 @@ describe('reconciliation', () => {
     engineQueries = [];
     firstTradeAt = null;
     pendingSince = null;
+    progressDown = false;
     app = await createApp();
   });
 
@@ -388,6 +391,52 @@ describe('reconciliation', () => {
     expect(second.body.unresolved).toEqual([{ ...first.body.period, status: 'mismatch' }]);
     expect(third.body.unresolved).toEqual([]);
     expect(fourth.body.status).toBe('ok');
+  });
+
+  it('does not move on when it could not ask the engine what it has not applied yet', async () => {
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    progressDown = true;
+
+    const first = await reconcile({}).expect(200);
+    progressDown = false;
+    const second = await reconcile({}).expect(200);
+
+    expect(first.body.status).toBe('incomplete');
+    expect(second.body.period.from).toBe(first.body.period.from);
+  });
+
+  it('keeps a mismatched period even when saving it failed halfway', async () => {
+    const executedAt = new Date(Date.now() - 30 * 3_600_000);
+    firstTradeAt = executedAt.toISOString();
+    engineRows = (from) =>
+      from <= executedAt
+        ? [{ instrument: 'ABC', count: 1, quantity: '1.00000000', notional: '10.0000000000' }]
+        : [];
+    await corrupt(`ALTER TABLE "reconciliation_unresolved_periods" RENAME TO "unresolved_away"`);
+    let failed: { status: number } = { status: 0 };
+    try {
+      failed = await reconcile({});
+    } finally {
+      await corrupt(`ALTER TABLE "unresolved_away" RENAME TO "reconciliation_unresolved_periods"`);
+    }
+
+    const retried = await reconcile({}).expect(200);
+
+    expect(failed.status).toBe(500);
+    expect(retried.body.period.from).toBe(executedAt.toISOString());
+    expect(retried.body.status).toBe('mismatch');
+  });
+
+  it('says there is nothing new to check while a book has not applied its commands, rather than check the first day again', async () => {
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    pendingSince = new Date(Date.now() - 2 * 3_600_000).toISOString();
+
+    const first = await reconcile({}).expect(200);
+    const second = await reconcile({}).expect(200);
+
+    expect(first.body.period).toEqual({ from: firstTradeAt, to: pendingSince });
+    expect(second.body.status).toBe('incomplete');
+    expect(second.body.period.from).toBe(pendingSince);
   });
 
   it('does not check past the oldest command a book has not applied yet', async () => {

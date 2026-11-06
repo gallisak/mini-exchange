@@ -28,9 +28,15 @@ describe('requests another site makes the browser send', () => {
     }
   });
 
-  it('leave the pages of the app and the API reads alone', () => {
+  it('cannot read through the API either, since a read may rotate the session', () => {
+    expect(call('GET', { 'sec-fetch-site': 'cross-site' }, '/api/orders').status).toBe(403);
+    expect(call('GET', { 'sec-fetch-site': 'same-site' }, '/api/wallet').status).toBe(403);
+  });
+
+  it('leave the pages of the app and links typed into the address bar alone', () => {
     expect(passed(call('GET', { 'sec-fetch-site': 'cross-site' }, '/orders'))).toBe(true);
-    expect(passed(call('GET', { 'sec-fetch-site': 'cross-site' }, '/api/market/book'))).toBe(true);
+    expect(passed(call('GET', { 'sec-fetch-site': 'none' }, '/api/market/book'))).toBe(true);
+    expect(passed(call('GET', { 'sec-fetch-site': 'same-origin' }, '/api/orders'))).toBe(true);
   });
 
   it('are told apart from the requests of the app itself', () => {

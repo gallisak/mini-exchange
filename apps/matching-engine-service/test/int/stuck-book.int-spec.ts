@@ -86,4 +86,42 @@ describe('a book whose batch keeps failing', () => {
       expect(await dataSource.getRepository(TradeRecord).count()).toBe(1);
     });
   });
+
+  it('keeps retrying and recovers while Redis does not answer the note that it is stuck', async () => {
+    const blocker = randomUUID();
+    await dataSource.getRepository(TradeRecord).insert({
+      id: blocker,
+      instrument: 'ABC',
+      seq: '1',
+      buyOrderId: randomUUID(),
+      sellOrderId: randomUUID(),
+      buyerId: 'x',
+      sellerId: 'y',
+      price: '1.00',
+      quantity: '1',
+      executedAt: new Date(),
+    });
+    const set = redis.client.set.bind(redis.client) as (...args: unknown[]) => Promise<unknown>;
+    jest.spyOn(redis.client, 'set').mockImplementation(((...args: unknown[]) =>
+      String(args[0]).startsWith('book:stuck:') ? new Promise(() => undefined) : set(...args)) as never);
+    runner = new BookRunner('ABC', {
+      dataSource,
+      redis,
+      orderBook: new OrderBookService(),
+      batchSize: 100,
+      blockMs: 200,
+      retryDelayMs: 100,
+      fence: 1n,
+      leaseValid: () => true,
+      onFenced: () => undefined,
+    });
+    await runner.start();
+
+    await place('sell-1', 'seller', 'sell');
+    await place('buy-1', 'buyer', 'buy');
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await dataSource.getRepository(TradeRecord).delete({ id: blocker });
+
+    await eventually(async () => expect(await dataSource.getRepository(TradeRecord).count()).toBe(1), 10_000);
+  });
 });
