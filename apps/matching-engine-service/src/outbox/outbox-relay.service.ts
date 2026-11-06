@@ -5,6 +5,7 @@ import { OutboxMessage } from './outbox-message.entity';
 import { runWithTrace } from '../observability/trace-context';
 import { outboxPublished } from '../observability/metrics';
 import { intEnv } from '../common/env';
+import { withTimeout } from '../common/with-timeout';
 
 const RELAY_LOCK_KEY = 7_340_101;
 const MAX_BACKOFF_MS = 5_000;
@@ -16,6 +17,7 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
   private readonly batchSize = intEnv('OUTBOX_BATCH_SIZE', 100);
   private readonly retentionMs = intEnv('OUTBOX_RETENTION_HOURS', 24) * 3_600_000;
   private readonly cleanupEveryMs = intEnv('OUTBOX_CLEANUP_INTERVAL_MS', 60_000);
+  private readonly publishTimeoutMs = intEnv('OUTBOX_PUBLISH_TIMEOUT_MS', 5_000);
   private lastCleanup = 0;
   private running = false;
   private loop?: Promise<void>;
@@ -61,7 +63,7 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
           JSON.stringify(message.payload),
         );
       }
-      const results = await batch.exec();
+      const results = await withTimeout(batch.exec(), this.publishTimeoutMs, 'Redis');
       const failed = (results ?? []).find(([error]) => error);
       if (!results || failed) throw failed?.[0] ?? new Error('Redis transaction was aborted');
 

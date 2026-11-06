@@ -2,10 +2,14 @@ import Redis from 'ioredis';
 
 type StreamEntry = [id: string, fields: string[]];
 
+export const GAVE_UP = 'gave up after';
+
 export async function replayDeadLetters(
   redis: Redis,
-  deadLetterStream = process.env.DEAD_LETTER_STREAM ?? 'settlement:dead-letter',
+  options: { ids?: string[]; deadLetterStream?: string } = {},
 ): Promise<number> {
+  const deadLetterStream = options.deadLetterStream ?? process.env.DEAD_LETTER_STREAM ?? 'settlement:dead-letter';
+  const chosen = options.ids && options.ids.length > 0 ? new Set(options.ids) : null;
   let replayed = 0;
   let after = '-';
   for (;;) {
@@ -15,6 +19,7 @@ export async function replayDeadLetters(
       const letter: Record<string, string> = {};
       for (let i = 0; i + 1 < raw.length; i += 2) letter[raw[i]] = raw[i + 1];
       if (!letter.stream || !letter.fields) continue;
+      if (chosen ? !chosen.has(id) : !letter.reason?.startsWith(GAVE_UP)) continue;
       const fields = JSON.parse(letter.fields) as Record<string, string>;
       await redis
         .multi()

@@ -16,6 +16,6 @@ export class ReconciliationController {
   async reconcile(@Query() query: ReconciliationQueryDto) {
     const to = query.to ? new Date(query.to) : undefined;
     if (!query.from) return this.reconciliation.reconcileSinceCheckpoint(to);
-    return this.reconciliation.reconcile(new Date(query.from), await this.reconciliation.periodEnd(to));
+    return this.reconciliation.reconcileUntil(new Date(query.from), to);
   }
 }

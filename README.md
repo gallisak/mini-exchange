@@ -37,8 +37,10 @@ docker compose exec matching-engine-1 node dist/tools/grant-admin.js you@example
 ```
 
 Every service has a `.env.example`, which compose loads. Secrets are not in it: on the first start
-a one-off `secrets` service generates them per installation. A service started in production with a
-`change-me-*` placeholder from `.env.example` refuses to start.
+a one-off `secrets` service generates them per installation. Any service, the frontend included,
+started in production with a `change-me-*` placeholder from `.env.example` refuses to start. Every
+Redis command a book, the outbox relay or a lease depends on has a timeout, so a Redis that stops
+answering is treated as a failure and retried rather than waited on forever.
 
 `/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
 
@@ -46,12 +48,16 @@ a one-off `secrets` service generates them per installation. A service started i
 docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget -qO- --header "x-internal-key: $SETTLEMENT_INTERNAL_KEY" localhost:3002/metrics'
 ```
 
-**Sessions.** Signing out ends the refresh session, refuses its access token at once (a note in Redis
-for 16 minutes, checked by both services) and closes its WebSocket connections. A rotation and a
-sign-out of the same user take one Postgres advisory lock, so a sign-out never misses a refresh token
-that a parallel rotation is saving. Refresh and sign-out are not counted against the sign-in limit.
-Requests that change something through the frontend's API are refused when another site makes the
-browser send them, and every page forbids being framed.
+**Sessions.** Signing out, or reusing a refresh token, ends the refresh session, refuses its access
+token at once (a note in Redis for 16 minutes, checked by both services) and closes its WebSocket
+connections. The ended session is recorded in Postgres in the same transaction, and every engine
+retries the Redis note until it is written, so a Redis failure only delays it; while Redis is down the
+services cannot check a token and answer 503. A rotation and a sign-out of the same user take one
+Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
+saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
+sign-out that did not go through instead of pretending it did. The frontend's API refuses any
+request another site makes the browser send, reads included, since a read may rotate the session;
+every page forbids being framed.
 
 ## Architecture and data path
 
@@ -168,11 +174,13 @@ The event is acknowledged only after the commit and the wallet announcement. If 
 between, another consumer reclaims the event, step 1 finds the reference, and the money does not
 move again. A trade that keeps failing is retried until it was delivered `CONSUMER_MAX_DELIVERIES`
 times and is older than `CONSUMER_GIVE_UP_AFTER_MS` (an hour), then dead-lettered with the last
-error; reconciliation shows it as unsettled. Once the cause is fixed, put dead letters back on their
-streams; settling twice is impossible, so replaying is safe:
+error; reconciliation shows it as unsettled. Once the cause is fixed, put those dead letters back on
+their streams; settling twice is impossible, so replaying is safe. Malformed events and trades that
+conflict with a settled one stay dead-lettered unless named with `--id`, since replaying them changes
+nothing:
 
 ```bash
-docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/consumer/replay-dead-letters.js
+docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/consumer/replay-dead-letters.js [--id <dead-letter id>]
 ```
 
 **Reconciliation** checks that every ledger transaction balances, every balance equals its entries,
@@ -183,7 +191,10 @@ they touched. A run without `from` checks at most one day (`RECONCILIATION_STEP_
 where the last run ended, or at the first trade either service knows of. No period ends later than
 a minute ago or than the oldest command a book has not applied yet: a trade carries the time its
 order entered the stream, so a book that lags behind could still add trades to a period checked
-earlier. A period that does not match is kept and checked again on every run, up to ten at a time,
+earlier. If the engine cannot say which commands it has not applied, the run is `incomplete` and
+does not move on; while a book has not applied a command the checkpoint is already past, a run says
+there is nothing new to check instead of checking anything again. A period that does not match is
+saved in the same transaction as the checkpoint and checked again on every run, up to ten at a time,
 until it matches; the report lists them under `unresolved` and stays `mismatch` meanwhile. So a
 trade that never got settled keeps showing up, the next days are still checked, a clean history is
 not checked again, and no run scans everything. Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:

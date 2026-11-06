@@ -15,6 +15,7 @@ import {
 import { runWithTrace } from '../observability/trace-context';
 import { tradeEvents } from '../observability/metrics';
 import { closeRedis, createRedis } from '../common/redis';
+import { GAVE_UP } from './dead-letters';
 
 const MAX_BACKOFF_MS = 5000;
 
@@ -193,7 +194,7 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
       }
       tradeEvents.inc({ result: 'failed' });
       if (this.givesUp(id, deliveries)) {
-        const reason = `gave up after ${deliveries} deliveries: ${(error as Error).message}`;
+        const reason = `${GAVE_UP} ${deliveries} deliveries: ${(error as Error).message}`;
         await this.deadLetter(stream, id, fields, deliveries, reason);
         return;
       }

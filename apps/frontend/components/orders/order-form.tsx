@@ -67,7 +67,12 @@ export function OrderForm({ instrument }: { instrument: string }) {
     event.preventDefault();
     if (!ready) return;
     const current = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
-    setAttempt(unconfirmed(current));
+    const sentBy = owner;
+    const settle = (next: Attempt | null) => {
+      if (sentBy) saveAttempt(sessionStore(), sentBy, current.draft.instrument, next);
+      setAttempt(next);
+    };
+    settle(unconfirmed(current));
     setBusy(true);
     try {
       await api('/api/orders', {
@@ -76,10 +81,10 @@ export function OrderForm({ instrument }: { instrument: string }) {
         body: JSON.stringify(current.draft),
       });
       toast.success(`${describe(current.draft)} accepted`);
-      setAttempt(null);
+      settle(null);
       setQuantity('');
     } catch (failure) {
-      setAttempt(afterFailure(current, failure instanceof ApiError ? failure.status : 0));
+      settle(afterFailure(current, failure instanceof ApiError ? failure.status : 0));
       toast.error((failure as Error).message);
     } finally {
       setBusy(false);

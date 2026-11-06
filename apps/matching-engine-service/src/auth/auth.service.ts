@@ -119,6 +119,7 @@ export class AuthService {
           { familyId: session.familyId, revokedAt: IsNull() },
           { revokedAt: () => 'now()' },
         );
+        await this.revocations.record(manager, [session.familyId]);
         return { reusedFamily: session.familyId };
       }
       if (!user) return null;
@@ -135,7 +136,7 @@ export class AuthService {
       return this.openSession(manager, user, session.familyId, successorId);
     });
     if (outcome && 'reusedFamily' in outcome) {
-      await this.revocations.revoke([outcome.reusedFamily]);
+      await this.revocations.announce([outcome.reusedFamily]);
       throw new UnauthorizedException(INVALID_REFRESH);
     }
     if (!outcome) throw new UnauthorizedException(INVALID_REFRESH);
@@ -155,9 +156,11 @@ export class AuthService {
           .returning(['familyId'])
           .execute()
       ).raw;
-      return [...new Set([...(familyId ? [familyId] : []), ...revoked.map((row) => row.familyId)])];
+      const families = [...new Set([...(familyId ? [familyId] : []), ...revoked.map((row) => row.familyId)])];
+      await this.revocations.record(manager, families);
+      return families;
     });
-    await this.revocations.revoke(families);
+    await this.revocations.announce(families);
   }
 
   private async lockSessionsOf(manager: EntityManager, userId: string): Promise<void> {

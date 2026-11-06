@@ -402,7 +402,7 @@ describe('reconciliation', () => {
     const second = await reconcile({}).expect(200);
 
     expect(first.body.status).toBe('incomplete');
-    expect(second.body.period.from).toBe(first.body.period.from);
+    expect(second.body.period.from).toBe(firstTradeAt);
   });
 
   it('keeps a mismatched period even when saving it failed halfway', async () => {

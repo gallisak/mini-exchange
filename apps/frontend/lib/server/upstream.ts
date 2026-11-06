@@ -45,20 +45,21 @@ export async function upstream(
   request: NextRequest,
   service: Service,
   path: string,
-  init: RequestInit & { headers?: Record<string, string> } = {},
+  init: RequestInit & { headers?: Record<string, string>; timeoutMs?: number } = {},
   accessToken?: string,
 ): Promise<UpstreamResult> {
+  const { timeoutMs = UPSTREAM_TIMEOUT_MS, ...options } = init;
   let response: Response;
   try {
     response = await fetch(`${SERVICES[service]()}${path}`, {
-      ...init,
+      ...options,
       cache: 'no-store',
-      signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
+      signal: AbortSignal.timeout(timeoutMs),
       headers: {
         'content-type': 'application/json',
         ...forwardedHeaders(request),
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
-        ...(init.headers ?? {}),
+        ...(options.headers ?? {}),
       },
     });
   } catch {

@@ -22,7 +22,7 @@ function Orders() {
         <InstrumentSelect />
       </div>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
-        <OrderForm instrument={instrument} />
+        <OrderForm key={instrument} instrument={instrument} />
         <OrdersTable orders={orders} error={error} reload={reload} />
       </div>
     </div>

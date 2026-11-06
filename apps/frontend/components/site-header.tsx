@@ -13,6 +13,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger,
 } from '@/components/ui/dropdown-menu';
+import { toast } from 'sonner';
 import { useSession } from '@/lib/client/session';
 import { cn } from '@/lib/utils';
 
@@ -74,8 +75,12 @@ export function SiteHeader() {
                 <DropdownMenuSeparator />
                 <DropdownMenuItem
                   onSelect={async () => {
-                    await signOut();
-                    router.push('/login');
+                    try {
+                      await signOut();
+                      router.push('/login');
+                    } catch (failure) {
+                      toast.error((failure as Error).message);
+                    }
                   }}
                 >
                   <LogOut className="mr-2 h-4 w-4" />

@@ -14,8 +14,17 @@ function fromAnotherSite(request: NextRequest): boolean {
   }
 }
 
+function fromAnotherSiteThroughTheBrowser(request: NextRequest): boolean {
+  const site = request.headers.get('sec-fetch-site');
+  return site === 'cross-site' || site === 'same-site';
+}
+
 export function middleware(request: NextRequest) {
-  if (!READS.has(request.method) && fromAnotherSite(request)) {
+  if (!request.nextUrl.pathname.startsWith('/api/')) return NextResponse.next();
+  const refused = READS.has(request.method)
+    ? fromAnotherSiteThroughTheBrowser(request)
+    : fromAnotherSite(request);
+  if (refused) {
     return NextResponse.json({ message: 'Requests from other sites are not accepted' }, { status: 403 });
   }
   return NextResponse.next();

@@ -1,5 +1,8 @@
 import { Injectable } from '@nestjs/common';
 import { RedisService } from '../redis/redis.service';
+import { withTimeout } from '../common/with-timeout';
+
+const LOCK_COMMAND_TIMEOUT_MS = 1_000;
 
 const ACQUIRE = `
 if redis.call('SET', KEYS[1], ARGV[1], 'NX', 'PX', ARGV[2]) then
@@ -34,20 +37,24 @@ export class RedisLockService {
   constructor(private readonly redis: RedisService) {}
 
   async acquire(key: string, ownerId: string, ttlMs: number): Promise<bigint | null> {
-    const token = (await this.redis.client.eval(ACQUIRE, 2, key, fenceKey(key), ownerId, ttlMs)) as number;
+    const token = (await this.run(this.redis.client.eval(ACQUIRE, 2, key, fenceKey(key), ownerId, ttlMs))) as number;
     return token > 0 ? BigInt(token) : null;
   }
 
   async renew(key: string, ownerId: string, ttlMs: number): Promise<boolean> {
-    return (await this.redis.client.eval(RENEW, 1, key, ownerId, ttlMs)) === 1;
+    return (await this.run(this.redis.client.eval(RENEW, 1, key, ownerId, ttlMs))) === 1;
   }
 
   async release(key: string, ownerId: string): Promise<boolean> {
-    return (await this.redis.client.eval(RELEASE, 1, key, ownerId)) === 1;
+    return (await this.run(this.redis.client.eval(RELEASE, 1, key, ownerId))) === 1;
+  }
+
+  private run<T>(command: Promise<T>): Promise<T> {
+    return withTimeout(command, LOCK_COMMAND_TIMEOUT_MS, 'Redis');
   }
 
   async raiseFence(key: string, atLeast: bigint): Promise<void> {
-    await this.redis.client.eval(RAISE_FENCE, 1, fenceKey(key), atLeast.toString());
+    await this.run(this.redis.client.eval(RAISE_FENCE, 1, fenceKey(key), atLeast.toString()));
   }
 }
 

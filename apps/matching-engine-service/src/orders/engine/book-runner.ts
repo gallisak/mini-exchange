@@ -215,6 +215,7 @@ export class BookRunner {
       resync: { instruments: [this.instrument], owners: [], allOwners: true },
     });
     if (announced) await this.markPublished(bookSeq);
+    else this.updatesLost = true;
   }
 
   private async markPublished(bookSeq: bigint): Promise<void> {
@@ -271,16 +272,20 @@ export class BookRunner {
       failures: (this.stuck?.failures ?? 0) + 1,
       error: error.message.slice(0, 500),
     };
-    await this.options.redis.client
-      .set(stuckKey(this.instrument), JSON.stringify(this.stuck), 'PX', STUCK_TTL_MS)
-      .catch(() => undefined);
+    await withTimeout(
+      this.options.redis.client.set(stuckKey(this.instrument), JSON.stringify(this.stuck), 'PX', STUCK_TTL_MS),
+      MARKER_TIMEOUT_MS,
+      'Redis',
+    ).catch(() => undefined);
   }
 
   private async recovered(): Promise<void> {
     if (!this.stuck) return;
     this.logger.log(`Batch committed again after ${this.stuck.failures} failed attempts`);
     this.stuck = undefined;
-    await this.options.redis.client.del(stuckKey(this.instrument)).catch(() => undefined);
+    await withTimeout(this.options.redis.client.del(stuckKey(this.instrument)), MARKER_TIMEOUT_MS, 'Redis').catch(
+      () => undefined,
+    );
   }
 
   private async process(commands: StreamCommand[]): Promise<void> {

@@ -52,7 +52,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   const signOut = useCallback(async () => {
-    await api('/api/auth/logout', { method: 'POST' }).catch(() => undefined);
+    await api('/api/auth/logout', { method: 'POST' });
     setUser(null);
   }, []);
 

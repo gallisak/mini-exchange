@@ -107,6 +107,7 @@ export class OrdersGateway
           if (subscribedBefore || missedUpdates) {
             this.logger.warn('Real-time subscription restored, telling clients to reload');
             server.emit('resync', {});
+            void this.closeEndedSessions();
           }
           subscribedBefore = true;
           missedUpdates = false;
@@ -241,6 +242,15 @@ export class OrdersGateway
       return { userId: payload.sub, expiresAt: payload.exp * 1000, sessionId };
     } catch {
       return null;
+    }
+  }
+
+  private async closeEndedSessions(): Promise<void> {
+    const sockets = await this.server.local.fetchSockets();
+    const sessions = [...new Set(sockets.map((socket) => socket.data.sessionId as string | undefined))];
+    for (const sessionId of sessions) {
+      if (!sessionId || !(await this.revocations.isRevoked(sessionId).catch(() => false))) continue;
+      this.server.local.in(sessionRoom(sessionId)).disconnectSockets(true);
     }
   }
 

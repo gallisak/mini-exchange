@@ -75,22 +75,90 @@ export class ReconciliationService {
     private readonly engine: EngineClient,
   ) {}
 
-  async periodEnd(to?: Date): Promise<Date> {
-    return this.endOf(to, await this.engine.progress().catch(() => null));
+  async reconcileUntil(from: Date, to?: Date): Promise<ReconciliationReport> {
+    const progress = await this.progress();
+    const report = await this.reconcile(from, this.endOf(to, progress.known));
+    return progress.error ? this.incomplete(report, progress.error) : report;
   }
 
-  async defaultPeriod(to?: Date): Promise<{ from: Date; to: Date }> {
-    const progress = await this.engine.progress().catch(() => null);
-    const end = this.endOf(to, progress).getTime();
+  async reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
+    const progress = await this.progress();
+    const end = this.endOf(to, progress.known).getTime();
     const checkpoint = await this.dataSource
       .getRepository(ReconciliationCheckpoint)
       .findOneBy({ name: CHECKPOINT });
-    let from =
-      checkpoint && checkpoint.reconciledUntil.getTime() < end
-        ? checkpoint.reconciledUntil.getTime()
-        : await this.firstActivity(progress?.firstTradeAt ?? null);
+    const reconciledUntil = checkpoint?.reconciledUntil.getTime() ?? null;
+    const report =
+      reconciledUntil !== null && reconciledUntil >= end
+        ? this.nothingNew(new Date(reconciledUntil), progress.known?.pendingSince ?? null)
+        : await this.reconcileNext(reconciledUntil, end, progress);
+    const unresolved = await this.recheckUnresolved(report.period);
+    const status = [report.status, ...unresolved.map((row) => row.status)].reduce((worst, next) =>
+      SEVERITY[next] > SEVERITY[worst] ? next : worst,
+    );
+    return { ...report, status, unresolved };
+  }
+
+  private async reconcileNext(
+    reconciledUntil: number | null,
+    end: number,
+    progress: { known: EngineProgress | null; error?: string },
+  ): Promise<ReconciliationReport> {
+    let from = reconciledUntil ?? (await this.firstActivity(progress.known?.firstTradeAt ?? null));
     if (from === null || from >= end) from = end - this.stepMs;
-    return { from: new Date(from), to: new Date(Math.min(end, from + this.stepMs)) };
+    const period = { from: new Date(from), to: new Date(Math.min(end, from + this.stepMs)) };
+    const checked = await this.reconcile(period.from, period.to);
+    const report = progress.error ? this.incomplete(checked, progress.error) : checked;
+    if (progress.error || report.status === 'incomplete') return report;
+    await this.dataSource.transaction(async (manager) => {
+      if (report.status === 'mismatch') {
+        await manager.query(
+          `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+          [period.from, period.to],
+        );
+      }
+      await manager.query(
+        `INSERT INTO "reconciliation_checkpoints" ("name", "reconciledUntil") VALUES ($1, $2)
+         ON CONFLICT ("name") DO UPDATE
+           SET "reconciledUntil" = GREATEST("reconciliation_checkpoints"."reconciledUntil", EXCLUDED."reconciledUntil")`,
+        [CHECKPOINT, period.to],
+      );
+    });
+    return report;
+  }
+
+  private async progress(): Promise<{ known: EngineProgress | null; error?: string }> {
+    return this.engine.progress().then(
+      (known) => ({ known }),
+      (error: Error) => ({ known: null, error: `Could not ask the engine which commands it has not applied: ${error.message}` }),
+    );
+  }
+
+  private incomplete(report: ReconciliationReport, reason: string): ReconciliationReport {
+    return {
+      ...report,
+      status: report.status === 'mismatch' ? 'mismatch' : 'incomplete',
+      engineError: report.engineError ?? reason,
+    };
+  }
+
+  private nothingNew(reconciledUntil: Date, pendingSince: Date | null): ReconciliationReport {
+    const at = reconciledUntil.toISOString();
+    return {
+      status: 'incomplete',
+      period: { from: at, to: at },
+      instruments: [],
+      ledger: {
+        unbalancedTransactions: [],
+        transactionsWithoutEntries: [],
+        accountsOffEntries: [],
+        assetsNotBalanced: [],
+        tradesOffEntries: [],
+      },
+      engineError: pendingSince
+        ? `Nothing new to check: a book has not applied commands queued since ${pendingSince.toISOString()}`
+        : `Nothing new to check after ${at}`,
+    };
   }
 
   private endOf(to: Date | undefined, progress: EngineProgress | null): Date {
@@ -110,37 +178,13 @@ export class ReconciliationService {
     return known.length > 0 ? Math.min(...known) : null;
   }
 
-  async reconcileSinceCheckpoint(to?: Date): Promise<ReconciliationReport> {
-    const period = await this.defaultPeriod(to);
-    const report = await this.reconcile(period.from, period.to);
-    if (report.status !== 'incomplete') {
-      await this.dataSource.query(
-        `INSERT INTO "reconciliation_checkpoints" ("name", "reconciledUntil") VALUES ($1, $2)
-         ON CONFLICT ("name") DO UPDATE
-           SET "reconciledUntil" = GREATEST("reconciliation_checkpoints"."reconciledUntil", EXCLUDED."reconciledUntil")`,
-        [CHECKPOINT, period.to],
-      );
-    }
-    if (report.status === 'mismatch') {
-      await this.dataSource.query(
-        `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
-        [period.from, period.to],
-      );
-    }
-    const unresolved = await this.recheckUnresolved(period);
-    const status = [report.status, ...unresolved.map((row) => row.status)].reduce((worst, next) =>
-      SEVERITY[next] > SEVERITY[worst] ? next : worst,
-    );
-    return { ...report, status, unresolved };
-  }
-
   private async recheckUnresolved(current: {
-    from: Date;
-    to: Date;
+    from: string;
+    to: string;
   }): Promise<NonNullable<ReconciliationReport['unresolved']>> {
     const periods: { from: Date; to: Date }[] = await this.dataSource.query(
       `SELECT "from", "to" FROM "reconciliation_unresolved_periods"
-        WHERE NOT ("from" = $1 AND "to" = $2)
+        WHERE NOT ("from" = $1::timestamptz AND "to" = $2::timestamptz)
         ORDER BY "from"
         LIMIT ${UNRESOLVED_LIMIT}`,
       [current.from, current.to],
