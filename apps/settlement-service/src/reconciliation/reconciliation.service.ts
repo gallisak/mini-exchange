@@ -85,12 +85,26 @@ export interface ReconciliationReport {
     rechecked: boolean;
   }[];
   unresolvedTotal?: number;
+  recheckError?: string;
 }
 
 interface Progress {
   known: EngineProgress | null;
   waiting?: string;
   error?: string;
+}
+
+async function whenAllFinished<T extends readonly unknown[]>(
+  work: readonly [...T],
+): Promise<{ -readonly [K in keyof T]: Awaited<T[K]> }> {
+  const results = await Promise.allSettled(work);
+  const failed = results.find(
+    (result): result is PromiseRejectedResult => result.status === "rejected",
+  );
+  if (failed) throw failed.reason;
+  return results.map(
+    (result) => (result as PromiseFulfilledResult<unknown>).value,
+  ) as { -readonly [K in keyof T]: Awaited<T[K]> };
 }
 
 const units = (value: string | null | undefined) =>
@@ -166,14 +180,23 @@ export class ReconciliationService implements OnModuleDestroy {
             progress.error ?? endedEarly ?? null,
           )
         : await this.reconcileNext(reconciledUntil, end, progress, endedEarly);
-    const { unresolved, total } = await this.recheckUnresolved(report.period);
+    const { unresolved, total, error } = await this.recheckUnresolved(
+      report.period,
+    );
     const status = [
       report.status,
       ...unresolved.map((row) => row.status),
+      ...(error ? ["incomplete" as const] : []),
     ].reduce((worst, next) =>
       SEVERITY[next] > SEVERITY[worst] ? next : worst,
     );
-    return { ...report, status, unresolved, unresolvedTotal: total };
+    return {
+      ...report,
+      status,
+      unresolved,
+      unresolvedTotal: total,
+      ...(error ? { recheckError: error } : {}),
+    };
   }
 
   private async reconcileNext(
@@ -323,6 +346,7 @@ export class ReconciliationService implements OnModuleDestroy {
   }): Promise<{
     unresolved: NonNullable<ReconciliationReport["unresolved"]>;
     total: number;
+    error?: string;
   }> {
     const exceptCurrent = `NOT ("from" = $1::timestamptz AND "to" = $2::timestamptz)`;
     const keyOf = (period: { from: Date; to: Date }) =>
@@ -336,8 +360,22 @@ export class ReconciliationService implements OnModuleDestroy {
     );
     const started = Date.now();
     const rechecked = new Map<string, ReconciliationStatus>();
+    const matchedNow = new Set<string>();
+    let notRemoved = 0;
+    let error: string | undefined;
+    const describe = (period: { from: Date; to: Date }) =>
+      `${new Date(period.from).toISOString()} – ${new Date(period.to).toISOString()}`;
     for (const period of due) {
       if (Date.now() - started >= RECHECK_BUDGET_MS) break;
+      try {
+        await this.dataSource.query(
+          `UPDATE "reconciliation_unresolved_periods" SET "checkedAt" = now() WHERE "from" = $1 AND "to" = $2`,
+          [period.from, period.to],
+        );
+      } catch (failure) {
+        error = `Stopped checking unresolved periods again: could not note that ${describe(period)} is being checked: ${(failure as Error).message}`;
+        break;
+      }
       const status = await this.reconcile(
         new Date(period.from),
         new Date(period.to),
@@ -345,28 +383,24 @@ export class ReconciliationService implements OnModuleDestroy {
         (report) => report.status,
         (): ReconciliationStatus => "incomplete",
       );
-      try {
-        if (status === "ok") {
-          await this.dataSource.query(
-            `DELETE FROM "reconciliation_unresolved_periods" WHERE "from" = $1 AND "to" = $2`,
-            [period.from, period.to],
-          );
-          continue;
-        }
-        await this.dataSource.query(
-          `UPDATE "reconciliation_unresolved_periods" SET "checkedAt" = now() WHERE "from" = $1 AND "to" = $2`,
-          [period.from, period.to],
-        );
-      } catch {
-        continue;
-      }
       if (status === "mismatch") rechecked.set(keyOf(period), status);
+      if (status !== "ok") continue;
+      matchedNow.add(keyOf(period));
+      await this.dataSource
+        .query(
+          `DELETE FROM "reconciliation_unresolved_periods" WHERE "from" = $1 AND "to" = $2`,
+          [period.from, period.to],
+        )
+        .catch((failure: Error) => {
+          notRemoved += 1;
+          error ??= `${describe(period)} matches now, but could not be taken off the unresolved periods, so it will be checked again: ${failure.message}`;
+        });
     }
     const listed: { from: Date; to: Date }[] = await this.dataSource.query(
       `SELECT "from", "to" FROM "reconciliation_unresolved_periods"
         WHERE ${exceptCurrent}
         ORDER BY "from"
-        LIMIT ${UNRESOLVED_LISTED}`,
+        LIMIT ${UNRESOLVED_LISTED + RECHECK_LIMIT}`,
       [current.from, current.to],
     );
     const shown = new Map<string, { from: Date; to: Date }>();
@@ -374,7 +408,7 @@ export class ReconciliationService implements OnModuleDestroy {
       ...due.filter((row) => rechecked.has(keyOf(row))),
       ...listed,
     ])
-      shown.set(keyOf(period), period);
+      if (!matchedNow.has(keyOf(period))) shown.set(keyOf(period), period);
     const unresolved = [...shown.entries()]
       .slice(0, UNRESOLVED_LISTED)
       .map(([key, period]) => ({
@@ -388,7 +422,11 @@ export class ReconciliationService implements OnModuleDestroy {
       `SELECT COUNT(*)::int AS "total" FROM "reconciliation_unresolved_periods" WHERE ${exceptCurrent}`,
       [current.from, current.to],
     );
-    return { unresolved, total };
+    return {
+      unresolved,
+      total: Math.max(0, total - notRemoved),
+      ...(error ? { error } : {}),
+    };
   }
 
   reconcile(from: Date, to: Date): Promise<ReconciliationReport> {
@@ -404,7 +442,7 @@ export class ReconciliationService implements OnModuleDestroy {
   }
 
   private async check(from: Date, to: Date): Promise<ReconciliationReport> {
-    const [ledger, ledgerTotals, engine] = await Promise.all([
+    const [ledger, ledgerTotals, engine] = await whenAllFinished([
       this.ledgerIssues(from, to),
       this.ledgerTradeTotals(from, to),
       this.engine.tradeTotals(from, to).then(
@@ -513,7 +551,7 @@ export class ReconciliationService implements OnModuleDestroy {
       SELECT t."id" FROM "ledger_transactions" t
        WHERE t."createdAt" >= $1 AND t."createdAt" < $2`;
     const [unbalanced, withoutEntries, accounts, assets, trades] =
-      await Promise.all([
+      await whenAllFinished([
         this.dataSource.query(
           `SELECT e."transactionId", e."asset", SUM(e."amount")::text AS "total"
            FROM "ledger_entries" e

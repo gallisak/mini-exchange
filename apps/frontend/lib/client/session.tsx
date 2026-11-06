@@ -1,7 +1,8 @@
 'use client';
 
 import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
-import { ApiError, UNAUTHORIZED_EVENT, UnauthorizedDetail, api } from './api';
+import { UNAUTHORIZED_EVENT, UnauthorizedDetail, api } from './api';
+import { checkSession } from './session-check';
 import { answeredForCurrentSession } from './session-order';
 import { User } from './types';
 
@@ -24,20 +25,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const refresh = useCallback(async () => {
     const started = generation.current;
     const current = () => generation.current === started;
-    for (let attempt = 0; ; attempt += 1) {
-      try {
-        const { user: found } = await api<{ user: User | null }>('/api/auth/session');
-        if (current()) setUser(found);
-        break;
-      } catch (failure) {
-        const transient = !(failure instanceof ApiError) || failure.status === 0 || failure.status >= 500;
-        if (!transient || attempt >= 4) {
-          if (current()) setUser(null);
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 1_000 * 2 ** attempt));
-      }
-    }
+    const outcome = await checkSession(
+      () => api<{ user: User | null }>('/api/auth/session').then((body) => body.user),
+      current,
+    );
+    if (!outcome) return;
+    setUser(outcome.user);
     setLoading(false);
   }, []);
 
@@ -55,10 +48,12 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     const { user: signedIn } = await api<{ user: User }>(`/api/auth/${mode}`, {
       method: 'POST',
       body: JSON.stringify({ email, password }),
+      endsSessionOn401: false,
     });
     generation.current += 1;
     signedInAt.current = performance.now();
     setUser(signedIn);
+    setLoading(false);
     return signedIn;
   }, []);
 
@@ -66,6 +61,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     await api('/api/auth/logout', { method: 'POST' });
     generation.current += 1;
     setUser(null);
+    setLoading(false);
   }, []);
 
   return (

@@ -7,6 +7,7 @@ import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793
 import { setAdmin } from '../../src/tools/grant-admin';
 import { RedisService } from '../../src/redis/redis.service';
 import { SessionRevocations } from '../../src/auth/session-revocations.service';
+import { buildDataSourceOptions } from '../../src/database/data-source';
 import { createApp, eventually, resetState } from './harness';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -214,7 +215,7 @@ describe('authentication sessions', () => {
     const retried = await refresh(session.refreshToken, attempt).expect(200);
 
     const next = await refresh(retried.body.refreshToken).expect(200);
-    await refresh(session.refreshToken, attempt).expect(401);
+    await refresh(session.refreshToken, attempt).expect(409);
     await refresh(next.body.refreshToken).expect(200);
   });
 
@@ -506,5 +507,78 @@ describe('authentication sessions', () => {
       await holder.release();
     }
     await refresh(session.refreshToken).expect(200);
+  });
+
+  it('answers 503 within the gateway timeout when a sign-out waits for the session lock', async () => {
+    const session = await signUp();
+    const [{ userId }] = await app.get(DataSource).getRepository(RefreshSession).find();
+    const holder = app.get(DataSource).createQueryRunner();
+    await holder.connect();
+    await holder.query('SELECT pg_advisory_lock(hashtext($1))', [`refresh-sessions:${userId}`]);
+    try {
+      const started = Date.now();
+      await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(503);
+      expect(Date.now() - started).toBeLessThan(6_000);
+    } finally {
+      await holder.query('SELECT pg_advisory_unlock(hashtext($1))', [`refresh-sessions:${userId}`]);
+      await holder.release();
+    }
+    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(204);
+  });
+
+  it('cleans up expired refresh sessions as soon as an engine starts, not an hour later', async () => {
+    const session = await signUp();
+    const repository = app.get(DataSource).getRepository(RefreshSession);
+    const [kept] = await repository.find();
+    const old = randomUUID();
+    await repository.insert({
+      id: old,
+      userId: kept.userId,
+      familyId: randomUUID(),
+      tokenHash: 'expired',
+      createdAt: new Date(Date.now() - 9 * 24 * 3_600_000),
+    });
+    await app.close();
+
+    app = await createApp();
+    const restarted = app.get(DataSource).getRepository(RefreshSession);
+
+    await eventually(async () => {
+      expect((await restarted.find()).map((row) => row.id)).toEqual([kept.id]);
+    });
+    await refresh(session.refreshToken).expect(200);
+  });
+
+  it('stops at once while a cleanup is waiting on the database', async () => {
+    await app.close();
+    const dataSource = await new DataSource(buildDataSourceOptions()).initialize();
+    const familyId = randomUUID();
+    await dataSource.query(
+      `INSERT INTO "session_revocations" ("familyId", "revokedAt") VALUES ($1, now() - interval '2 days')`,
+      [familyId],
+    );
+    const holder = dataSource.createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    await holder.query(`SELECT 1 FROM "session_revocations" WHERE "familyId" = $1 FOR UPDATE`, [familyId]);
+    try {
+      app = await createApp();
+      await eventually(async () => {
+        const [{ waiting }] = await dataSource.query(
+          `SELECT COUNT(*)::int AS "waiting" FROM pg_stat_activity
+            WHERE "query" LIKE 'DELETE FROM "session_revocations"%' AND "wait_event_type" = 'Lock'`,
+        );
+        expect(waiting).toBe(1);
+      });
+
+      const started = Date.now();
+      await app.close();
+      expect(Date.now() - started).toBeLessThan(2_000);
+    } finally {
+      await holder.rollbackTransaction();
+      await holder.release();
+      await dataSource.destroy();
+      app = await createApp();
+    }
   });
 });

@@ -25,7 +25,7 @@ function messageOf(body: unknown, status: number): string {
 
 export async function api<T>(
   path: string,
-  { timeoutMs, ...init }: RequestInit & { timeoutMs?: number } = {},
+  { timeoutMs, endsSessionOn401 = true, ...init }: RequestInit & { timeoutMs?: number; endsSessionOn401?: boolean } = {},
 ): Promise<T> {
   const startedAt = performance.now();
   const signal = timeoutMs === undefined ? init.signal : AbortSignal.timeout(timeoutMs);
@@ -52,7 +52,7 @@ export async function api<T>(
     body = null;
   }
   if (!response.ok) {
-    if (response.status === 401 && typeof window !== 'undefined') {
+    if (response.status === 401 && endsSessionOn401 && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, { detail: { startedAt } }));
     }
     throw new ApiError(response.status, messageOf(body, response.status));

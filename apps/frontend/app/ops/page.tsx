@@ -70,6 +70,7 @@ interface Reconciliation {
   endedEarly?: string;
   unresolved?: { from: string; to: string; status: string }[];
   unresolvedTotal?: number;
+  recheckError?: string;
   instruments: {
     instrument: string;
     engine: { count: number; notional: string } | null;
@@ -306,6 +307,9 @@ function Ops() {
               <>
                 {reconciliation.data.engineError && (
                   <ErrorState message={reconciliation.data.engineError} />
+                )}
+                {reconciliation.data.recheckError && (
+                  <ErrorState message={reconciliation.data.recheckError} />
                 )}
                 {reconciliation.data.endedEarly && (
                   <p className="text-xs text-muted-foreground">

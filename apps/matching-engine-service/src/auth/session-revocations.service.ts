@@ -32,6 +32,8 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
   private retrying?: Promise<void>;
   private cleanupTimer?: NodeJS.Timeout;
   private cleaning?: Promise<void>;
+  private cleanupBackend?: number;
+  private stopping = false;
 
   constructor(
     private readonly redis: RedisService,
@@ -43,17 +45,26 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
       this.retrying ??= this.announcePending().finally(() => (this.retrying = undefined));
     }, this.retryMs);
     this.timer.unref?.();
-    this.cleanupTimer = setInterval(() => {
+    const cleanUp = () => {
       this.cleaning ??= this.cleanUp()
-        .catch((error: Error) => this.logger.warn(`Could not clean up ended sessions: ${error.message}`))
+        .catch((error: Error) => {
+          if (!this.stopping) this.logger.warn(`Could not clean up ended sessions: ${error.message}`);
+        })
         .finally(() => (this.cleaning = undefined));
-    }, CLEANUP_EVERY_MS);
+    };
+    cleanUp();
+    this.cleanupTimer = setInterval(cleanUp, CLEANUP_EVERY_MS);
     this.cleanupTimer.unref?.();
   }
 
   async onModuleDestroy(): Promise<void> {
+    this.stopping = true;
     clearInterval(this.timer);
     clearInterval(this.cleanupTimer);
+    const backend = this.cleanupBackend;
+    if (backend !== undefined) {
+      await this.dataSource.query('SELECT pg_cancel_backend($1)', [backend]).catch(() => undefined);
+    }
     await Promise.all([this.retrying, this.cleaning]);
   }
 
@@ -104,19 +115,30 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
   }
 
   async cleanUp(): Promise<void> {
-    await this.dataSource.query(
-      `DELETE FROM "session_revocations" WHERE "revokedAt" < now() - make_interval(secs => $1)`,
-      [KEEP_RECORDS_MS / 1000],
-    );
-    for (let batch = 0; batch < CLEANUP_BATCHES; batch += 1) {
-      const [, deleted]: [unknown, number] = await this.dataSource.query(
-        `DELETE FROM "refresh_sessions" WHERE "id" IN (
-           SELECT "id" FROM "refresh_sessions"
-            WHERE "createdAt" < now() - make_interval(secs => $1)
-            LIMIT ${CLEANUP_BATCH})`,
-        [KEEP_REFRESH_SESSIONS_MS / 1000],
+    const runner = this.dataSource.createQueryRunner();
+    try {
+      await runner.connect();
+      const [{ backend }]: { backend: number }[] = await runner.query('SELECT pg_backend_pid() AS "backend"');
+      this.cleanupBackend = backend;
+      if (this.stopping) return;
+      await runner.query(
+        `DELETE FROM "session_revocations" WHERE "revokedAt" < now() - make_interval(secs => $1)`,
+        [KEEP_RECORDS_MS / 1000],
       );
-      if (deleted < CLEANUP_BATCH) return;
+      for (let batch = 0; batch < CLEANUP_BATCHES && !this.stopping; batch += 1) {
+        const [, deleted]: [unknown, number] = await runner.query(
+          `DELETE FROM "refresh_sessions" WHERE "id" IN (
+             SELECT "id" FROM "refresh_sessions"
+              WHERE "createdAt" < now() - make_interval(secs => $1)
+              LIMIT ${CLEANUP_BATCH}
+              FOR UPDATE SKIP LOCKED)`,
+          [KEEP_REFRESH_SESSIONS_MS / 1000],
+        );
+        if (deleted < CLEANUP_BATCH) return;
+      }
+    } finally {
+      this.cleanupBackend = undefined;
+      await runner.release();
     }
   }
 

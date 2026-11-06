@@ -11,6 +11,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { requireEnv } from '../common/env';
 import { SessionRevocations } from './session-revocations.service';
+import { withTimeout } from '../common/with-timeout';
 
 interface TokenPair {
   accessToken: string;
@@ -19,6 +20,8 @@ interface TokenPair {
 
 const INVALID_CREDENTIALS = 'Invalid email or password';
 const INVALID_REFRESH = 'Refresh token is invalid or was already used';
+const SUPERSEDED_REFRESH = 'Refresh token was already replaced by a newer one, send that one';
+const SESSION_BUSY = 'The session could not be changed in time, try again';
 const EMAIL_TAKEN = 'Email is already registered';
 const UNIQUE_VIOLATION = '23505';
 const DUMMY_HASH = bcrypt.hashSync(randomUUID(), 10);
@@ -29,6 +32,11 @@ const tokenHash = (token: string) => createHash('sha256').update(token).digest('
 
 const SESSION_LOCK_TIMEOUT_MS = 2_000;
 const SESSION_STATEMENT_TIMEOUT_MS = 3_000;
+const SESSION_CHANGE_BUDGET_MS = 5_000;
+
+interface Superseded {
+  superseded: true;
+}
 
 @Injectable()
 export class AuthService {
@@ -92,7 +100,24 @@ export class AuthService {
     return { ticket };
   }
 
-  async refresh(refreshToken: string, attempt?: string): Promise<TokenPair> {
+  refresh(refreshToken: string, attempt?: string): Promise<TokenPair> {
+    return this.withinBudget(this.rotate(refreshToken, attempt));
+  }
+
+  logout(userId: string, sessionId?: string): Promise<void> {
+    return this.withinBudget(this.endSessions(userId, sessionId));
+  }
+
+  private async withinBudget<T>(work: Promise<T>): Promise<T> {
+    return withTimeout(work, SESSION_CHANGE_BUDGET_MS, 'The session store').catch((error: unknown) => {
+      if (error instanceof Error && error.message.startsWith('The session store did not answer')) {
+        throw new ServiceUnavailableException(SESSION_BUSY);
+      }
+      throw error;
+    });
+  }
+
+  private async rotate(refreshToken: string, attempt?: string): Promise<TokenPair> {
     let claims: { sub?: unknown; jti?: unknown };
     try {
       claims = this.jwt.verify<{ sub?: unknown; jti?: unknown }>(refreshToken, {
@@ -138,6 +163,7 @@ export class AuthService {
       );
       return this.openSession(manager, user, session.familyId, successorId);
     });
+    if (outcome && 'superseded' in outcome) throw new ConflictException(SUPERSEDED_REFRESH);
     if (outcome && 'reusedFamily' in outcome) {
       await this.revocations.announce([outcome.reusedFamily]);
       throw new UnauthorizedException(INVALID_REFRESH);
@@ -146,7 +172,7 @@ export class AuthService {
     return outcome;
   }
 
-  async logout(userId: string, sessionId?: string): Promise<void> {
+  private async endSessions(userId: string, sessionId?: string): Promise<void> {
     const familyId = sessionId && isUUID(sessionId) ? sessionId : undefined;
     const families = await this.sessions.manager.transaction(async (manager) => {
       await this.lockSessionsOf(manager, userId);
@@ -189,12 +215,13 @@ export class AuthService {
     manager: EntityManager,
     user: User,
     session: RefreshSession,
-  ): Promise<TokenPair | null> {
+  ): Promise<TokenPair | Superseded | null> {
     const successor = await manager.findOne(RefreshSession, {
       where: { id: session.successorId as string, familyId: session.familyId },
       lock: { mode: 'pessimistic_write' },
     });
-    if (!successor || successor.usedAt || successor.revokedAt) return null;
+    if (!successor || successor.revokedAt) return null;
+    if (successor.usedAt) return { superseded: true };
     const issuedAt = Math.floor(successor.createdAt.getTime() / 1000);
     const pair = this.signTokens(user, successor.id, successor.familyId, issuedAt);
     if (successor.tokenHash === tokenHash(pair.refreshToken)) return pair;

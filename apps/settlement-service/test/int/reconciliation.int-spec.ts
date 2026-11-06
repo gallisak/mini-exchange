@@ -8,12 +8,14 @@ import { resolve } from "path";
 import request from "supertest";
 import { DataSource } from "typeorm";
 import { ReconciliationService } from "../../src/reconciliation/reconciliation.service";
+import { RECONCILIATION_DATABASE } from "../../src/reconciliation/reconciliation-database";
 import {
   GROUP,
   TRADE_STREAM,
   TradeBody,
   accessToken,
   createApp,
+  eventually,
   publishTrade,
   range,
   redisClient,
@@ -918,6 +920,111 @@ describe("reconciliation", () => {
 
     expect(response.body.unresolvedTotal).toBe(1);
     expect(checkedAt).not.toBeNull();
+  });
+
+  const failQueries = (pattern: RegExp, message = "could not write") => {
+    const database = app.get<DataSource>(RECONCILIATION_DATABASE);
+    const query = database.query.bind(database);
+    jest
+      .spyOn(database, "query")
+      .mockImplementation((sql: string, parameters?: unknown[]) =>
+        pattern.test(sql) ? Promise.reject(new Error(message)) : query(sql, parameters),
+      );
+  };
+
+  const unresolvedPeriod = async () => {
+    const from = new Date(Date.now() - 400 * 24 * 3_600_000);
+    const to = new Date(from.getTime() + 3_600_000);
+    await corrupt(
+      `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2)`,
+      [from, to],
+    );
+    return { from, to };
+  };
+
+  it("does not call a period that matches again a mismatch when it could not be taken off the list", async () => {
+    await unresolvedPeriod();
+    failQueries(/^DELETE FROM "reconciliation_unresolved_periods"/);
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.unresolved).toEqual([]);
+    expect(response.body.unresolvedTotal).toBe(0);
+    expect(response.body.status).toBe("incomplete");
+    expect(response.body.recheckError).toMatch(/matches now, but could not be taken off/);
+  });
+
+  it("stops rechecking and says so when it cannot note which period it checks, instead of keeping that period first", async () => {
+    const period = await unresolvedPeriod();
+    const service = app.get(ReconciliationService);
+    const checked = jest.spyOn(service, "reconcile");
+    failQueries(/^UPDATE "reconciliation_unresolved_periods"/);
+
+    const response = await reconcile({}).expect(200);
+
+    expect(
+      checked.mock.calls.some(([from]) => from.getTime() === period.from.getTime()),
+    ).toBe(false);
+    expect(response.body.recheckError).toMatch(/could not note that/);
+    expect(response.body.unresolved).toEqual([
+      { from: period.from.toISOString(), to: period.to.toISOString(), status: "mismatch", rechecked: false },
+    ]);
+  });
+
+  it("lets the next period check start only once every query of a failed one has finished", async () => {
+    const database = app.get<DataSource>(RECONCILIATION_DATABASE);
+    const query = database.query.bind(database);
+    let running = 0;
+    jest
+      .spyOn(database, "query")
+      .mockImplementation(async (sql: string, parameters?: unknown[]) => {
+        if (/HAVING SUM\("balance"\)/.test(sql)) throw new Error("canceling statement due to statement timeout");
+        running += 1;
+        try {
+          await pause(300);
+          return await query(sql, parameters);
+        } finally {
+          running -= 1;
+        }
+      });
+
+    let runningWhenFailed = -1;
+    await app
+      .get(ReconciliationService)
+      .reconcile(new Date(FROM), new Date(TO))
+      .catch(() => {
+        runningWhenFailed = running;
+      });
+
+    expect(runningWhenFailed).toBe(0);
+  });
+
+  it("leaves connections for the rest of a run while a period check waits on the database", async () => {
+    const holder = app.get(DataSource).createQueryRunner();
+    await holder.connect();
+    await holder.startTransaction();
+    await holder.query(`LOCK TABLE "accounts", "ledger_entries", "settled_trades" IN ACCESS EXCLUSIVE MODE`);
+    try {
+      const check = app
+        .get(ReconciliationService)
+        .reconcile(new Date(FROM), new Date(TO))
+        .catch(() => undefined);
+      await eventually(async () => {
+        const [{ waiting }] = await corrupt(
+          `SELECT COUNT(*)::int AS "waiting" FROM pg_stat_activity WHERE "wait_event_type" = 'Lock' AND "datname" = current_database()`,
+        );
+        expect(waiting).toBe(6);
+      });
+
+      const started = Date.now();
+      await app.get<DataSource>(RECONCILIATION_DATABASE).query("SELECT 1");
+      expect(Date.now() - started).toBeLessThan(2_000);
+      await holder.rollbackTransaction();
+      await check;
+    } finally {
+      if (holder.isTransactionActive) await holder.rollbackTransaction();
+      await holder.release();
+    }
   });
 
   it("runs one period check at a time, so parallel runs do not starve each other of connections", async () => {

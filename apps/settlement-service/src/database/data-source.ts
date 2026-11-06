@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { join } from 'path';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import { intEnv } from '../common/env';
+import { clientWithReadTimeout } from './timed-client';
 import { Account } from '../ledger/entities/account.entity';
 import { LedgerTransaction } from '../ledger/entities/ledger-transaction.entity';
 import { LedgerEntry } from '../ledger/entities/ledger-entry.entity';
@@ -18,8 +19,11 @@ export const entities = [
   UnresolvedPeriod,
 ];
 
-function databaseTimeouts(statement: number): Record<string, number | boolean> {
+const READ_TIMEOUT_MARGIN_MS = 5_000;
+
+function databaseTimeouts(statement: number): Record<string, unknown> {
   return {
+    Client: clientWithReadTimeout(statement > 0 ? statement + READ_TIMEOUT_MARGIN_MS : 0),
     connectionTimeoutMillis: intEnv('DATABASE_CONNECT_TIMEOUT_MS', 10_000),
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,
@@ -32,7 +36,7 @@ function databaseTimeouts(statement: number): Record<string, number | boolean> {
 
 export function reconciliationDataSourceOptions(): DataSourceOptions {
   const options = buildDataSourceOptions(undefined, intEnv('RECONCILIATION_STATEMENT_TIMEOUT_MS', 600_000, 0));
-  return { ...options, extra: { ...options.extra, max: 6 } } as DataSourceOptions;
+  return { ...options, extra: { ...options.extra, max: 8 } } as DataSourceOptions;
 }
 
 export function buildDataSourceOptions(

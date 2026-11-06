@@ -37,4 +37,18 @@ describe('a request to the exchange', () => {
 
     expect((failure as ApiError).status).toBe(408);
   });
+
+  it('ends the session on a 401, except for a request whose 401 means something else, such as a wrong password', async () => {
+    const events: string[] = [];
+    vi.stubGlobal('window', {
+      dispatchEvent: (event: Event) => events.push(event.type),
+    });
+    vi.stubGlobal('fetch', () => Promise.resolve({ ok: false, status: 401, text: async () => '{}' }));
+
+    await api('/api/auth/login', { method: 'POST', endsSessionOn401: false }).catch(() => undefined);
+    expect(events).toEqual([]);
+
+    await api('/api/orders').catch(() => undefined);
+    expect(events).toEqual(['mx:unauthorized']);
+  });
 });

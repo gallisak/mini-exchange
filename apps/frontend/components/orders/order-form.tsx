@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useSyncExternalStore } from 'react';
+import { useCallback, useState, useSyncExternalStore } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -10,15 +10,8 @@ import { Label } from '@/components/ui/label';
 import { Tabs, TabsList, TabsTrigger } from '@/components/ui/tabs';
 import { Alert, AlertDescription } from '@/components/ui/alert';
 import { ApiError, api } from '@/lib/client/api';
-import {
-  Attempt,
-  afterFailure,
-  attemptFor,
-  loadAttempt,
-  replaceAttempt,
-  saveAttempt,
-  sentAgain,
-} from '@/lib/client/order-attempt';
+import { Attempt, afterFailure, attemptFor, sentAgain } from '@/lib/client/order-attempt';
+import { orderAttempts } from '@/lib/client/attempt-store';
 import { isSending, onSendingChange, startSending } from '@/lib/client/sending';
 import { useSession } from '@/lib/client/session';
 import { cn } from '@/lib/utils';
@@ -26,32 +19,18 @@ import { cn } from '@/lib/utils';
 const PRICE = /^\d{1,16}(\.\d{1,2})?$/;
 const QUANTITY = /^\d{1,10}(\.\d{1,8})?$/;
 const positive = (value: string) => /[1-9]/.test(value);
-const sessionStore = () => {
-  try {
-    return window.sessionStorage;
-  } catch {
-    return null;
-  }
-};
 
 export function OrderForm({ instrument }: { instrument: string }) {
   const [side, setSide] = useState<'buy' | 'sell'>('buy');
   const [price, setPrice] = useState('');
   const [quantity, setQuantity] = useState('');
   const [busy, setBusy] = useState(false);
-  const [attempt, setAttempt] = useState<Attempt | null>(null);
   const owner = useSession().user?.id ?? null;
-  const scope = owner && `${owner}:${instrument}`;
-  const [restored, setRestored] = useState<string | null>(null);
-
-  useEffect(() => {
-    setAttempt(owner ? loadAttempt(sessionStore(), owner, instrument) : null);
-    setRestored(scope);
-  }, [owner, instrument, scope]);
-
-  useEffect(() => {
-    if (owner && scope && restored === scope) saveAttempt(sessionStore(), owner, instrument, attempt);
-  }, [attempt, restored, scope, owner, instrument]);
+  const attempt = useSyncExternalStore(
+    orderAttempts.subscribe,
+    useCallback(() => (owner ? orderAttempts.get(owner, instrument) : null), [owner, instrument]),
+    () => null,
+  );
 
   const priceError =
     price && !(PRICE.test(price) && positive(price)) ? 'Up to 2 decimals, above zero' : null;
@@ -64,14 +43,6 @@ export function OrderForm({ instrument }: { instrument: string }) {
     () => isSending(attempt?.key),
     () => false,
   );
-  const [waitedFor, setWaitedFor] = useState<string | null>(null);
-  useEffect(() => {
-    if (stillSending && attempt) setWaitedFor(attempt.key);
-    if (stillSending || waitedFor === null) return;
-    setWaitedFor(null);
-    const store = sessionStore();
-    if (owner && store) setAttempt(loadAttempt(store, owner, instrument));
-  }, [stillSending, attempt, waitedFor, owner, instrument]);
   const pending =
     !busy && attempt?.unconfirmed && attempt.draft.instrument === instrument ? attempt.draft : null;
   const ready = pending || (price && quantity && !priceError && !quantityError);
@@ -80,17 +51,15 @@ export function OrderForm({ instrument }: { instrument: string }) {
 
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
-    if (!ready) return;
+    if (!ready || !owner) return;
+    const sentBy = owner;
     const chosen = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
     const resent = Boolean(attempt?.unconfirmed && attempt.key === chosen.key);
-    const sentBy = owner;
     const sentFor = chosen.draft.instrument;
-    const current = sentAgain(chosen, sentBy ? loadAttempt(sessionStore(), sentBy, sentFor) : null);
-    if (sentBy) saveAttempt(sessionStore(), sentBy, sentFor, current);
-    setAttempt(current);
+    const current = sentAgain(chosen, orderAttempts.get(sentBy, sentFor));
+    orderAttempts.save(sentBy, sentFor, current);
     const settle = (next: Attempt | null) => {
-      if (sentBy) replaceAttempt(sessionStore(), sentBy, sentFor, current, next);
-      setAttempt((shown) => (shown?.key === current.key && shown.sends === current.sends ? next : shown));
+      orderAttempts.replace(sentBy, sentFor, current, next);
     };
     setBusy(true);
     const sent = startSending(current.key);
@@ -137,7 +106,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
                   variant="outline"
                   size="sm"
                   disabled={stillSending}
-                  onClick={() => setAttempt(null)}
+                  onClick={() => owner && orderAttempts.save(owner, instrument, null)}
                 >
                   Discard
                 </Button>

@@ -59,6 +59,20 @@ describe('calling a service with the session', () => {
     expect(cleared(response)).toBe(2);
   });
 
+  it('keeps the cookies when a late request brings a refresh token that a newer rotation already replaced', async () => {
+    upstreamAnswers((url) =>
+      url.endsWith('/auth/refresh') ? { status: 409, body: {} } : { status: 401, body: {} },
+    );
+    const incoming = request({ mx_access: token(900), mx_refresh: 'replaced-refresh' });
+
+    const response = await withSession(incoming, (accessToken) =>
+      upstream(incoming, 'settlement', '/wallets/me', {}, accessToken),
+    );
+
+    expect(response.status).toBe(503);
+    expect(cleared(response)).toBe(0);
+  });
+
   it('names the rotation attempt when it renews a session', async () => {
     const sent: unknown[] = [];
     upstreamAnswers((url, init) => {

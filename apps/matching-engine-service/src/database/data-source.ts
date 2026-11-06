@@ -2,6 +2,7 @@ import 'reflect-metadata';
 import { join } from 'path';
 import { DataSource, DataSourceOptions } from 'typeorm';
 import { intEnv } from '../common/env';
+import { clientWithReadTimeout } from './timed-client';
 import { User } from '../auth/entities/user.entity';
 import { RefreshSession } from '../auth/entities/refresh-session.entity';
 import { SessionRevocation } from '../auth/entities/session-revocation.entity';
@@ -20,8 +21,11 @@ export const entities = [
   OutboxMessage,
 ];
 
-function databaseTimeouts(statement: number): Record<string, number | boolean> {
+const READ_TIMEOUT_MARGIN_MS = 5_000;
+
+function databaseTimeouts(statement: number): Record<string, unknown> {
   return {
+    Client: clientWithReadTimeout(statement > 0 ? statement + READ_TIMEOUT_MARGIN_MS : 0),
     connectionTimeoutMillis: intEnv('DATABASE_CONNECT_TIMEOUT_MS', 10_000),
     keepAlive: true,
     keepAliveInitialDelayMillis: 10_000,

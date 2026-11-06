@@ -5,6 +5,7 @@ import { Order } from "../entities/order.entity";
 import { TradeRecord } from "../entities/trade-record.entity";
 import { InstrumentState } from "../entities/instrument-state.entity";
 import { OrderBookService } from "../order-book.service";
+import { BookSnapshot } from "../order-book.types";
 import { sortByPriceTimePriority } from "../matcher";
 import { RedisService, closeRedis } from "../../redis/redis.service";
 import {
@@ -45,6 +46,7 @@ export interface BookRunnerOptions {
   publish?: (event: MarketEvent) => Promise<boolean | void>;
   resyncPending?: () => boolean;
   heartbeatMs?: number;
+  stopWaitMs?: number;
 }
 
 type StreamEntry = [id: string, fields: string[]];
@@ -81,6 +83,7 @@ export class BookRunner {
   private readonly logger: Logger;
   private reader?: Redis;
   private running = false;
+  private stopped = false;
   private loop?: Promise<void>;
   private heartbeat?: NodeJS.Timeout;
   private state!: EngineState;
@@ -117,24 +120,33 @@ export class BookRunner {
 
   async stop(): Promise<void> {
     this.running = false;
+    this.stopped = true;
     clearInterval(this.heartbeat);
     const reader = this.reader;
     this.reader = undefined;
     reader?.disconnect();
+    const waitMs = this.options.stopWaitMs ?? STOP_WAIT_MS;
     let timer: NodeJS.Timeout | undefined;
     const waited = await Promise.race([
       this.loop?.then(() => true),
       new Promise<false>((resolve) => {
-        timer = setTimeout(() => resolve(false), STOP_WAIT_MS);
+        timer = setTimeout(() => resolve(false), waitMs);
       }),
     ]);
     clearTimeout(timer);
     if (waited === false) {
       this.logger.warn(
-        `Stopped waiting for a batch after ${STOP_WAIT_MS} ms; the fence keeps it from committing once another owner takes over`,
+        `Stopped waiting for a batch after ${waitMs} ms; the fence keeps it from committing once another owner takes over, and it no longer touches the book in memory`,
       );
     }
     await closeRedis(reader);
+  }
+
+  private replaceBook(book: BookSnapshot): void {
+    if (this.stopped) {
+      throw new Error(`The book of ${this.instrument} was stopped, leaving the book in memory to its next owner`);
+    }
+    this.options.orderBook.replace(this.instrument, book);
   }
 
   private async publish(event: MarketEvent): Promise<boolean> {
@@ -222,7 +234,7 @@ export class BookRunner {
   }
 
   private async load(): Promise<void> {
-    const { dataSource, orderBook } = this.options;
+    const { dataSource } = this.options;
     const row = await dataSource
       .getRepository(InstrumentState)
       .findOneByOrFail({ instrument: this.instrument });
@@ -239,7 +251,7 @@ export class BookRunner {
         status: In(["open", "partially_filled"]),
       },
     });
-    orderBook.replace(this.instrument, {
+    this.replaceBook({
       bids: sortByPriceTimePriority(
         open.filter((order) => order.side === "buy"),
         "buy",
@@ -472,8 +484,8 @@ export class BookRunner {
     });
 
     const previousSeq = this.state.bookSeq;
+    this.replaceBook(result.book);
     this.state = result.state;
-    orderBook.replace(this.instrument, result.book);
     this.logApplied(commands, result.orders, result.trades);
     tradesExecuted.inc({ instrument: this.instrument }, result.trades.length);
 

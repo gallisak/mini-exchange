@@ -3,7 +3,7 @@ import { BaseExceptionFilter } from '@nestjs/core';
 import { Response } from 'express';
 
 const DEPENDENCY_DOWN =
-  /ECONNREFUSED|ETIMEDOUT|ECONNRESET|Connection is closed|Connection terminated|Stream isn't writeable|max retries per request/i;
+  /ECONNREFUSED|ETIMEDOUT|ECONNRESET|Connection is closed|Connection terminated|Stream isn't writeable|max retries per request|canceling statement due to (statement|lock) timeout|Query read timeout|timeout exceeded when trying to connect/i;
 
 export function isDependencyUnavailable(error: unknown): boolean {
   return (

@@ -73,8 +73,11 @@ export function OrdersTable({
           </TabsList>
         </Tabs>
       </CardHeader>
-      <CardContent>
-        {error ? (
+      <CardContent className="space-y-4">
+        {error && orders !== null && (
+          <ErrorState message={`Showing the orders that loaded last: ${error}`} onRetry={reload} />
+        )}
+        {error && orders === null ? (
           <ErrorState message={error} onRetry={reload} />
         ) : orders === null ? (
           <LoadingRows />

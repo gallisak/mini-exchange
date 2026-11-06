@@ -138,4 +138,68 @@ describe('fencing of the order book writer', () => {
 
     expect(announced).toEqual([]);
   });
+
+  it('leaves the book in memory alone once stopped, even when a reload it gave up waiting for answers later', async () => {
+    const book = new OrderBookService();
+    let failNext = false;
+    let release!: () => void;
+    let held: Promise<void> | null = null;
+    let reloading = false;
+    const slow = new Proxy(dataSource, {
+      get(target, property, receiver) {
+        if (property === 'transaction' && failNext) {
+          return async () => {
+            failNext = false;
+            held = new Promise<void>((resolve) => (release = resolve));
+            throw new Error('connection lost');
+          };
+        }
+        if (property === 'getRepository') {
+          return (entity: unknown) => {
+            const repository = target.getRepository(entity as typeof Order);
+            if (entity !== Order || !held) return repository;
+            const wait = held;
+            return new Proxy(repository, {
+              get(inner, name, innerReceiver) {
+                if (name !== 'find') return Reflect.get(inner, name, innerReceiver);
+                return async (...args: Parameters<typeof inner.find>) => {
+                  const rows = await inner.find(...args);
+                  reloading = true;
+                  await wait;
+                  return rows;
+                };
+              },
+            });
+          };
+        }
+        return Reflect.get(target, property, receiver);
+      },
+    });
+    const options = {
+      redis,
+      orderBook: book,
+      batchSize: 100,
+      blockMs: 200,
+      retryDelayMs: 100,
+      leaseValid: () => true,
+      onFenced: () => undefined,
+      stopWaitMs: 50,
+    };
+    const old = new BookRunner('ABC', { ...options, dataSource: slow, fence: 1n });
+    runners.push(old);
+    await old.start();
+    failNext = true;
+    const orderId = await submitCommand('order-1');
+    await eventually(async () => expect(reloading).toBe(true));
+    await old.stop();
+
+    const next = new BookRunner('ABC', { ...options, dataSource, fence: 2n });
+    runners.push(next);
+    await next.start();
+    await eventually(async () => expect(book.findOrder('ABC', orderId)).toBeDefined());
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    expect(book.findOrder('ABC', orderId)).toBeDefined();
+  });
 });

@@ -44,18 +44,30 @@ a Redis that stops answering is treated as a failure and retried rather than wai
 relay batch whose `EXEC` timed out may still reach the stream later and be published twice;
 settlement books each trade once, so that only costs a duplicate event. Postgres queries in both
 services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it, and
-reconciliation uses its own pool limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`, 10 minutes), lock waits
-after `DATABASE_LOCK_TIMEOUT_MS` (10 s, migrations included; new indexes are built concurrently),
-and dead connections are found by TCP keepalive rather than abandoned mid-query, so a stalled
-database shows up as a stuck book instead of a silent one and a commit is never left half-known.
-Refresh and sign-out wait at most 2 s for the user's session lock, well inside the gateway's 8 s.
-A book that is stopped waits 15 s for its batch, then lets the fence stop it. Reconciliation checks
-one period at a time, and a recheck that fails only moves that period to the back of the queue.
-`replay-check` runs without a statement limit. A command stream that
-fails three reads in a row also marks its book stuck, counted in `book_read_failures_total`. nginx
-passes a request on to the other engine only when the first one never received it, or for reads,
-so an order or cancel is never sent twice by the gateway; a cancel of an order that is already
-cancelled answers 202.
+reconciliation uses its own pool of 8 connections limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`,
+10 minutes), and lock waits after `DATABASE_LOCK_TIMEOUT_MS` (10 s, migrations included). A Postgres
+that stops answering altogether, dead or frozen, is given up on 5 s after the statement limit: the
+query fails, its connection is closed and left out of the pool, so a stalled database shows up as a
+stuck book within about 65 s and an API answers 503. A `COMMIT` is the one statement waited on
+however long it takes (TCP keepalive still finds a dead connection, after the kernel's minutes),
+since giving up on it would not tell whether it happened. A commit can still end unknown: when the
+connection breaks after the `COMMIT` was sent, the book reloads its state from Postgres, an order
+or a rotation is retried under the same key or attempt, and a sign-out is simply sent again.
+Refresh and sign-out wait at most 2 s for the user's session lock and answer 503 after 5 s in all,
+well inside the gateway's 8 s. A book that is stopped waits 15 s for its batch, then lets the fence
+stop it; whatever that batch or a reload still does afterwards no longer touches the book in memory,
+so a newer owner on the same engine is never overwritten. Reconciliation checks one period at a
+time and lets the next check start only once every query of the previous one finished, which keeps
+two connections free for the rest of a run. A period is moved to the back of the queue before it is
+checked again; a run that cannot note that, or cannot take a period that matches again off the list,
+says so in `recheckError` and is `incomplete`. `replay-check` runs without a statement limit. A
+command stream that fails three reads in a row also marks its book stuck, counted in
+`book_read_failures_total`. nginx passes a request on to the other engine only when the first one
+never received it, or for reads and cancels (`DELETE` is idempotent to nginx), so an order is never
+sent twice by the gateway; a cancel may be, which is harmless, since a cancel of an order that is
+already cancelled answers 202. Only the last index migration, on `refresh_sessions`, builds its
+index concurrently; one that a failed build left invalid is dropped and built again on the next run.
+The earlier ones took a write lock on their table while it was small.
 
 `/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
 
@@ -69,7 +81,7 @@ services and by every WebSocket connection) and closes its WebSocket connections
 is recorded in Postgres in the same transaction, and every engine retries the Redis note until it is
 written. A sign-out answers 503 until the note is written, since an access token is refused only
 through that note (a Redis that refuses writes but still answers reads would otherwise let it work
-for up to 15 minutes); signing out again finishes it. Expired refresh sessions are deleted hourly. After its Redis subscription comes back an engine checks which
+for up to 15 minutes); signing out again finishes it. Expired refresh sessions are deleted when an engine starts and hourly after that, skipping rows another engine is deleting; a stopping engine cancels a cleanup still running instead of waiting for it. After its Redis subscription comes back an engine checks which
 connected sessions ended, and keeps checking until Redis answers instead of closing every connection. A rotation and a sign-out of the same user take one
 Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
@@ -83,7 +95,13 @@ before the latest sign-in. The attempt id of a rotation is
 an HMAC of the cookies and the browser, so a retry always repeats it, whatever happened in between,
 without keeping anything in memory that other sessions could push out. An order
 answer only changes the stored attempt of the same send, and while an order is still on its way
-any other form for it can neither discard nor resend it. The frontend's API refuses any
+any other form for it can neither discard nor resend it. Every form of a tab shares one copy of
+the attempt in memory, which `sessionStorage` only mirrors for a reload, so a browser that refuses
+to store it still keeps the warning and the key. A refresh token a newer rotation already replaced
+is answered 409, and the frontend keeps the cookies and answers 503, so a late request cannot sign
+out a session that moved on. A wrong password on `/login` does not sign out the session already open,
+a sign-in ends the loading state of a session check still retrying, and orders that loaded stay
+shown when reloading them fails. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;
 every page forbids being framed.
 

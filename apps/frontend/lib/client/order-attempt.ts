@@ -41,7 +41,7 @@ export function afterFailure(attempt: Attempt, status: number, resent: boolean):
 
 const storageKey = (owner: string, instrument: string) => `mx:unconfirmed-order:${owner}:${instrument}`;
 
-type AttemptStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
+export type AttemptStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>;
 
 export function saveAttempt(
   storage: AttemptStorage | null,
