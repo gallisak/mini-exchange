@@ -6,6 +6,7 @@ import {
   SessionTokens,
   TokenPair,
   isFresh,
+  clearTokens,
   readTokens,
   refreshOnce,
   storeTokens,
@@ -101,7 +102,7 @@ export async function withSession(
       refreshToken: tokens.refreshToken as string,
       accessToken: tokens.accessToken,
     });
-    if (outcome.kind === 'invalid') return unauthorized();
+    if (outcome.kind === 'invalid') return unauthorized(tokens.session);
     if (outcome.kind === 'unavailable') return unavailable();
     rotated = outcome.tokens;
     accessToken = outcome.tokens.accessToken;
@@ -112,7 +113,7 @@ export async function withSession(
     const failure = await rotate();
     if (failure) return failure;
   }
-  if (!accessToken) return unauthorized();
+  if (!accessToken) return unauthorized(tokens.session);
 
   let result = await call(accessToken);
   if (result.status === 401 && tokens.refreshToken && !rotated) {
@@ -125,11 +126,12 @@ export async function withSession(
       { message: 'The exchange did not accept your session, try again shortly' },
       { status: 502 },
     );
-    storeTokens(response, rotated);
+    storeTokens(response, rotated, tokens.session);
     return response;
   }
   const response = NextResponse.json(result.body, { status: result.status });
-  if (rotated) storeTokens(response, rotated);
+  if (rotated) storeTokens(response, rotated, tokens.session);
+  if (result.status === 401) clearTokens(response, [tokens.session]);
   return response;
 }
 
@@ -137,8 +139,10 @@ export function relay(result: UpstreamResult): NextResponse {
   return NextResponse.json(result.body, { status: result.status });
 }
 
-export function unauthorized(): NextResponse {
-  return NextResponse.json({ message: 'Sign in to continue' }, { status: 401 });
+export function unauthorized(session?: string): NextResponse {
+  const response = NextResponse.json({ message: 'Sign in to continue' }, { status: 401 });
+  if (session !== undefined) clearTokens(response, [session]);
+  return response;
 }
 
 export function unavailable(): NextResponse {

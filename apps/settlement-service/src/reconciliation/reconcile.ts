@@ -1,7 +1,7 @@
 import "reflect-metadata";
 import { parseArgs } from "util";
 import { DataSource } from "typeorm";
-import { buildDataSourceOptions } from "../database/data-source";
+import { reconciliationDataSourceOptions } from "../database/data-source";
 import { EngineClient } from "./engine-client";
 import { ReconciliationService } from "./reconciliation.service";
 import { SettlementBacklog } from "./settlement-backlog";
@@ -13,7 +13,7 @@ async function main(): Promise<number> {
     options: { from: { type: "string" }, to: { type: "string" } },
   });
   const dataSource = await new DataSource(
-    buildDataSourceOptions(),
+    reconciliationDataSourceOptions(),
   ).initialize();
   const backlog = new SettlementBacklog();
   try {

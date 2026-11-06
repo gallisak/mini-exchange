@@ -1,4 +1,9 @@
-import { BadRequestException, Injectable } from "@nestjs/common";
+import {
+  BadRequestException,
+  Inject,
+  Injectable,
+  OnModuleDestroy,
+} from "@nestjs/common";
 import { DataSource } from "typeorm";
 import {
   LEDGER_SCALE,
@@ -16,6 +21,7 @@ import {
 import { intEnv } from "../common/env";
 import { ReconciliationCheckpoint } from "./reconciliation-checkpoint.entity";
 import { SettlementBacklog } from "./settlement-backlog";
+import { RECONCILIATION_DATABASE } from "./reconciliation-database";
 
 const ISSUE_LIMIT = 100;
 const CHECKPOINT = "default";
@@ -102,16 +108,21 @@ const EMPTY_LEDGER_TOTALS: LedgerTradeTotals = {
 };
 
 @Injectable()
-export class ReconciliationService {
+export class ReconciliationService implements OnModuleDestroy {
   private readonly lagMs = intEnv("RECONCILIATION_LAG_MS", 60_000, 0);
   private readonly stepMs = intEnv("RECONCILIATION_STEP_HOURS", 24) * 3_600_000;
   private running: Promise<ReconciliationReport> | null = null;
 
   constructor(
-    private readonly dataSource: DataSource,
+    @Inject(RECONCILIATION_DATABASE) private readonly dataSource: DataSource,
     private readonly engine: EngineClient,
     private readonly backlog: SettlementBacklog,
   ) {}
+
+  async onModuleDestroy(): Promise<void> {
+    await this.running?.catch(() => undefined);
+    if (this.dataSource.isInitialized) await this.dataSource.destroy();
+  }
 
   async reconcileUntil(from: Date, to?: Date): Promise<ReconciliationReport> {
     if (to && from.getTime() >= to.getTime()) {

@@ -45,7 +45,7 @@ describe('calling a service with the session', () => {
     expect(response.headers.getSetCookie().some((cookie) => cookie.startsWith('mx_refresh=new-refresh'))).toBe(true);
   });
 
-  it('answers 401 when the session cannot be renewed, but leaves the cookies to a sign-in that may have replaced them meanwhile', async () => {
+  it('signs out the session the request was sent with when it cannot be renewed', async () => {
     upstreamAnswers((url) =>
       url.endsWith('/auth/refresh') ? { status: 401, body: {} } : { status: 401, body: {} },
     );
@@ -56,7 +56,7 @@ describe('calling a service with the session', () => {
     );
 
     expect(response.status).toBe(401);
-    expect(cleared(response)).toBe(0);
+    expect(cleared(response)).toBe(2);
   });
 
   it('names the rotation attempt when it renews a session', async () => {

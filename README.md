@@ -43,7 +43,8 @@ Redis command a book, an order submission, the outbox relay or a lease depends o
 a Redis that stops answering is treated as a failure and retried rather than waited on forever. A
 relay batch whose `EXEC` timed out may still reach the stream later and be published twice;
 settlement books each trade once, so that only costs a duplicate event. Postgres queries in both
-services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it), lock waits
+services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it, and
+reconciliation uses its own pool limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`, 10 minutes), lock waits
 after `DATABASE_LOCK_TIMEOUT_MS` (10 s), and a server that does not answer at all after five seconds
 more, so a stalled database shows up as a stuck book instead of a silent one. A command stream that
 fails three reads in a row also marks its book stuck, counted in `book_read_failures_total`. nginx
@@ -69,9 +70,11 @@ Postgres advisory lock, so a sign-out never misses a refresh token that a parall
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
 sign-out that did not go through instead of pretending it did; if the engine refuses an access
 token that looked valid, the frontend rotates it and signs out with the new one, so the refresh
-session ends too. The frontend clears the session cookies only on sign-out, never because a
-request failed, so a late answer for an old session cannot sign out a user who just signed in; the
-page also ignores refusals of requests sent before the latest sign-in. Rotations it remembers to
+session ends too. Each sign-in gets its own pair of cookie names (`mx_access_<id>`,
+`mx_refresh_<id>`), and a session that turns out to be over is cleared only under the names the
+request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
+while a dead session is still forgotten at once; the page also ignores refusals of requests sent
+before the latest sign-in. Rotations it remembers to
 retry are capped at 10 000, and one the engine refused with 429 is not remembered at all. An order
 answer only changes the stored attempt of the same send. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;

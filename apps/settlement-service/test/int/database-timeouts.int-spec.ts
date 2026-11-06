@@ -1,5 +1,5 @@
 import { DataSource } from 'typeorm';
-import { buildDataSourceOptions } from '../../src/database/data-source';
+import { buildDataSourceOptions, reconciliationDataSourceOptions } from '../../src/database/data-source';
 
 describe('a database that stops answering', () => {
   const saved = { ...process.env };
@@ -34,6 +34,21 @@ describe('a database that stops answering', () => {
     } finally {
       await holder.query('SELECT pg_advisory_unlock(424242)');
       await holder.release();
+    }
+  });
+
+  it('gives reconciliation its own, longer limit than every other query', async () => {
+    Object.assign(process.env, { DATABASE_STATEMENT_TIMEOUT_MS: '60000', RECONCILIATION_STATEMENT_TIMEOUT_MS: '600000' });
+    const reconciliation = await new DataSource(reconciliationDataSourceOptions()).initialize();
+    const regular = await new DataSource(buildDataSourceOptions()).initialize();
+    try {
+      const [{ statement_timeout: long }] = await reconciliation.query('SHOW statement_timeout');
+      const [{ statement_timeout: short }] = await regular.query('SHOW statement_timeout');
+
+      expect([long, short]).toEqual(['10min', '1min']);
+    } finally {
+      await reconciliation.destroy();
+      await regular.destroy();
     }
   });
 });

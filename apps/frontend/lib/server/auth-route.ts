@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { TokenPair, claimsOf, storeTokens } from './session';
+import { TokenPair, claimsOf, clearTokens, newSession, sessionsIn, storeTokens } from './session';
 import { upstream } from './upstream';
 
 const JSON_BODY = /^application\/json(\s*;|$)/i;
@@ -19,6 +19,8 @@ export async function signIn(request: NextRequest, path: '/auth/login' | '/auth/
   const response = NextResponse.json({
     user: claims && { id: claims.id, email: claims.email, role: claims.role },
   });
-  storeTokens(response, tokens);
+  const session = newSession();
+  clearTokens(response, sessionsIn(request));
+  storeTokens(response, tokens, session);
   return response;
 }

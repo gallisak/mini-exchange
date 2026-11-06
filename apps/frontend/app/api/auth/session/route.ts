@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { claimsOf, isFresh, readTokens, storeTokens } from '@/lib/server/session';
+import { TokenPair, claimsOf, clearTokens, isFresh, olderSessions, readTokens, storeTokens } from '@/lib/server/session';
 import { rotateTokens, unavailable } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
@@ -10,14 +10,22 @@ const userOf = (token: string) => {
 };
 
 export async function GET(request: NextRequest) {
-  const { accessToken, refreshToken } = readTokens(request);
-  if (isFresh(accessToken)) return NextResponse.json({ user: userOf(accessToken) });
-  if (!refreshToken) return NextResponse.json({ user: null });
+  const { accessToken, refreshToken, session } = readTokens(request);
+  const answer = (body: unknown, tokens?: TokenPair) => {
+    const response = NextResponse.json(body);
+    clearTokens(response, olderSessions(request, session));
+    if (tokens) storeTokens(response, tokens, session);
+    return response;
+  };
+  if (isFresh(accessToken)) return answer({ user: userOf(accessToken) });
+  if (!refreshToken) return answer({ user: null });
 
   const outcome = await rotateTokens(request, { refreshToken, accessToken });
   if (outcome.kind === 'unavailable') return unavailable();
-  if (outcome.kind === 'invalid') return NextResponse.json({ user: null });
-  const response = NextResponse.json({ user: userOf(outcome.tokens.accessToken) });
-  storeTokens(response, outcome.tokens);
-  return response;
+  if (outcome.kind === 'invalid') {
+    const response = answer({ user: null });
+    clearTokens(response, [session]);
+    return response;
+  }
+  return answer({ user: userOf(outcome.tokens.accessToken) }, outcome.tokens);
 }

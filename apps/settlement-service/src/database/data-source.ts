@@ -18,8 +18,7 @@ export const entities = [
   UnresolvedPeriod,
 ];
 
-function databaseTimeouts(): Record<string, number> {
-  const statement = intEnv('DATABASE_STATEMENT_TIMEOUT_MS', 60_000, 0);
+function databaseTimeouts(statement: number): Record<string, number> {
   return {
     connectionTimeoutMillis: intEnv('DATABASE_CONNECT_TIMEOUT_MS', 10_000),
     ...(statement > 0
@@ -33,7 +32,15 @@ function databaseTimeouts(): Record<string, number> {
   };
 }
 
-export function buildDataSourceOptions(database = process.env.LEDGER_DATABASE_NAME ?? 'ledger'): DataSourceOptions {
+export function reconciliationDataSourceOptions(): DataSourceOptions {
+  const options = buildDataSourceOptions(undefined, intEnv('RECONCILIATION_STATEMENT_TIMEOUT_MS', 600_000, 0));
+  return { ...options, extra: { ...options.extra, max: 6 } } as DataSourceOptions;
+}
+
+export function buildDataSourceOptions(
+  database = process.env.LEDGER_DATABASE_NAME ?? 'ledger',
+  statementTimeoutMs = intEnv('DATABASE_STATEMENT_TIMEOUT_MS', 60_000, 0),
+): DataSourceOptions {
   return {
     type: 'postgres',
     host: process.env.LEDGER_DATABASE_HOST,
@@ -44,7 +51,7 @@ export function buildDataSourceOptions(database = process.env.LEDGER_DATABASE_NA
     entities,
     migrations: [join(__dirname, 'migrations', '*.{ts,js}')],
     synchronize: false,
-    extra: databaseTimeouts(),
+    extra: databaseTimeouts(statementTimeoutMs),
   };
 }
 

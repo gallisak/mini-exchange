@@ -39,21 +39,46 @@ const cookieOptions = (maxAge: number) => ({
   maxAge,
 });
 
-export function readTokens(request: NextRequest): Partial<TokenPair> {
+const SESSION_COOKIE = /^mx_(?:access|refresh)(?:_([0-9a-z]{1,40}))?$/;
+
+const cookieName = (base: string, session: string) => (session ? `${base}_${session}` : base);
+
+export function newSession(): string {
+  return `${Date.now().toString(36).padStart(10, '0')}${randomUUID().replace(/-/g, '').slice(0, 10)}`;
+}
+
+export function sessionsIn(request: NextRequest): string[] {
+  const sessions = new Set<string>();
+  for (const { name } of request.cookies.getAll()) {
+    const match = SESSION_COOKIE.exec(name);
+    if (match) sessions.add(match[1] ?? '');
+  }
+  return [...sessions].sort();
+}
+
+export function readTokens(request: NextRequest): Partial<TokenPair> & { session: string } {
+  const session = sessionsIn(request).at(-1) ?? '';
   return {
-    accessToken: request.cookies.get(ACCESS_COOKIE)?.value,
-    refreshToken: request.cookies.get(REFRESH_COOKIE)?.value,
+    session,
+    accessToken: request.cookies.get(cookieName(ACCESS_COOKIE, session))?.value || undefined,
+    refreshToken: request.cookies.get(cookieName(REFRESH_COOKIE, session))?.value || undefined,
   };
 }
 
-export function storeTokens(response: NextResponse, tokens: TokenPair): void {
-  response.cookies.set(ACCESS_COOKIE, tokens.accessToken, cookieOptions(REFRESH_MAX_AGE));
-  response.cookies.set(REFRESH_COOKIE, tokens.refreshToken, cookieOptions(REFRESH_MAX_AGE));
+export function storeTokens(response: NextResponse, tokens: TokenPair, session = ''): void {
+  response.cookies.set(cookieName(ACCESS_COOKIE, session), tokens.accessToken, cookieOptions(REFRESH_MAX_AGE));
+  response.cookies.set(cookieName(REFRESH_COOKIE, session), tokens.refreshToken, cookieOptions(REFRESH_MAX_AGE));
 }
 
-export function clearTokens(response: NextResponse): void {
-  response.cookies.set(ACCESS_COOKIE, '', cookieOptions(0));
-  response.cookies.set(REFRESH_COOKIE, '', cookieOptions(0));
+export function clearTokens(response: NextResponse, sessions: string[]): void {
+  for (const session of sessions) {
+    response.cookies.set(cookieName(ACCESS_COOKIE, session), '', cookieOptions(0));
+    response.cookies.set(cookieName(REFRESH_COOKIE, session), '', cookieOptions(0));
+  }
+}
+
+export function olderSessions(request: NextRequest, current: string): string[] {
+  return sessionsIn(request).filter((session) => session < current);
 }
 
 export function claimsOf(token: string | undefined): (SessionUser & { exp: number }) | null {
