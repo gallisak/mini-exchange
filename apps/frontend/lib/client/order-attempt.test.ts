@@ -1,5 +1,13 @@
 import { describe, expect, it } from 'vitest';
-import { afterFailure, attemptFor, isUnknownOutcome, loadAttempt, saveAttempt, unconfirmed } from './order-attempt';
+import {
+  afterFailure,
+  attemptFor,
+  isUnknownOutcome,
+  loadAttempt,
+  replaceAttempt,
+  saveAttempt,
+  unconfirmed,
+} from './order-attempt';
 
 const draft = { instrument: 'ABC', side: 'buy' as const, price: '10.00', quantity: '1' };
 let n = 0;
@@ -71,11 +79,36 @@ describe('Idempotency-Key of an order attempt', () => {
     expect(loadAttempt(broken, 'alice', 'ABC')).toBeNull();
   });
 
-  it('stops holding the form once the exchange gave a clear answer to the resent order', () => {
+  it('settles a first send on any refusal, but a resent order only on an answer about the order itself', () => {
     const sent = unconfirmed(attemptFor(null, draft, newKey));
 
-    expect(afterFailure(sent, 422).unconfirmed).toBe(false);
-    expect(afterFailure(sent, 503).unconfirmed).toBe(true);
+    expect(afterFailure(sent, 429, false).unconfirmed).toBe(false);
+    expect(afterFailure(sent, 401, false).unconfirmed).toBe(false);
+    expect(afterFailure(sent, 503, false).unconfirmed).toBe(true);
+    expect(afterFailure(sent, 400, true).unconfirmed).toBe(false);
+    expect(afterFailure(sent, 422, true).unconfirmed).toBe(false);
+    for (const status of [0, 401, 403, 409, 429, 503]) {
+      expect(afterFailure(sent, status, true).unconfirmed, String(status)).toBe(true);
+    }
+  });
+
+  it('lets an answer change the stored attempt only while it is still the one that was sent', () => {
+    const storage = new Map<string, string>();
+    const store = {
+      getItem: (key: string) => storage.get(key) ?? null,
+      setItem: (key: string, value: string) => void storage.set(key, value),
+      removeItem: (key: string) => void storage.delete(key),
+    };
+    const first = unconfirmed(attemptFor(null, draft, () => 'k1'));
+    const second = unconfirmed(attemptFor(null, { ...draft, price: '11.00' }, () => 'k2'));
+    saveAttempt(store, 'alice', 'ABC', second);
+
+    expect(replaceAttempt(store, 'alice', 'ABC', first.key, null)).toBe(false);
+    expect(loadAttempt(store, 'alice', 'ABC')?.key).toBe('k2');
+    saveAttempt(store, 'alice', 'ABC', null);
+    expect(replaceAttempt(store, 'alice', 'ABC', first.key, afterFailure(first, 503, true))).toBe(true);
+    expect(replaceAttempt(store, 'alice', 'ABC', first.key, null)).toBe(true);
+    expect(loadAttempt(store, 'alice', 'ABC')).toBeNull();
   });
 
   it('keeps an unconfirmed order to its own instrument', () => {

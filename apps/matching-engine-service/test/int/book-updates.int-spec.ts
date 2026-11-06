@@ -284,4 +284,29 @@ describe('a running book', () => {
 
     expect(await raw.get('book:published:ABC')).toBeNull();
   });
+
+  it('keeps matching after a read of its command stream is never answered', async () => {
+    const createConnection = redis.createConnection.bind(redis);
+    let first = true;
+    jest.spyOn(redis, 'createConnection').mockImplementation((options) => {
+      const connection = createConnection(options);
+      if (first) {
+        first = false;
+        connection.xread = (() => new Promise(() => undefined)) as never;
+      }
+      return connection;
+    });
+    runner = new BookRunner('ABC', options({ publish: async () => undefined }));
+    await runner.start();
+
+    await place(uuidV5('after a hanging read'), 'seller', 'sell');
+
+    await eventually(
+      async () =>
+        expect(
+          (await dataSource.getRepository(InstrumentState).findOneByOrFail({ instrument: 'ABC' })).bookSeq,
+        ).toBe('1'),
+      10_000,
+    );
+  });
 });

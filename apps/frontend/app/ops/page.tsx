@@ -18,7 +18,7 @@ import { RequireSession } from '@/components/require-session';
 import { api } from '@/lib/client/api';
 import { formatTime } from '@/lib/client/format';
 import { RECONCILE_REFRESH_MS, STATUS_REFRESH_MS, opsView, startOpsPolling } from '@/lib/client/ops-polling';
-import { latestRequest } from '@/lib/client/latest';
+import { singleFlight } from '@/lib/client/latest';
 
 interface Part<T> {
   ok: boolean;
@@ -61,6 +61,7 @@ interface Reconciliation {
   period: { from: string; to: string };
   engineError?: string;
   unresolved?: { from: string; to: string; status: string }[];
+  unresolvedTotal?: number;
   instruments: {
     instrument: string;
     engine: { count: number; notional: string } | null;
@@ -87,30 +88,30 @@ function Ops() {
   const [reconciliation, setReconciliation] = useState<Part<Reconciliation> | null>(null);
   const [error, setError] = useState<string | null>(null);
 
-  const beginLoad = useMemo(() => latestRequest(), []);
-  const beginReconcile = useMemo(() => latestRequest(), []);
+  const load = useMemo(
+    () =>
+      singleFlight(async () => {
+        try {
+          setReport(await api<OpsReport>('/api/ops'));
+          setError(null);
+        } catch (failure) {
+          setError((failure as Error).message);
+        }
+      }),
+    [],
+  );
 
-  const load = useCallback(async () => {
-    const latest = beginLoad();
-    try {
-      const loaded = await api<OpsReport>('/api/ops');
-      if (!latest()) return;
-      setReport(loaded);
-      setError(null);
-    } catch (failure) {
-      if (latest()) setError((failure as Error).message);
-    }
-  }, [beginLoad]);
-
-  const reconcile = useCallback(async () => {
-    const latest = beginReconcile();
-    try {
-      const data = await api<Reconciliation>('/api/ops/reconciliation');
-      if (latest()) setReconciliation({ ok: true, data });
-    } catch (failure) {
-      if (latest()) setReconciliation({ ok: false, error: { message: (failure as Error).message } });
-    }
-  }, [beginReconcile]);
+  const reconcile = useMemo(
+    () =>
+      singleFlight(async () => {
+        try {
+          setReconciliation({ ok: true, data: await api<Reconciliation>('/api/ops/reconciliation') });
+        } catch (failure) {
+          setReconciliation({ ok: false, error: { message: (failure as Error).message } });
+        }
+      }),
+    [],
+  );
 
   const refresh = useCallback(() => {
     void load();
@@ -337,7 +338,7 @@ function Ops() {
                 )}
                 {(reconciliation.data.unresolved ?? []).length > 0 && (
                   <ErrorState
-                    message={`Earlier periods that still do not match: ${(reconciliation.data.unresolved ?? [])
+                    message={`Earlier periods that still do not match (${reconciliation.data.unresolvedTotal ?? reconciliation.data.unresolved?.length}): ${(reconciliation.data.unresolved ?? [])
                       .map((period) => `${formatMoment(period.from)} – ${formatMoment(period.to)}`)
                       .join(', ')}`}
                   />

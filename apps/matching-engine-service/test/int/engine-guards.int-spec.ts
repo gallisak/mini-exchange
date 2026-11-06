@@ -1,6 +1,7 @@
 import { INestApplication } from '@nestjs/common';
 import Redis from 'ioredis';
 import { commandStreamKey } from '../../src/orders/engine/order-command';
+import { RedisService } from '../../src/redis/redis.service';
 import {
   createApp,
   eventually,
@@ -25,6 +26,7 @@ describe('engine guards', () => {
   });
 
   afterEach(async () => {
+    jest.restoreAllMocks();
     await app.close();
   });
 
@@ -98,5 +100,20 @@ describe('engine guards', () => {
     await eventually(async () => {
       expect((await listOrders(app, user)).map((o) => o.price)).toEqual(['5.00']);
     });
+  });
+
+  it('answers 503 instead of hanging when Redis does not take the order, and keeps its key usable', async () => {
+    const user = await register(app);
+    const client = app.get(RedisService).client;
+    const xadd = client.xadd.bind(client) as (...args: unknown[]) => Promise<unknown>;
+    jest.spyOn(client, 'xadd').mockImplementationOnce((() => new Promise(() => undefined)) as never);
+
+    const lost = await submit(app, user, order, 'hanging-key');
+    jest.spyOn(client, 'xadd').mockImplementation(((...args: unknown[]) => xadd(...args)) as never);
+    const retried = await submit(app, user, order, 'hanging-key');
+
+    expect(lost.status).toBe(503);
+    expect(retried.status).toBe(202);
+    await eventually(async () => expect(await listOrders(app, user)).toHaveLength(1));
   });
 });

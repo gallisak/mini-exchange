@@ -97,6 +97,10 @@ export class TradesService {
         return next.length > 0 ? streamTimestamp(next[0][0]).getTime() : null;
       }),
     );
+    const [unpublished]: { oldest: Date | null }[] = await this.trades.query(
+      `SELECT MIN(("payload"->>'executedAt')::timestamptz) AS "oldest" FROM "outbox" WHERE "publishedAt" IS NULL`,
+    );
+    oldest.push(unpublished?.oldest ? new Date(unpublished.oldest).getTime() : null);
     const known = oldest.filter((time): time is number => time !== null);
     return known.length > 0 ? new Date(Math.min(...known)).toISOString() : null;
   }

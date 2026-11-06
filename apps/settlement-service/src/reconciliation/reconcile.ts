@@ -1,19 +1,27 @@
-import 'reflect-metadata';
-import { parseArgs } from 'util';
-import { DataSource } from 'typeorm';
-import { buildDataSourceOptions } from '../database/data-source';
-import { EngineClient } from './engine-client';
-import { ReconciliationService } from './reconciliation.service';
+import "reflect-metadata";
+import { parseArgs } from "util";
+import { DataSource } from "typeorm";
+import { buildDataSourceOptions } from "../database/data-source";
+import { EngineClient } from "./engine-client";
+import { ReconciliationService } from "./reconciliation.service";
+import { SettlementBacklog } from "./settlement-backlog";
 
 const EXIT_CODES = { ok: 0, mismatch: 1, incomplete: 2 } as const;
 
 async function main(): Promise<number> {
   const { values } = parseArgs({
-    options: { from: { type: 'string' }, to: { type: 'string' } },
+    options: { from: { type: "string" }, to: { type: "string" } },
   });
-  const dataSource = await new DataSource(buildDataSourceOptions()).initialize();
+  const dataSource = await new DataSource(
+    buildDataSourceOptions(),
+  ).initialize();
+  const backlog = new SettlementBacklog();
   try {
-    const service = new ReconciliationService(dataSource, new EngineClient());
+    const service = new ReconciliationService(
+      dataSource,
+      new EngineClient(),
+      backlog,
+    );
     const to = values.to ? new Date(values.to) : undefined;
     const report = values.from
       ? await service.reconcileUntil(new Date(values.from), to)
@@ -21,6 +29,7 @@ async function main(): Promise<number> {
     process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
     return EXIT_CODES[report.status];
   } finally {
+    await backlog.onModuleDestroy();
     await dataSource.destroy();
   }
 }

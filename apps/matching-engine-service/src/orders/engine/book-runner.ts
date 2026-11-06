@@ -1,23 +1,32 @@
-import { Logger } from '@nestjs/common';
-import Redis from 'ioredis';
-import { DataSource, In } from 'typeorm';
-import { Order } from '../entities/order.entity';
-import { TradeRecord } from '../entities/trade-record.entity';
-import { InstrumentState } from '../entities/instrument-state.entity';
-import { OrderBookService } from '../order-book.service';
-import { sortByPriceTimePriority } from '../matcher';
-import { RedisService, closeRedis } from '../../redis/redis.service';
-import { EngineState, ExecutedTrade, applyCommands, isValidSubmit } from './apply-commands';
-import { StreamCommand, commandStreamKey, decodeCommand } from './order-command';
-import { FencedOutError } from './fenced-out.error';
-import { runWithTrace } from '../../observability/trace-context';
-import { withTimeout } from '../../common/with-timeout';
-import { bookBatchFailures, tradesExecuted } from '../../observability/metrics';
-import { diffBooks } from '../depth';
-import { publicTrade } from '../../trades/public-trade';
-import { MarketEvent } from '../realtime/market-events';
-import { OutboxMessage } from '../../outbox/outbox-message.entity';
-import { tradeExecutedMessage } from '../../outbox/trade-event';
+import { Logger } from "@nestjs/common";
+import Redis from "ioredis";
+import { DataSource, In } from "typeorm";
+import { Order } from "../entities/order.entity";
+import { TradeRecord } from "../entities/trade-record.entity";
+import { InstrumentState } from "../entities/instrument-state.entity";
+import { OrderBookService } from "../order-book.service";
+import { sortByPriceTimePriority } from "../matcher";
+import { RedisService, closeRedis } from "../../redis/redis.service";
+import {
+  EngineState,
+  ExecutedTrade,
+  applyCommands,
+  isValidSubmit,
+} from "./apply-commands";
+import {
+  StreamCommand,
+  commandStreamKey,
+  decodeCommand,
+} from "./order-command";
+import { FencedOutError } from "./fenced-out.error";
+import { runWithTrace } from "../../observability/trace-context";
+import { withTimeout } from "../../common/with-timeout";
+import { bookBatchFailures, tradesExecuted } from "../../observability/metrics";
+import { diffBooks } from "../depth";
+import { publicTrade } from "../../trades/public-trade";
+import { MarketEvent } from "../realtime/market-events";
+import { OutboxMessage } from "../../outbox/outbox-message.entity";
+import { tradeExecutedMessage } from "../../outbox/trade-event";
 
 export interface BookRunnerOptions {
   dataSource: DataSource;
@@ -39,10 +48,12 @@ type StreamEntry = [id: string, fields: string[]];
 const STUCK_TTL_MS = 30_000;
 const ROWS_PER_INSERT = 1_000;
 const MARKER_TIMEOUT_MS = 1_000;
+const READ_TIMEOUT_MARGIN_MS = 2_000;
 
 function chunks<T>(rows: T[]): T[][] {
   const result: T[][] = [];
-  for (let i = 0; i < rows.length; i += ROWS_PER_INSERT) result.push(rows.slice(i, i + ROWS_PER_INSERT));
+  for (let i = 0; i < rows.length; i += ROWS_PER_INSERT)
+    result.push(rows.slice(i, i + ROWS_PER_INSERT));
   return result;
 }
 
@@ -89,7 +100,10 @@ export class BookRunner {
     this.running = true;
     this.loop = this.run();
     if (this.options.publish && this.options.heartbeatMs) {
-      this.heartbeat = setInterval(() => this.announceSeq(), this.options.heartbeatMs);
+      this.heartbeat = setInterval(
+        () => this.announceSeq(),
+        this.options.heartbeatMs,
+      );
     }
   }
 
@@ -111,27 +125,34 @@ export class BookRunner {
       .catch(() => false);
   }
 
-  private logApplied(commands: StreamCommand[], orders: Order[], trades: ExecutedTrade[]): void {
+  private logApplied(
+    commands: StreamCommand[],
+    orders: Order[],
+    trades: ExecutedTrade[],
+  ): void {
     const statuses = new Map(orders.map((order) => [order.id, order.status]));
     for (const { id, command } of commands) {
       if (!command) continue;
       runWithTrace(command.traceId, () =>
         this.logger.log(
-          `Applied ${command.type} ${command.orderId} from ${id}: ${statuses.get(command.orderId) ?? 'unchanged'}`,
+          `Applied ${command.type} ${command.orderId} from ${id}: ${statuses.get(command.orderId) ?? "unchanged"}`,
         ),
       );
     }
     for (const trade of trades) {
       runWithTrace(trade.traceId ?? undefined, () =>
-        this.logger.log(`Trade ${trade.id} executed ${trade.quantity} @ ${trade.price}`),
+        this.logger.log(
+          `Trade ${trade.id} executed ${trade.quantity} @ ${trade.price}`,
+        ),
       );
     }
   }
 
   private announceSeq(): void {
-    if (!this.running || this.reloadNeeded || !this.options.leaseValid()) return;
+    if (!this.running || this.reloadNeeded || !this.options.leaseValid())
+      return;
     void this.publish({
-      type: 'book_heartbeat',
+      type: "book_heartbeat",
       heartbeat: {
         instrument: this.instrument,
         seq: Number(this.state.bookSeq),
@@ -153,13 +174,17 @@ export class BookRunner {
       .createQueryBuilder()
       .update(InstrumentState)
       .set({ fence: fence.toString() })
-      .where('instrument = :instrument AND fence < :fence', {
+      .where("instrument = :instrument AND fence < :fence", {
         instrument: this.instrument,
         fence: fence.toString(),
       })
       .execute();
     if (claimed.affected === 0) {
-      throw new FencedOutError(this.instrument, fence, await this.currentFence());
+      throw new FencedOutError(
+        this.instrument,
+        fence,
+        await this.currentFence(),
+      );
     }
   }
 
@@ -183,16 +208,19 @@ export class BookRunner {
     };
 
     const open = await dataSource.getRepository(Order).find({
-      where: { instrument: this.instrument, status: In(['open', 'partially_filled']) },
+      where: {
+        instrument: this.instrument,
+        status: In(["open", "partially_filled"]),
+      },
     });
     orderBook.replace(this.instrument, {
       bids: sortByPriceTimePriority(
-        open.filter((order) => order.side === 'buy'),
-        'buy',
+        open.filter((order) => order.side === "buy"),
+        "buy",
       ),
       asks: sortByPriceTimePriority(
-        open.filter((order) => order.side === 'sell'),
-        'sell',
+        open.filter((order) => order.side === "sell"),
+        "sell",
       ),
     });
     this.logger.log(
@@ -203,15 +231,24 @@ export class BookRunner {
 
   private async announceUnpublished(): Promise<void> {
     const key = publishedKey(this.instrument);
-    const published = await withTimeout(this.options.redis.client.get(key), MARKER_TIMEOUT_MS, 'Redis').catch(
-      () => null,
-    );
+    const published = await withTimeout(
+      this.options.redis.client.get(key),
+      MARKER_TIMEOUT_MS,
+      "Redis",
+    ).catch(() => null);
     const bookSeq = this.state.bookSeq;
     if (bookSeq === 0n) return;
-    if (published !== null && /^\d+$/.test(published) && BigInt(published) >= bookSeq) return;
-    this.logger.warn(`Changes up to book seq ${bookSeq} may not have been published, telling clients to reload`);
+    if (
+      published !== null &&
+      /^\d+$/.test(published) &&
+      BigInt(published) >= bookSeq
+    )
+      return;
+    this.logger.warn(
+      `Changes up to book seq ${bookSeq} may not have been published, telling clients to reload`,
+    );
     const announced = await this.publish({
-      type: 'resync',
+      type: "resync",
       resync: { instruments: [this.instrument], owners: [], allOwners: true },
     });
     if (announced) await this.markPublished(bookSeq);
@@ -220,9 +257,12 @@ export class BookRunner {
 
   private async markPublished(bookSeq: bigint): Promise<void> {
     await withTimeout(
-      this.options.redis.client.set(publishedKey(this.instrument), bookSeq.toString()),
+      this.options.redis.client.set(
+        publishedKey(this.instrument),
+        bookSeq.toString(),
+      ),
       MARKER_TIMEOUT_MS,
-      'Redis',
+      "Redis",
     ).catch(() => undefined);
   }
 
@@ -234,18 +274,15 @@ export class BookRunner {
           await this.load();
           this.reloadNeeded = false;
         }
-        const response = (await this.reader!.xread(
-          'COUNT',
-          batchSize,
-          'BLOCK',
-          blockMs,
-          'STREAMS',
-          commandStreamKey(this.instrument),
-          this.state.lastCommandId,
-        )) as [string, StreamEntry[]][] | null;
+        const response = await this.read(batchSize, blockMs);
         if (!response) continue;
         const entries = response[0][1];
-        await this.process(entries.map(([id, fields]) => ({ id, command: decodeCommand(fields) })));
+        await this.process(
+          entries.map(([id, fields]) => ({
+            id,
+            command: decodeCommand(fields),
+          })),
+        );
         await this.recovered();
       } catch (error) {
         if (!this.running) return;
@@ -256,12 +293,40 @@ export class BookRunner {
           return;
         }
         this.logger.error(
-          `${this.reloadNeeded ? 'Reload' : 'Batch'} failed, reloading state: ${(error as Error).message}`,
+          `${this.reloadNeeded ? "Reload" : "Batch"} failed, reloading state: ${(error as Error).message}`,
         );
         this.reloadNeeded = true;
         await this.failed(error as Error);
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
       }
+    }
+  }
+
+  private async read(
+    batchSize: number,
+    blockMs: number,
+  ): Promise<[string, StreamEntry[]][] | null> {
+    const reader = this.reader!;
+    try {
+      return (await withTimeout(
+        reader.xread(
+          "COUNT",
+          batchSize,
+          "BLOCK",
+          blockMs,
+          "STREAMS",
+          commandStreamKey(this.instrument),
+          this.state.lastCommandId,
+        ),
+        blockMs + READ_TIMEOUT_MARGIN_MS,
+        "Redis",
+      )) as [string, StreamEntry[]][] | null;
+    } catch (error) {
+      if (this.running && this.reader === reader) {
+        reader.disconnect();
+        this.reader = this.options.redis.createConnection();
+      }
+      throw error;
     }
   }
 
@@ -273,25 +338,34 @@ export class BookRunner {
       error: error.message.slice(0, 500),
     };
     await withTimeout(
-      this.options.redis.client.set(stuckKey(this.instrument), JSON.stringify(this.stuck), 'PX', STUCK_TTL_MS),
+      this.options.redis.client.set(
+        stuckKey(this.instrument),
+        JSON.stringify(this.stuck),
+        "PX",
+        STUCK_TTL_MS,
+      ),
       MARKER_TIMEOUT_MS,
-      'Redis',
+      "Redis",
     ).catch(() => undefined);
   }
 
   private async recovered(): Promise<void> {
     if (!this.stuck) return;
-    this.logger.log(`Batch committed again after ${this.stuck.failures} failed attempts`);
-    this.stuck = undefined;
-    await withTimeout(this.options.redis.client.del(stuckKey(this.instrument)), MARKER_TIMEOUT_MS, 'Redis').catch(
-      () => undefined,
+    this.logger.log(
+      `Batch committed again after ${this.stuck.failures} failed attempts`,
     );
+    this.stuck = undefined;
+    await withTimeout(
+      this.options.redis.client.del(stuckKey(this.instrument)),
+      MARKER_TIMEOUT_MS,
+      "Redis",
+    ).catch(() => undefined);
   }
 
   private async process(commands: StreamCommand[]): Promise<void> {
     const { dataSource, orderBook } = this.options;
     const submitIds = commands.flatMap((entry) =>
-      entry.command?.type === 'submit' && isValidSubmit(entry.command)
+      entry.command?.type === "submit" && isValidSubmit(entry.command)
         ? [entry.command.orderId]
         : [],
     );
@@ -327,10 +401,14 @@ export class BookRunner {
         },
       );
       if (fenced.affected === 0) {
-        throw new FencedOutError(this.instrument, this.options.fence, await this.currentFence());
+        throw new FencedOutError(
+          this.instrument,
+          this.options.fence,
+          await this.currentFence(),
+        );
       }
       for (const orders of chunks(result.orders)) {
-        await manager.upsert(Order, orders, ['id']);
+        await manager.upsert(Order, orders, ["id"]);
       }
       for (const trades of chunks(result.trades)) {
         await manager.insert(TradeRecord, trades);
@@ -346,12 +424,17 @@ export class BookRunner {
 
     const updates: Promise<boolean>[] = [];
     if (result.trades.length > 0) {
-      updates.push(this.publish({ type: 'trades', trades: result.trades.map(publicTrade) }));
+      updates.push(
+        this.publish({
+          type: "trades",
+          trades: result.trades.map(publicTrade),
+        }),
+      );
     }
     if (result.orders.length > 0) {
       updates.push(
         this.publish({
-          type: 'orders',
+          type: "orders",
           orders: result.orders.map((order) => ({
             id: order.id,
             ownerId: order.ownerId,
@@ -369,7 +452,7 @@ export class BookRunner {
     if (result.state.bookSeq !== previousSeq) {
       updates.push(
         this.publish({
-          type: 'book_delta',
+          type: "book_delta",
           delta: {
             instrument: this.instrument,
             seq: Number(result.state.bookSeq),
@@ -380,7 +463,11 @@ export class BookRunner {
     }
     const published = await Promise.all(updates);
     if (!published.every(Boolean)) this.updatesLost = true;
-    else if (this.updatesLost && this.options.resyncPending && !this.options.resyncPending()) {
+    else if (
+      this.updatesLost &&
+      this.options.resyncPending &&
+      !this.options.resyncPending()
+    ) {
       this.updatesLost = false;
     }
     if (result.state.bookSeq !== previousSeq && !this.updatesLost) {

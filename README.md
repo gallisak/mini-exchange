@@ -39,8 +39,10 @@ docker compose exec matching-engine-1 node dist/tools/grant-admin.js you@example
 Every service has a `.env.example`, which compose loads. Secrets are not in it: on the first start
 a one-off `secrets` service generates them per installation. Any service, the frontend included,
 started in production with a `change-me-*` placeholder from `.env.example` refuses to start. Every
-Redis command a book, the outbox relay or a lease depends on has a timeout, so a Redis that stops
-answering is treated as a failure and retried rather than waited on forever.
+Redis command a book, an order submission, the outbox relay or a lease depends on has a timeout, so
+a Redis that stops answering is treated as a failure and retried rather than waited on forever. A
+relay batch whose `EXEC` timed out may still reach the stream later and be published twice;
+settlement books each trade once, so that only costs a duplicate event.
 
 `/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
 
@@ -49,10 +51,12 @@ docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget 
 ```
 
 **Sessions.** Signing out, or reusing a refresh token, ends the refresh session, refuses its access
-token at once (a note in Redis for 16 minutes, checked by both services) and closes its WebSocket
-connections. The ended session is recorded in Postgres in the same transaction, and every engine
-retries the Redis note until it is written, so a Redis failure only delays it; while Redis is down the
-services cannot check a token and answer 503. A rotation and a sign-out of the same user take one
+token at once (a note in Redis for 30 minutes, twice the life of an access token, checked by both
+services and by every WebSocket connection) and closes its WebSocket connections. The ended session
+is recorded in Postgres in the same transaction, and every engine retries the Redis note until it is
+written. A sign-out answers 503 until the note is written, so the page never says it signed out
+while the access token still works; while Redis is down the services cannot check a token and answer
+503. A rotation and a sign-out of the same user take one
 Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
 sign-out that did not go through instead of pretending it did. The frontend's API refuses any
@@ -189,13 +193,16 @@ every trade has the right four entries, and that the engine's trade count, quant
 one period: the trades executed in it, the ledger transactions created in it, and the accounts
 they touched. A run without `from` checks at most one day (`RECONCILIATION_STEP_HOURS`), starting
 where the last run ended, or at the first trade either service knows of. No period ends later than
-a minute ago or than the oldest command a book has not applied yet: a trade carries the time its
-order entered the stream, so a book that lags behind could still add trades to a period checked
-earlier. If the engine cannot say which commands it has not applied, the run is `incomplete` and
+a minute ago or than the oldest trade that is not settled yet: a command a book has not applied, a
+trade still in the engine's outbox, or one waiting in settlement's consumer group. A trade carries
+the time its order entered the stream, so a book or a queue that lags behind could still add trades
+to a period checked earlier. If the engine cannot say which commands it has not applied, the run is `incomplete` and
 does not move on; while a book has not applied a command the checkpoint is already past, a run says
 there is nothing new to check instead of checking anything again. A period that does not match is
-saved in the same transaction as the checkpoint and checked again on every run, up to ten at a time,
-until it matches; the report lists them under `unresolved` and stays `mismatch` meanwhile. So a
+saved in the same transaction as the checkpoint and checked again on every run, the oldest ten
+within a minute, until it matches; the report lists them under `unresolved` with their count in
+`unresolvedTotal` and stays `mismatch` meanwhile. The operations panel waits up to five minutes for a
+run. So a
 trade that never got settled keeps showing up, the next days are still checked, a clean history is
 not checked again, and no run scans everything. Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
 

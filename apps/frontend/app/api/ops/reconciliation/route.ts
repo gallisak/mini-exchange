@@ -3,7 +3,7 @@ import { upstream, withSession } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
 
-const RECONCILIATION_TIMEOUT_MS = 120_000;
+const RECONCILIATION_TIMEOUT_MS = 300_000;
 
 export function GET(request: NextRequest) {
   return withSession(request, (token) =>

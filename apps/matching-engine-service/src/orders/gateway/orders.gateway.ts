@@ -147,7 +147,7 @@ export class OrdersGateway
       );
       const sessionId: string | undefined = client.data.sessionId;
       await client.join(sessionId ? [userRoom(userId), sessionRoom(sessionId)] : userRoom(userId));
-      if (sessionId && (await this.revocations.isRevoked(sessionId).catch(() => false))) {
+      if (sessionId && (await this.revocations.isRevoked(sessionId).catch(() => true))) {
         client.disconnect(true);
         return;
       }
@@ -249,7 +249,7 @@ export class OrdersGateway
     const sockets = await this.server.local.fetchSockets();
     const sessions = [...new Set(sockets.map((socket) => socket.data.sessionId as string | undefined))];
     for (const sessionId of sessions) {
-      if (!sessionId || !(await this.revocations.isRevoked(sessionId).catch(() => false))) continue;
+      if (!sessionId || !(await this.revocations.isRevoked(sessionId).catch(() => true))) continue;
       this.server.local.in(sessionRoom(sessionId)).disconnectSockets(true);
     }
   }

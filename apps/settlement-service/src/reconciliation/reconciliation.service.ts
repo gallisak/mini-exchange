@@ -1,17 +1,34 @@
-import { BadRequestException, Injectable } from '@nestjs/common';
-import { DataSource } from 'typeorm';
-import { LEDGER_SCALE, PRICE_SCALE, QUANTITY_SCALE, fromUnits, toUnits } from '../common/decimal';
-import { CASH_ASSET } from '../ledger/postings';
-import { EngineClient, EngineInstrumentTotals, EngineProgress } from './engine-client';
-import { intEnv } from '../common/env';
-import { ReconciliationCheckpoint } from './reconciliation-checkpoint.entity';
+import { BadRequestException, Injectable } from "@nestjs/common";
+import { DataSource } from "typeorm";
+import {
+  LEDGER_SCALE,
+  PRICE_SCALE,
+  QUANTITY_SCALE,
+  fromUnits,
+  toUnits,
+} from "../common/decimal";
+import { CASH_ASSET } from "../ledger/postings";
+import {
+  EngineClient,
+  EngineInstrumentTotals,
+  EngineProgress,
+} from "./engine-client";
+import { intEnv } from "../common/env";
+import { ReconciliationCheckpoint } from "./reconciliation-checkpoint.entity";
+import { SettlementBacklog } from "./settlement-backlog";
 
 const ISSUE_LIMIT = 100;
-const CHECKPOINT = 'default';
-const UNRESOLVED_LIMIT = 10;
-const SEVERITY: Record<ReconciliationStatus, number> = { ok: 0, incomplete: 1, mismatch: 2 };
+const CHECKPOINT = "default";
+const RECHECK_LIMIT = 10;
+const RECHECK_BUDGET_MS = 60_000;
+const UNRESOLVED_LISTED = 100;
+const SEVERITY: Record<ReconciliationStatus, number> = {
+  ok: 0,
+  incomplete: 1,
+  mismatch: 2,
+};
 
-export type ReconciliationStatus = 'ok' | 'mismatch' | 'incomplete';
+export type ReconciliationStatus = "ok" | "mismatch" | "incomplete";
 
 export interface TradeTotals {
   count: number;
@@ -31,7 +48,11 @@ export interface InstrumentReconciliation {
 }
 
 export interface LedgerIssues {
-  unbalancedTransactions: { transactionId: string; asset: string; total: string }[];
+  unbalancedTransactions: {
+    transactionId: string;
+    asset: string;
+    total: string;
+  }[];
   transactionsWithoutEntries: string[];
   accountsOffEntries: {
     accountId: string;
@@ -50,29 +71,38 @@ export interface ReconciliationReport {
   instruments: InstrumentReconciliation[];
   ledger: LedgerIssues;
   engineError?: string;
-  unresolved?: { from: string; to: string; status: ReconciliationStatus }[];
+  unresolved?: {
+    from: string;
+    to: string;
+    status: ReconciliationStatus;
+    rechecked: boolean;
+  }[];
+  unresolvedTotal?: number;
 }
 
-const units = (value: string | null | undefined) => toUnits(value ?? '0', LEDGER_SCALE);
+const units = (value: string | null | undefined) =>
+  toUnits(value ?? "0", LEDGER_SCALE);
 const quantity = (value: string | null | undefined) =>
   fromUnits(units(value), LEDGER_SCALE, QUANTITY_SCALE);
-const money = (value: string | null | undefined) => fromUnits(units(value), LEDGER_SCALE, PRICE_SCALE);
+const money = (value: string | null | undefined) =>
+  fromUnits(units(value), LEDGER_SCALE, PRICE_SCALE);
 
 const EMPTY_LEDGER_TOTALS: LedgerTradeTotals = {
   count: 0,
-  quantity: quantity('0'),
-  notional: money('0'),
-  cashMoved: money('0'),
+  quantity: quantity("0"),
+  notional: money("0"),
+  cashMoved: money("0"),
 };
 
 @Injectable()
 export class ReconciliationService {
-  private readonly lagMs = intEnv('RECONCILIATION_LAG_MS', 60_000, 0);
-  private readonly stepMs = intEnv('RECONCILIATION_STEP_HOURS', 24) * 3_600_000;
+  private readonly lagMs = intEnv("RECONCILIATION_LAG_MS", 60_000, 0);
+  private readonly stepMs = intEnv("RECONCILIATION_STEP_HOURS", 24) * 3_600_000;
 
   constructor(
     private readonly dataSource: DataSource,
     private readonly engine: EngineClient,
+    private readonly backlog: SettlementBacklog,
   ) {}
 
   async reconcileUntil(from: Date, to?: Date): Promise<ReconciliationReport> {
@@ -90,13 +120,19 @@ export class ReconciliationService {
     const reconciledUntil = checkpoint?.reconciledUntil.getTime() ?? null;
     const report =
       reconciledUntil !== null && reconciledUntil >= end
-        ? this.nothingNew(new Date(reconciledUntil), progress.known?.pendingSince ?? null)
+        ? this.nothingNew(
+            new Date(reconciledUntil),
+            progress.known?.pendingSince ?? null,
+          )
         : await this.reconcileNext(reconciledUntil, end, progress);
-    const unresolved = await this.recheckUnresolved(report.period);
-    const status = [report.status, ...unresolved.map((row) => row.status)].reduce((worst, next) =>
+    const { unresolved, total } = await this.recheckUnresolved(report.period);
+    const status = [
+      report.status,
+      ...unresolved.map((row) => row.status),
+    ].reduce((worst, next) =>
       SEVERITY[next] > SEVERITY[worst] ? next : worst,
     );
-    return { ...report, status, unresolved };
+    return { ...report, status, unresolved, unresolvedTotal: total };
   }
 
   private async reconcileNext(
@@ -104,14 +140,21 @@ export class ReconciliationService {
     end: number,
     progress: { known: EngineProgress | null; error?: string },
   ): Promise<ReconciliationReport> {
-    let from = reconciledUntil ?? (await this.firstActivity(progress.known?.firstTradeAt ?? null));
+    let from =
+      reconciledUntil ??
+      (await this.firstActivity(progress.known?.firstTradeAt ?? null));
     if (from === null || from >= end) from = end - this.stepMs;
-    const period = { from: new Date(from), to: new Date(Math.min(end, from + this.stepMs)) };
+    const period = {
+      from: new Date(from),
+      to: new Date(Math.min(end, from + this.stepMs)),
+    };
     const checked = await this.reconcile(period.from, period.to);
-    const report = progress.error ? this.incomplete(checked, progress.error) : checked;
-    if (progress.error || report.status === 'incomplete') return report;
+    const report = progress.error
+      ? this.incomplete(checked, progress.error)
+      : checked;
+    if (progress.error || report.status === "incomplete") return report;
     await this.dataSource.transaction(async (manager) => {
-      if (report.status === 'mismatch') {
+      if (report.status === "mismatch") {
         await manager.query(
           `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2) ON CONFLICT DO NOTHING`,
           [period.from, period.to],
@@ -127,25 +170,57 @@ export class ReconciliationService {
     return report;
   }
 
-  private async progress(): Promise<{ known: EngineProgress | null; error?: string }> {
-    return this.engine.progress().then(
-      (known) => ({ known }),
-      (error: Error) => ({ known: null, error: `Could not ask the engine which commands it has not applied: ${error.message}` }),
-    );
+  private async progress(): Promise<{
+    known: EngineProgress | null;
+    error?: string;
+  }> {
+    const [engine, backlog] = await Promise.all([
+      this.engine.progress().then(
+        (known) => ({ known }),
+        (error: Error) => ({
+          error: `Could not ask the engine which commands it has not applied: ${error.message}`,
+        }),
+      ),
+      this.backlog.oldestUnsettled().then(
+        (oldest) => ({ oldest }),
+        (error: Error) => ({
+          error: `Could not read which trades settlement has not settled yet: ${error.message}`,
+        }),
+      ),
+    ]);
+    if ("error" in engine) return { known: null, error: engine.error };
+    if ("error" in backlog)
+      return { known: engine.known, error: backlog.error };
+    const pending = [engine.known.pendingSince, backlog.oldest]
+      .filter((date): date is Date => date !== null)
+      .map((date) => date.getTime());
+    return {
+      known: {
+        firstTradeAt: engine.known.firstTradeAt,
+        pendingSince:
+          pending.length > 0 ? new Date(Math.min(...pending)) : null,
+      },
+    };
   }
 
-  private incomplete(report: ReconciliationReport, reason: string): ReconciliationReport {
+  private incomplete(
+    report: ReconciliationReport,
+    reason: string,
+  ): ReconciliationReport {
     return {
       ...report,
-      status: report.status === 'mismatch' ? 'mismatch' : 'incomplete',
+      status: report.status === "mismatch" ? "mismatch" : "incomplete",
       engineError: report.engineError ?? reason,
     };
   }
 
-  private nothingNew(reconciledUntil: Date, pendingSince: Date | null): ReconciliationReport {
+  private nothingNew(
+    reconciledUntil: Date,
+    pendingSince: Date | null,
+  ): ReconciliationReport {
     const at = reconciledUntil.toISOString();
     return {
-      status: 'incomplete',
+      status: "incomplete",
       period: { from: at, to: at },
       instruments: [],
       ledger: {
@@ -167,50 +242,71 @@ export class ReconciliationService {
     return new Date(Math.min(to?.getTime() ?? latest, latest, pending));
   }
 
-  private async firstActivity(engineFirst: Date | null): Promise<number | null> {
+  private async firstActivity(
+    engineFirst: Date | null,
+  ): Promise<number | null> {
     const ledger = await this.dataSource
       .query(
         `SELECT LEAST((SELECT MIN("executedAt") FROM "settled_trades"),
                       (SELECT MIN("createdAt") FROM "ledger_transactions")) AS "first"`,
       )
-      .then(([row]: { first: Date | null }[]) => (row?.first ? new Date(row.first).getTime() : null));
-    const known = [ledger, engineFirst?.getTime() ?? null].filter((time): time is number => time !== null);
+      .then(([row]: { first: Date | null }[]) =>
+        row?.first ? new Date(row.first).getTime() : null,
+      );
+    const known = [ledger, engineFirst?.getTime() ?? null].filter(
+      (time): time is number => time !== null,
+    );
     return known.length > 0 ? Math.min(...known) : null;
   }
 
   private async recheckUnresolved(current: {
     from: string;
     to: string;
-  }): Promise<NonNullable<ReconciliationReport['unresolved']>> {
+  }): Promise<{
+    unresolved: NonNullable<ReconciliationReport["unresolved"]>;
+    total: number;
+  }> {
+    const exceptCurrent = `NOT ("from" = $1::timestamptz AND "to" = $2::timestamptz)`;
     const periods: { from: Date; to: Date }[] = await this.dataSource.query(
       `SELECT "from", "to" FROM "reconciliation_unresolved_periods"
-        WHERE NOT ("from" = $1::timestamptz AND "to" = $2::timestamptz)
+        WHERE ${exceptCurrent}
         ORDER BY "from"
-        LIMIT ${UNRESOLVED_LIMIT}`,
+        LIMIT ${UNRESOLVED_LISTED}`,
       [current.from, current.to],
     );
-    const results: NonNullable<ReconciliationReport['unresolved']> = [];
-    for (const period of periods) {
-      const { status } = await this.reconcile(new Date(period.from), new Date(period.to));
-      if (status === 'ok') {
+    const started = Date.now();
+    const unresolved: NonNullable<ReconciliationReport["unresolved"]> = [];
+    for (const [index, period] of periods.entries()) {
+      const due =
+        index < RECHECK_LIMIT && Date.now() - started < RECHECK_BUDGET_MS;
+      const status = due
+        ? (await this.reconcile(new Date(period.from), new Date(period.to)))
+            .status
+        : "mismatch";
+      if (status === "ok") {
         await this.dataSource.query(
           `DELETE FROM "reconciliation_unresolved_periods" WHERE "from" = $1 AND "to" = $2`,
           [period.from, period.to],
         );
         continue;
       }
-      results.push({
+      unresolved.push({
         from: new Date(period.from).toISOString(),
         to: new Date(period.to).toISOString(),
         status,
+        rechecked: due,
       });
     }
-    return results;
+    const [{ total }]: { total: number }[] = await this.dataSource.query(
+      `SELECT COUNT(*)::int AS "total" FROM "reconciliation_unresolved_periods" WHERE ${exceptCurrent}`,
+      [current.from, current.to],
+    );
+    return { unresolved, total };
   }
 
   async reconcile(from: Date, to: Date): Promise<ReconciliationReport> {
     if (from.getTime() >= to.getTime()) {
-      throw new BadRequestException('from must be earlier than to');
+      throw new BadRequestException("from must be earlier than to");
     }
     const [ledger, ledgerTotals, engine] = await Promise.all([
       this.ledgerIssues(from, to),
@@ -221,27 +317,34 @@ export class ReconciliationService {
       ),
     ]);
 
-    const engineTotals = 'totals' in engine ? engine.totals : null;
+    const engineTotals = "totals" in engine ? engine.totals : null;
     const instruments = [
-      ...new Set([...ledgerTotals.keys(), ...(engineTotals ?? []).map((row) => row.instrument)]),
+      ...new Set([
+        ...ledgerTotals.keys(),
+        ...(engineTotals ?? []).map((row) => row.instrument),
+      ]),
     ]
       .sort()
-      .map((instrument) => this.compare(instrument, ledgerTotals.get(instrument), engineTotals));
+      .map((instrument) =>
+        this.compare(instrument, ledgerTotals.get(instrument), engineTotals),
+      );
 
-    const ledgerBroken = Object.values(ledger).some((issues) => issues.length > 0);
+    const ledgerBroken = Object.values(ledger).some(
+      (issues) => issues.length > 0,
+    );
     const status: ReconciliationStatus =
       ledgerBroken || instruments.some((row) => !row.matches)
-        ? 'mismatch'
+        ? "mismatch"
         : engineTotals
-          ? 'ok'
-          : 'incomplete';
+          ? "ok"
+          : "incomplete";
 
     return {
       status,
       period: { from: from.toISOString(), to: to.toISOString() },
       instruments,
       ledger,
-      ...('error' in engine ? { engineError: engine.error } : {}),
+      ...("error" in engine ? { engineError: engine.error } : {}),
     };
   }
 
@@ -267,7 +370,10 @@ export class ReconciliationService {
     return { instrument, engine, ledger, matches };
   }
 
-  private async ledgerTradeTotals(from: Date, to: Date): Promise<Map<string, LedgerTradeTotals>> {
+  private async ledgerTradeTotals(
+    from: Date,
+    to: Date,
+  ): Promise<Map<string, LedgerTradeTotals>> {
     const rows: {
       instrument: string;
       count: number;
@@ -310,28 +416,29 @@ export class ReconciliationService {
       UNION
       SELECT t."id" FROM "ledger_transactions" t
        WHERE t."createdAt" >= $1 AND t."createdAt" < $2`;
-    const [unbalanced, withoutEntries, accounts, assets, trades] = await Promise.all([
-      this.dataSource.query(
-        `SELECT e."transactionId", e."asset", SUM(e."amount")::text AS "total"
+    const [unbalanced, withoutEntries, accounts, assets, trades] =
+      await Promise.all([
+        this.dataSource.query(
+          `SELECT e."transactionId", e."asset", SUM(e."amount")::text AS "total"
            FROM "ledger_entries" e
           WHERE e."transactionId" IN (${inPeriod})
           GROUP BY e."transactionId", e."asset"
          HAVING SUM(e."amount") <> 0
           ORDER BY e."transactionId", e."asset"
           LIMIT ${ISSUE_LIMIT}`,
-        [from, to],
-      ),
-      this.dataSource.query(
-        `SELECT t."id"
+          [from, to],
+        ),
+        this.dataSource.query(
+          `SELECT t."id"
            FROM "ledger_transactions" t
           WHERE t."id" IN (${inPeriod})
             AND NOT EXISTS (SELECT 1 FROM "ledger_entries" e WHERE e."transactionId" = t."id")
           ORDER BY t."id"
           LIMIT ${ISSUE_LIMIT}`,
-        [from, to],
-      ),
-      this.dataSource.query(
-        `WITH "touched" AS (
+          [from, to],
+        ),
+        this.dataSource.query(
+          `WITH "touched" AS (
            SELECT e."accountId" AS "id" FROM "ledger_entries" e WHERE e."transactionId" IN (${inPeriod})
            UNION
            SELECT a."id" FROM "accounts" a
@@ -347,17 +454,17 @@ export class ReconciliationService {
          HAVING a."balance" <> COALESCE(SUM(e."amount"), 0)
           ORDER BY a."id"
           LIMIT ${ISSUE_LIMIT}`,
-        [from, to],
-      ),
-      this.dataSource.query(
-        `SELECT "asset", SUM("balance")::text AS "total"
+          [from, to],
+        ),
+        this.dataSource.query(
+          `SELECT "asset", SUM("balance")::text AS "total"
            FROM "accounts"
           GROUP BY "asset"
          HAVING SUM("balance") <> 0
           ORDER BY "asset"`,
-      ),
-      this.dataSource.query(
-        `SELECT st."tradeId"
+        ),
+        this.dataSource.query(
+          `SELECT st."tradeId"
            FROM "settled_trades" st
            LEFT JOIN "ledger_entries" e ON e."transactionId" = st."transactionId"
            LEFT JOIN "accounts" a ON a."id" = e."accountId"
@@ -376,9 +483,9 @@ export class ReconciliationService {
                   WHERE a."ownerId" = st."sellerId" AND e."asset" = st."instrument" AND e."amount" = -st."quantity") <> 1
           ORDER BY st."tradeId"
           LIMIT ${ISSUE_LIMIT}`,
-        [from, to, CASH_ASSET],
-      ),
-    ]);
+          [from, to, CASH_ASSET],
+        ),
+      ]);
     return {
       unbalancedTransactions: unbalanced.map(
         (row: { transactionId: string; asset: string; total: string }) => ({
@@ -386,18 +493,22 @@ export class ReconciliationService {
           total: money(row.total),
         }),
       ),
-      transactionsWithoutEntries: withoutEntries.map((row: { id: string }) => row.id),
+      transactionsWithoutEntries: withoutEntries.map(
+        (row: { id: string }) => row.id,
+      ),
       accountsOffEntries: accounts.map(
-        (row: LedgerIssues['accountsOffEntries'][number]) => ({
+        (row: LedgerIssues["accountsOffEntries"][number]) => ({
           ...row,
           balance: money(row.balance),
           entries: money(row.entries),
         }),
       ),
-      assetsNotBalanced: assets.map((row: { asset: string; total: string }) => ({
-        asset: row.asset,
-        total: money(row.total),
-      })),
+      assetsNotBalanced: assets.map(
+        (row: { asset: string; total: string }) => ({
+          asset: row.asset,
+          total: money(row.total),
+        }),
+      ),
       tradesOffEntries: trades.map((row: { tradeId: string }) => row.tradeId),
     };
   }

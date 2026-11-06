@@ -29,8 +29,11 @@ export function isUnknownOutcome(status: number): boolean {
   return status === 0 || status === 408 || status >= 500;
 }
 
-export function afterFailure(attempt: Attempt, status: number): Attempt {
-  return { ...attempt, unconfirmed: isUnknownOutcome(status) };
+const SETTLES_A_RESENT_ORDER = new Set([400, 422]);
+
+export function afterFailure(attempt: Attempt, status: number, resent: boolean): Attempt {
+  const unknown = resent ? !SETTLES_A_RESENT_ORDER.has(status) : isUnknownOutcome(status);
+  return { ...attempt, unconfirmed: unknown };
 }
 
 const storageKey = (owner: string, instrument: string) => `mx:unconfirmed-order:${owner}:${instrument}`;
@@ -50,6 +53,20 @@ export function saveAttempt(
   } catch {
     return;
   }
+}
+
+export function replaceAttempt(
+  storage: AttemptStorage | null,
+  owner: string,
+  instrument: string,
+  expectedKey: string,
+  attempt: Attempt | null,
+): boolean {
+  const stored = loadAttempt(storage, owner, instrument);
+  if (stored !== null && stored.key !== expectedKey) return false;
+  if (stored === null && attempt?.unconfirmed !== true) return false;
+  saveAttempt(storage, owner, instrument, attempt);
+  return true;
 }
 
 export function loadAttempt(

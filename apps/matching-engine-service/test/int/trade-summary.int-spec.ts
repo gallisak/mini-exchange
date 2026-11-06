@@ -6,6 +6,8 @@ import { DataSource } from 'typeorm';
 import { instrumentLockKey } from '../../src/orders/engine/instrument-ownership.service';
 import { commandStreamKey, encodeCommand } from '../../src/orders/engine/order-command';
 import { TradeRecord } from '../../src/orders/entities/trade-record.entity';
+import { OutboxMessage } from '../../src/outbox/outbox-message.entity';
+import { OutboxRelayService } from '../../src/outbox/outbox-relay.service';
 import { createApp, resetState } from './harness';
 
 describe('trade summary', () => {
@@ -129,5 +131,18 @@ describe('trade summary', () => {
     const response = await summary('2026-11-04T10:00:00.000Z', '2026-11-04T11:00:00.000Z').expect(200);
 
     expect(response.body.pendingSince).toBe(new Date(Number(id.split('-')[0])).toISOString());
+  });
+
+  it('tells from when trades may still be missing because they were not handed to settlement yet', async () => {
+    await app.get(OutboxRelayService).onModuleDestroy();
+    await app.get(DataSource).getRepository(OutboxMessage).insert({
+      stream: 'trades:ABC',
+      type: 'trade.executed',
+      payload: { tradeId: randomUUID(), executedAt: '2026-11-04T09:00:00.000Z' },
+    });
+
+    const response = await summary('2026-11-04T10:00:00.000Z', '2026-11-04T11:00:00.000Z').expect(200);
+
+    expect(response.body.pendingSince).toBe('2026-11-04T09:00:00.000Z');
   });
 });

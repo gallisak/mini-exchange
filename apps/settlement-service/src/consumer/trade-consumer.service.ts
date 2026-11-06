@@ -66,7 +66,10 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
         if (!this.groupsReady) await this.ensureGroups();
         if (Date.now() - this.lastReclaim >= this.options.reclaimEveryMs) {
           this.lastReclaim = Date.now();
-          await this.reclaim();
+          await this.reclaim().catch((error: Error) => {
+            if (error.message.includes('NOGROUP')) this.groupsReady = false;
+            this.logger.warn(`Reclaiming stalled trades failed, polling anyway: ${error.message}`);
+          });
         }
         await this.poll();
         backoff = 100;
@@ -118,7 +121,6 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
 
   private async reclaim(): Promise<void> {
     const { group, consumer, retryIdleMs, batchSize } = this.options;
-    let failure: Error | undefined;
     for (const stream of this.streams) {
       const pending = (await this.client!.xpending(
         stream,
@@ -137,15 +139,13 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
         )[];
         for (const entry of claimed) {
           if (!entry) continue;
-          await this.handle(stream, entry[0], fieldsOf(entry[1]), deliveries + 1).catch((error: Error) => {
-            failure ??= error;
-            this.logger.warn(error.message);
-          });
+          await this.handle(stream, entry[0], fieldsOf(entry[1]), deliveries + 1).catch((error: Error) =>
+            this.logger.warn(error.message),
+          );
         }
       }
       await this.forgetIdleConsumers(stream);
     }
-    if (failure) throw failure;
   }
 
   private async forgetIdleConsumers(stream: string): Promise<void> {

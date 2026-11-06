@@ -21,11 +21,15 @@ export async function replayDeadLetters(
       if (!letter.stream || !letter.fields) continue;
       if (chosen ? !chosen.has(id) : !letter.reason?.startsWith(GAVE_UP)) continue;
       const fields = JSON.parse(letter.fields) as Record<string, string>;
-      await redis
+      const results = await redis
         .multi()
         .xadd(letter.stream, '*', ...Object.entries(fields).flat())
         .xdel(deadLetterStream, id)
         .exec();
+      const failed = results?.find(([error]) => error);
+      if (!results || failed) {
+        throw new Error(`Could not replay dead letter ${id}: ${failed?.[0]?.message ?? 'the transaction was aborted'}`);
+      }
       replayed += 1;
     }
     after = `(${entries[entries.length - 1][0]}`;

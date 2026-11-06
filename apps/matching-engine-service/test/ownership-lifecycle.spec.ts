@@ -191,4 +191,56 @@ describe('instrument ownership lifecycle', () => {
 
     expect(after - before).toBeGreaterThanOrEqual(2);
   });
+
+  it('does not drop a lease it just took because a renewal of the older one answered late', async () => {
+    const leases = new Map<string, InstrumentLease>();
+    let answerRenewal: (() => void) | undefined;
+    let token = 0n;
+    const lock = {
+      acquire: async (key: string) => (key.endsWith(':ABC') ? ++token : null),
+      renew: async (key: string) => {
+        if (!key.endsWith(':ABC') || token !== 1n) return true;
+        await new Promise<void>((resolve) => (answerRenewal = resolve));
+        return false;
+      },
+      release: async () => true,
+      raiseFence: async () => undefined,
+    } as unknown as RedisLockService;
+    const engine = {
+      isStopping: () => false,
+      startInstrument: async (instrument: string, lease: InstrumentLease) => void leases.set(instrument, lease),
+      stopInstrument: async () => undefined,
+    } as unknown as MatchingEngineService;
+    const service = new InstrumentOwnershipService(lock, engine);
+    try {
+      await service.onApplicationBootstrap();
+      while (!answerRenewal) await sleep(10);
+
+      leases.get('ABC')?.onFenced(new FencedOutError('ABC', 1n, 1n));
+      while (token < 2n || !service.ownedInstruments().includes('ABC')) await sleep(10);
+      answerRenewal();
+      await sleep(200);
+
+      expect(service.ownedInstruments()).toContain('ABC');
+      expect(token).toBe(2n);
+    } finally {
+      answerRenewal?.();
+      await service.onModuleDestroy();
+    }
+  });
+
+  it('lets go of a lock whose acquisition Redis did not answer in time', async () => {
+    const { service, calls } = ownership({
+      acquire: async (key) => {
+        if (key.endsWith(':ABC')) throw new Error('Redis did not answer within 1000 ms');
+        return null;
+      },
+      startDelayMs: 0,
+    });
+
+    await service.onApplicationBootstrap();
+    await service.onModuleDestroy();
+
+    expect(calls.released).toContain('lock:instrument:ABC');
+  });
 });

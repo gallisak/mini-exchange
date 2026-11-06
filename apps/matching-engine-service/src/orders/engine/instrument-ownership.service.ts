@@ -102,7 +102,13 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
       if (this.stopped || this.owned.has(instrument) || this.engine.isStopping(instrument)) continue;
       const key = instrumentLockKey(instrument);
       const requestedAt = performance.now();
-      const token = await this.lock.acquire(key, this.ownerId, this.ttlMs);
+      let token: bigint | null;
+      try {
+        token = await this.lock.acquire(key, this.ownerId, this.ttlMs);
+      } catch (error) {
+        await this.lock.release(key, this.ownerId).catch(() => undefined);
+        throw error;
+      }
       if (token === null) continue;
       this.owned.set(instrument, { token, renewedAt: requestedAt });
       try {
@@ -139,10 +145,10 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
           lease.renewedAt = requestedAt;
           continue;
         }
-        this.demote(instrument, 'the lock is held by someone else');
+        if (this.owned.get(instrument) === lease) this.demote(instrument, 'the lock is held by someone else');
       } catch (error) {
         this.logger.error(`Could not renew ${instrument}: ${(error as Error).message}`);
-        if (!this.isLeaseValid(instrument, lease.token)) {
+        if (this.owned.get(instrument) === lease && !this.isLeaseValid(instrument, lease.token)) {
           this.demote(instrument, 'the lease expired while Redis was unreachable');
         }
       }

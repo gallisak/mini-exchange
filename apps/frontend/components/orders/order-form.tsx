@@ -15,6 +15,7 @@ import {
   afterFailure,
   attemptFor,
   loadAttempt,
+  replaceAttempt,
   saveAttempt,
   unconfirmed,
 } from '@/lib/client/order-attempt';
@@ -67,12 +68,15 @@ export function OrderForm({ instrument }: { instrument: string }) {
     event.preventDefault();
     if (!ready) return;
     const current = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
+    const resent = Boolean(attempt?.unconfirmed && attempt.key === current.key);
     const sentBy = owner;
+    const sentFor = current.draft.instrument;
+    if (sentBy) saveAttempt(sessionStore(), sentBy, sentFor, unconfirmed(current));
+    setAttempt(unconfirmed(current));
     const settle = (next: Attempt | null) => {
-      if (sentBy) saveAttempt(sessionStore(), sentBy, current.draft.instrument, next);
-      setAttempt(next);
+      if (sentBy) replaceAttempt(sessionStore(), sentBy, sentFor, current.key, next);
+      setAttempt((shown) => (shown?.key === current.key ? next : shown));
     };
-    settle(unconfirmed(current));
     setBusy(true);
     try {
       await api('/api/orders', {
@@ -84,7 +88,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
       settle(null);
       setQuantity('');
     } catch (failure) {
-      settle(afterFailure(current, failure instanceof ApiError ? failure.status : 0));
+      settle(afterFailure(current, failure instanceof ApiError ? failure.status : 0, resent));
       toast.error((failure as Error).message);
     } finally {
       setBusy(false);
