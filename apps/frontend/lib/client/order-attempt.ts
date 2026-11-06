@@ -10,6 +10,7 @@ export interface Attempt {
   order: string;
   draft: OrderDraft;
   unconfirmed?: boolean;
+  sends?: number;
 }
 
 const fingerprint = ({ instrument, side, price, quantity }: OrderDraft) =>
@@ -23,6 +24,11 @@ export function attemptFor(previous: Attempt | null, draft: OrderDraft, newKey: 
 
 export function unconfirmed(attempt: Attempt): Attempt {
   return { ...attempt, unconfirmed: true };
+}
+
+export function sentAgain(attempt: Attempt, stored: Attempt | null): Attempt {
+  const sends = Math.max(attempt.sends ?? 0, stored?.key === attempt.key ? (stored.sends ?? 0) : 0) + 1;
+  return { ...attempt, unconfirmed: true, sends };
 }
 
 export function isUnknownOutcome(status: number): boolean {
@@ -56,10 +62,11 @@ export function replaceAttempt(
   storage: AttemptStorage | null,
   owner: string,
   instrument: string,
-  expectedKey: string,
+  sent: Attempt,
   attempt: Attempt | null,
 ): boolean {
-  if (loadAttempt(storage, owner, instrument)?.key !== expectedKey) return false;
+  const stored = loadAttempt(storage, owner, instrument);
+  if (stored?.key !== sent.key || (stored.sends ?? 0) !== (sent.sends ?? 0)) return false;
   saveAttempt(storage, owner, instrument, attempt);
   return true;
 }
@@ -79,7 +86,8 @@ export function loadAttempt(
       draft?.instrument === instrument &&
       (draft.side === 'buy' || draft.side === 'sell') &&
       typeof draft.price === 'string' &&
-      typeof draft.quantity === 'string';
+      typeof draft.quantity === 'string' &&
+      (stored.sends === undefined || Number.isSafeInteger(stored.sends));
     return valid ? (stored as Attempt) : null;
   } catch {
     return null;

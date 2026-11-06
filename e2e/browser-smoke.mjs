@@ -34,7 +34,19 @@ async function waitStatus(page, status, timeout = 15_000) {
   log(`book is ${status}`);
 }
 
-const book = await fetch(`${BASE}/api/market/book?instrument=ABC`).then((response) => response.json());
+async function loadedBook() {
+  const deadline = Date.now() + 60_000;
+  for (;;) {
+    const answer = await fetch(`${BASE}/api/market/book?instrument=ABC`)
+      .then((response) => response.json())
+      .catch(() => null);
+    if (Array.isArray(answer?.bids) && Array.isArray(answer?.asks)) return answer;
+    if (Date.now() > deadline) throw new Error(`The ABC book never loaded: ${JSON.stringify(answer)}`);
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+}
+
+const book = await loadedBook();
 if (book.bids.length > 0 || book.asks.length > 0) {
   console.error('BROWSER SMOKE NEEDS A FRESH STACK: the ABC book already has orders that would match ours');
   process.exit(1);

@@ -3,6 +3,7 @@ import { Column, CreateDateColumn, Entity, Index, PrimaryColumn } from 'typeorm'
 @Entity('refresh_sessions')
 @Index('IDX_refresh_sessions_user', ['userId'])
 @Index('IDX_refresh_sessions_family', ['familyId'])
+@Index('IDX_refresh_sessions_created', ['createdAt'])
 export class RefreshSession {
   @PrimaryColumn('uuid')
   id: string;

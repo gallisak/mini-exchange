@@ -2,7 +2,7 @@
 
 import { createContext, useContext, useEffect, useState } from 'react';
 import { Socket, io } from 'socket.io-client';
-import { UNAUTHORIZED_EVENT } from './api';
+import { UNAUTHORIZED_EVENT, UnauthorizedDetail } from './api';
 import { waitForToken } from './ws-token';
 import { useSession } from './session';
 
@@ -21,13 +21,16 @@ export function SocketProvider({ children }: { children: React.ReactNode }) {
       transports: ['websocket'],
       auth: (deliver) => {
         if (!signedIn) return deliver({});
+        const startedAt = performance.now();
         void waitForToken({
           fetchToken: () => fetch('/api/ws-token', { cache: 'no-store' }),
           sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
           cancelled: () => closed,
         }).then((outcome) => {
           if (outcome.kind === 'token') return deliver({ token: outcome.token });
-          if (outcome.kind === 'signedOut') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+          if (outcome.kind === 'signedOut' && !closed) {
+            window.dispatchEvent(new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, { detail: { startedAt } }));
+          }
         });
       },
     });

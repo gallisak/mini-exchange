@@ -1,10 +1,10 @@
 import { randomUUID } from 'crypto';
+import { UPSTREAM_TIMEOUT_MS } from '@/lib/timeouts';
 import { NextRequest, NextResponse } from 'next/server';
 import {
   Rotation,
   SessionTokens,
   TokenPair,
-  clearTokens,
   isFresh,
   readTokens,
   refreshOnce,
@@ -15,7 +15,6 @@ const SERVICES = {
   engine: () => process.env.MATCHING_ENGINE_URL ?? 'http://localhost:3001',
   settlement: () => process.env.SETTLEMENT_URL ?? 'http://localhost:3002',
 };
-export const UPSTREAM_TIMEOUT_MS = 10_000;
 
 type Service = keyof typeof SERVICES;
 
@@ -85,7 +84,7 @@ export function rotateTokens(request: NextRequest, tokens: SessionTokens): Promi
     });
     if (result.status === 200) return { kind: 'rotated', tokens: result.body as TokenPair };
     if (result.status === 400 || result.status === 401) return { kind: 'invalid' };
-    return { kind: 'unavailable' };
+    return { kind: 'unavailable', untouched: result.status === 429 };
   });
 }
 
@@ -131,7 +130,6 @@ export async function withSession(
   }
   const response = NextResponse.json(result.body, { status: result.status });
   if (rotated) storeTokens(response, rotated);
-  if (result.status === 401) clearTokens(response);
   return response;
 }
 
@@ -140,9 +138,7 @@ export function relay(result: UpstreamResult): NextResponse {
 }
 
 export function unauthorized(): NextResponse {
-  const response = NextResponse.json({ message: 'Sign in to continue' }, { status: 401 });
-  clearTokens(response);
-  return response;
+  return NextResponse.json({ message: 'Sign in to continue' }, { status: 401 });
 }
 
 export function unavailable(): NextResponse {

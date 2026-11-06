@@ -1,5 +1,9 @@
 export const UNAUTHORIZED_EVENT = 'mx:unauthorized';
 
+export interface UnauthorizedDetail {
+  startedAt: number;
+}
+
 export class ApiError extends Error {
   constructor(
     readonly status: number,
@@ -23,6 +27,7 @@ export async function api<T>(
   path: string,
   { timeoutMs, ...init }: RequestInit & { timeoutMs?: number } = {},
 ): Promise<T> {
+  const startedAt = performance.now();
   const signal = timeoutMs === undefined ? init.signal : AbortSignal.timeout(timeoutMs);
   let response: Response;
   let text: string;
@@ -48,7 +53,7 @@ export async function api<T>(
   }
   if (!response.ok) {
     if (response.status === 401 && typeof window !== 'undefined') {
-      window.dispatchEvent(new Event(UNAUTHORIZED_EVENT));
+      window.dispatchEvent(new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, { detail: { startedAt } }));
     }
     throw new ApiError(response.status, messageOf(body, response.status));
   }

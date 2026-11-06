@@ -42,7 +42,14 @@ started in production with a `change-me-*` placeholder from `.env.example` refus
 Redis command a book, an order submission, the outbox relay or a lease depends on has a timeout, so
 a Redis that stops answering is treated as a failure and retried rather than waited on forever. A
 relay batch whose `EXEC` timed out may still reach the stream later and be published twice;
-settlement books each trade once, so that only costs a duplicate event.
+settlement books each trade once, so that only costs a duplicate event. Postgres queries in both
+services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it), lock waits
+after `DATABASE_LOCK_TIMEOUT_MS` (10 s), and a server that does not answer at all after five seconds
+more, so a stalled database shows up as a stuck book instead of a silent one. A command stream that
+fails three reads in a row also marks its book stuck, counted in `book_read_failures_total`. nginx
+passes a request on to the other engine only when the first one never received it, or for reads,
+so an order or cancel is never sent twice by the gateway; a cancel of an order that is already
+cancelled answers 202.
 
 `/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
 
@@ -54,15 +61,19 @@ docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget 
 token at once (a note in Redis for 30 minutes, twice the life of an access token, checked by both
 services and by every WebSocket connection) and closes its WebSocket connections. The ended session
 is recorded in Postgres in the same transaction, and every engine retries the Redis note until it is
-written. A sign-out is done once Postgres has it: if the Redis note fails, the engines write it
-within seconds, and while Redis is down the services cannot check a token and answer 503, so the
-access token never works meanwhile. After its Redis subscription comes back an engine checks which
+written. A sign-out answers 503 until the note is written, since an access token is refused only
+through that note (a Redis that refuses writes but still answers reads would otherwise let it work
+for up to 15 minutes); signing out again finishes it. Expired refresh sessions are deleted hourly. After its Redis subscription comes back an engine checks which
 connected sessions ended, and keeps checking until Redis answers instead of closing every connection. A rotation and a sign-out of the same user take one
 Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
 sign-out that did not go through instead of pretending it did; if the engine refuses an access
 token that looked valid, the frontend rotates it and signs out with the new one, so the refresh
-session ends too. The frontend's API refuses any
+session ends too. The frontend clears the session cookies only on sign-out, never because a
+request failed, so a late answer for an old session cannot sign out a user who just signed in; the
+page also ignores refusals of requests sent before the latest sign-in. Rotations it remembers to
+retry are capped at 10 000, and one the engine refused with 429 is not remembered at all. An order
+answer only changes the stored attempt of the same send. The frontend's API refuses any
 request another site makes the browser send, reads included, since a read may rotate the session;
 every page forbids being framed.
 

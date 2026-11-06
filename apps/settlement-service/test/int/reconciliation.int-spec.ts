@@ -843,6 +843,55 @@ describe("reconciliation", () => {
     );
   });
 
+  it("reports a period with trades it could not see waiting in settlement as incomplete, not as a mismatch", async () => {
+    await restartWith({
+      CONSUMER_ENABLED: "false",
+      RECONCILIATION_BACKLOG_LIMIT: "5",
+    });
+    firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
+    engineRows = [
+      {
+        instrument: "ABC",
+        count: 1,
+        quantity: "1.00000000",
+        notional: "10.0000000000",
+      },
+    ];
+    const redis = redisClient();
+    for (let n = 0; n < 10; n += 1)
+      await publishTrade(redis, trade({ executedAt: firstTradeAt }));
+    await redis.quit();
+
+    const response = await reconcile({}).expect(200);
+
+    expect(response.body.status).toBe("incomplete");
+  });
+
+  it("keeps a period that could not be checked again as a mismatch and moves on to the others", async () => {
+    engineRows = "down";
+    const day = 24 * 3_600_000;
+    const start = Date.now() - 200 * day;
+    for (let n = 0; n < 12; n += 1) {
+      await corrupt(
+        `INSERT INTO "reconciliation_unresolved_periods" ("from", "to") VALUES ($1, $2)`,
+        [new Date(start + n * day), new Date(start + n * day + 3_600_000)],
+      );
+    }
+
+    const response = await reconcile({}).expect(200);
+    const [{ checked }] = await corrupt(
+      `SELECT COUNT("checkedAt")::int AS "checked" FROM "reconciliation_unresolved_periods"`,
+    );
+
+    expect(response.body.status).toBe("mismatch");
+    expect(
+      response.body.unresolved.every(
+        (row: { status: string }) => row.status === "mismatch",
+      ),
+    ).toBe(true);
+    expect(checked).toBe(10);
+  });
+
   it("does not check past the oldest command a book has not applied yet", async () => {
     firstTradeAt = new Date(Date.now() - 3 * 3_600_000).toISOString();
     pendingSince = new Date(Date.now() - 2 * 3_600_000).toISOString();

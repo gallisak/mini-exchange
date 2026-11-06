@@ -6,6 +6,7 @@ import { RefreshSession } from '../../src/auth/entities/refresh-session.entity';
 import { LowercaseEmails1793781500000 } from '../../src/database/migrations/1793781500000-LowercaseEmails';
 import { setAdmin } from '../../src/tools/grant-admin';
 import { RedisService } from '../../src/redis/redis.service';
+import { SessionRevocations } from '../../src/auth/session-revocations.service';
 import { createApp, eventually, resetState } from './harness';
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -454,15 +455,37 @@ describe('authentication sessions', () => {
     }, 10_000);
   });
 
-  it('reports a sign-out as done once it is recorded, and ends its access token as soon as Redis takes the note', async () => {
+  it('does not report a sign-out as done while Redis refuses the note that ends its access token, and finishes it on a retry', async () => {
     const session = await signUp();
     failNextRedisTransaction();
 
-    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(204);
+    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(503);
     await refresh(session.refreshToken).expect(401);
+    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect((response) => {
+      expect([204, 401]).toContain(response.status);
+    });
 
     await eventually(async () => {
       await http().get('/orders').set('authorization', `Bearer ${session.accessToken}`).expect(401);
     }, 10_000);
+  });
+
+  it('forgets refresh sessions whose tokens expired long ago and keeps the rest', async () => {
+    const session = await signUp();
+    const repository = app.get(DataSource).getRepository(RefreshSession);
+    const old = randomUUID();
+    const [kept] = await repository.find();
+    await repository.insert({
+      id: old,
+      userId: kept.userId,
+      familyId: randomUUID(),
+      tokenHash: 'expired',
+      createdAt: new Date(Date.now() - 9 * 24 * 3_600_000),
+    });
+
+    await app.get(SessionRevocations).cleanUp();
+
+    expect((await repository.find()).map((row) => row.id)).toEqual([kept.id]);
+    await refresh(session.refreshToken).expect(200);
   });
 });

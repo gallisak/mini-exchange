@@ -241,9 +241,12 @@ export class ReconciliationService {
     report: ReconciliationReport,
     reason: string,
   ): ReconciliationReport {
+    const ledgerBroken = Object.values(report.ledger).some(
+      (issues) => issues.length > 0,
+    );
     return {
       ...report,
-      status: report.status === "mismatch" ? "mismatch" : "incomplete",
+      status: ledgerBroken ? "mismatch" : "incomplete",
       engineError: report.engineError ?? reason,
     };
   }
@@ -334,13 +337,11 @@ export class ReconciliationService {
         );
         continue;
       }
-      if (status === "mismatch") {
-        await this.dataSource.query(
-          `UPDATE "reconciliation_unresolved_periods" SET "checkedAt" = now() WHERE "from" = $1 AND "to" = $2`,
-          [period.from, period.to],
-        );
-      }
-      rechecked.set(keyOf(period), status);
+      await this.dataSource.query(
+        `UPDATE "reconciliation_unresolved_periods" SET "checkedAt" = now() WHERE "from" = $1 AND "to" = $2`,
+        [period.from, period.to],
+      );
+      if (status === "mismatch") rechecked.set(keyOf(period), status);
     }
     const listed: { from: Date; to: Date }[] = await this.dataSource.query(
       `SELECT "from", "to" FROM "reconciliation_unresolved_periods"

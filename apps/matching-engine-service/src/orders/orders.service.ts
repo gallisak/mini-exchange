@@ -105,8 +105,9 @@ export class OrdersService {
     if (!order) {
       throw new NotFoundException('Order not found');
     }
-    if (order.status === 'filled' || order.status === 'cancelled') {
-      throw new ConflictException(`Order is already ${order.status}`);
+    if (order.status === 'cancelled') return { orderId, status: 'cancel_requested' };
+    if (order.status === 'filled') {
+      throw new ConflictException('Order is already filled');
     }
     await this.commands.append(order.instrument, {
       type: 'cancel',

@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { NextResponse } from 'next/server';
-import { REFRESH_REUSE_WINDOW_MS, Rotation, refreshOnce, storeTokens } from './session';
+import { REFRESH_REUSE_WINDOW_MS, REMEMBERED_SESSIONS, Rotation, refreshOnce, storeTokens } from './session';
 
 describe('sharing one refresh between requests', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -100,5 +100,43 @@ describe('sharing one refresh between requests', () => {
       .getSetCookie()
       .map((cookie) => [cookie.split('=')[0], /Max-Age=(\d+)/.exec(cookie)?.[1]]);
     expect(Object.fromEntries(ages)).toEqual({ mx_access: '604800', mx_refresh: '604800' });
+  });
+
+  it('forgets the attempt of a rotation the engine refused to look at, so random cookies do not pile up', async () => {
+    const rotate = vi.fn(async (_token: string, _attempt: string): Promise<Rotation> => ({
+      kind: 'unavailable',
+      untouched: true,
+    }));
+    await refreshOnce({ refreshToken: 'limited', accessToken: 'access-h' }, rotate);
+    await refreshOnce({ refreshToken: 'limited', accessToken: 'access-h' }, rotate);
+
+    const [first, second] = rotate.mock.calls.map(([, attempt]) => attempt);
+    expect(second).not.toBe(first);
+  });
+
+  it('remembers a bounded number of sessions however many different cookies arrive', async () => {
+    const rotate = vi.fn(async (_token: string, _attempt: string): Promise<Rotation> => ({ kind: 'unavailable' }));
+    const first = { refreshToken: 'flood-0', accessToken: 'flood' };
+    const attemptOf = async () => {
+      await refreshOnce(first, rotate);
+      return rotate.mock.calls.at(-1)?.[1];
+    };
+    const before = await attemptOf();
+
+    for (let n = 1; n <= REMEMBERED_SESSIONS; n += 1) {
+      await refreshOnce({ refreshToken: `flood-${n}`, accessToken: 'flood' }, rotate);
+    }
+
+    expect(await attemptOf()).not.toBe(before);
+  });
+
+  it('does not ask the engine again for a refresh token it just refused', async () => {
+    const rotate = vi.fn(async (): Promise<Rotation> => ({ kind: 'invalid' }));
+
+    await refreshOnce({ refreshToken: 'dead', accessToken: 'access-i' }, rotate);
+    await vi.advanceTimersByTimeAsync(30_000);
+    await refreshOnce({ refreshToken: 'dead', accessToken: 'access-i' }, rotate);
+
+    expect(rotate).toHaveBeenCalledTimes(1);
   });
 });

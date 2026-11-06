@@ -35,6 +35,12 @@ export const bookBatchFailures = new Counter({
   labelNames: ['instrument'],
 });
 
+export const bookReadFailures = new Counter({
+  name: 'book_read_failures_total',
+  help: 'Reads of a command stream this instance failed, by instrument',
+  labelNames: ['instrument'],
+});
+
 export const outboxPublished = new Counter({
   name: 'outbox_published_total',
   help: 'Outbox messages relayed to Redis by this instance',

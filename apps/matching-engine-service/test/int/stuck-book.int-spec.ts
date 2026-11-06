@@ -8,6 +8,7 @@ import { TradeRecord } from '../../src/orders/entities/trade-record.entity';
 import { OrderBookService } from '../../src/orders/order-book.service';
 import { RedisService } from '../../src/redis/redis.service';
 import { uuidV5 } from '../../src/common/uuid';
+import { register } from 'prom-client';
 import { eventually, resetState } from './harness';
 
 describe('a book whose batch keeps failing', () => {
@@ -144,6 +145,7 @@ describe('a book whose batch keeps failing', () => {
   });
 
   it('is reported as stuck while it keeps failing to read its command stream and cleared once it reads again', async () => {
+    register.resetMetrics();
     let broken = true;
     const createConnection = redis.createConnection.bind(redis);
     jest.spyOn(redis, 'createConnection').mockImplementation((options) => {
@@ -170,6 +172,9 @@ describe('a book whose batch keeps failing', () => {
       const stuck = JSON.parse((await raw.get(stuckKey('ABC'))) ?? 'null');
       expect(stuck?.error).toMatch(/READONLY replica/);
     });
+    const metrics = await register.metrics();
+    expect(metrics).toMatch(/book_read_failures_total\{instrument="ABC"\} [1-9]/);
+    expect(metrics).not.toMatch(/book_batch_failures_total\{instrument="ABC"\} [1-9]/);
     broken = false;
 
     await eventually(async () => expect(await raw.get(stuckKey('ABC'))).toBeNull());

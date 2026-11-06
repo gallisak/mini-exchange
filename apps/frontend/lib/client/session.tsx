@@ -1,7 +1,8 @@
 'use client';
 
-import { createContext, useCallback, useContext, useEffect, useState } from 'react';
-import { ApiError, UNAUTHORIZED_EVENT, api } from './api';
+import { createContext, useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { ApiError, UNAUTHORIZED_EVENT, UnauthorizedDetail, api } from './api';
+import { answeredForCurrentSession } from './session-order';
 import { User } from './types';
 
 interface SessionValue {
@@ -17,16 +18,21 @@ const SessionContext = createContext<SessionValue | null>(null);
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [loading, setLoading] = useState(true);
+  const generation = useRef(0);
+  const signedInAt = useRef(0);
 
   const refresh = useCallback(async () => {
+    const started = generation.current;
+    const current = () => generation.current === started;
     for (let attempt = 0; ; attempt += 1) {
       try {
-        setUser((await api<{ user: User | null }>('/api/auth/session')).user);
+        const { user: found } = await api<{ user: User | null }>('/api/auth/session');
+        if (current()) setUser(found);
         break;
       } catch (failure) {
         const transient = !(failure instanceof ApiError) || failure.status === 0 || failure.status >= 500;
         if (!transient || attempt >= 4) {
-          setUser(null);
+          if (current()) setUser(null);
           break;
         }
         await new Promise((resolve) => setTimeout(resolve, 1_000 * 2 ** attempt));
@@ -37,7 +43,10 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     void refresh();
-    const signedOut = () => setUser(null);
+    const signedOut = (event: Event) => {
+      const startedAt = (event as CustomEvent<UnauthorizedDetail>).detail?.startedAt;
+      if (answeredForCurrentSession(startedAt, signedInAt.current)) setUser(null);
+    };
     window.addEventListener(UNAUTHORIZED_EVENT, signedOut);
     return () => window.removeEventListener(UNAUTHORIZED_EVENT, signedOut);
   }, [refresh]);
@@ -47,12 +56,15 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
       method: 'POST',
       body: JSON.stringify({ email, password }),
     });
+    generation.current += 1;
+    signedInAt.current = performance.now();
     setUser(signedIn);
     return signedIn;
   }, []);
 
   const signOut = useCallback(async () => {
     await api('/api/auth/logout', { method: 'POST' });
+    generation.current += 1;
     setUser(null);
   }, []);
 

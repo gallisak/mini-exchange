@@ -23,38 +23,29 @@ docker run -d --name "$name-nginx" --network "$network" -p 127.0.0.1::3001 \
   -v "$root/docker/nginx/nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:1.27-alpine >/dev/null
 port=$(docker port "$name-nginx" 3001 | head -n 1 | sed 's/.*://')
 
-post() {
-  curl -s -o /dev/null -w '%{http_code}' -X POST "http://127.0.0.1:$port$1" -H 'content-type: application/json' -d '{}'
-}
-
 for attempt in $(seq 1 30); do
   [ "$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/health")" != 000 ] && break
   sleep 1
 done
 
-for n in 1 2 3 4; do
-  status=$(post /orders)
-  if [ "$status" != 200 ]; then
-    echo "FAIL: POST /orders answered $status; it should be retried on the other engine"
+for path in /orders /auth/refresh; do
+  method=POST
+  sleep 3
+  dropped=0
+  for n in 1 2 3 4; do
+    status=$(curl -s -o /dev/null -w '%{http_code}' -X "$method" "http://127.0.0.1:$port$path" -H 'content-type: application/json' -d '{}')
+    if [ "$status" = 502 ]; then
+      dropped=1
+      break
+    fi
+    sleep 2.2
+  done
+  if [ "$dropped" != 1 ]; then
+    echo "FAIL: $method $path was replayed on the other engine after the first one received it"
     exit 1
   fi
+  echo "OK: $method $path that an engine already received is not replayed on the other engine"
 done
-echo "OK: an order an engine dropped after receiving it is retried on the other engine"
-
-sleep 3
-dropped=0
-for n in 1 2 3 4; do
-  if [ "$(post /auth/refresh)" = 502 ]; then
-    dropped=1
-    break
-  fi
-  sleep 2.2
-done
-if [ "$dropped" != 1 ]; then
-  echo "FAIL: POST /auth/refresh was replayed on the other engine after the first one received it"
-  exit 1
-fi
-echo "OK: a refresh an engine already received is not replayed on the other engine"
 
 docker rm -f "$name-nginx" "$name-dropping" "$name-answering" >/dev/null
 slow="const delay = req.url.startsWith('/slow') ? 6000 : req.url.startsWith('/trades/summary') ? 5000 : 0; setTimeout(() => res.end('answered'), delay);"

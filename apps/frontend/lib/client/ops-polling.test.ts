@@ -1,6 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { UPSTREAM_TIMEOUT_MS } from '@/lib/server/upstream';
-import { OPS_TIMEOUT_MS, opsView, startOpsPolling } from './ops-polling';
+import { readFileSync } from 'fs';
+import { resolve } from 'path';
+import {
+  OPS_TIMEOUT_MS,
+  OPS_UPSTREAM_TIMEOUT_MS,
+  RECONCILE_TIMEOUT_MS,
+  RECONCILIATION_UPSTREAM_TIMEOUT_MS,
+  longestAnswer,
+} from '@/lib/timeouts';
+import { opsView, startOpsPolling } from './ops-polling';
 
 describe('operations page polling', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -42,7 +50,17 @@ describe('operations page polling', () => {
     expect(opsView(report, null)).toEqual({ kind: 'report', report, staleBecause: null });
   });
 
-  it('waits for the status longer than the frontend may take for two rotations and two calls, so new cookies still arrive', () => {
-    expect(OPS_TIMEOUT_MS).toBeGreaterThan(4 * UPSTREAM_TIMEOUT_MS);
+  it('waits longer than the frontend may take for two rotations and two calls, and nginx lets it, so new cookies still arrive', () => {
+    const web = readFileSync(resolve(__dirname, '../../../../docker/nginx/web.conf'), 'utf8');
+    const readTimeout = (location: string) =>
+      Number(new RegExp(`location ${location} \\{[^}]*proxy_read_timeout (\\d+)s`).exec(web)?.[1]) * 1000;
+
+    expect(OPS_UPSTREAM_TIMEOUT_MS).toBeGreaterThan(10_000);
+    expect(OPS_TIMEOUT_MS).toBeGreaterThan(longestAnswer(OPS_UPSTREAM_TIMEOUT_MS));
+    expect(readTimeout('/')).toBeGreaterThan(longestAnswer(OPS_UPSTREAM_TIMEOUT_MS));
+    expect(RECONCILE_TIMEOUT_MS).toBeGreaterThan(longestAnswer(RECONCILIATION_UPSTREAM_TIMEOUT_MS));
+    expect(readTimeout('= /api/ops/reconciliation')).toBeGreaterThan(
+      longestAnswer(RECONCILIATION_UPSTREAM_TIMEOUT_MS),
+    );
   });
 });

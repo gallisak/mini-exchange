@@ -21,7 +21,11 @@ import {
 import { FencedOutError } from "./fenced-out.error";
 import { runWithTrace } from "../../observability/trace-context";
 import { withTimeout } from "../../common/with-timeout";
-import { bookBatchFailures, tradesExecuted } from "../../observability/metrics";
+import {
+  bookBatchFailures,
+  bookReadFailures,
+  tradesExecuted,
+} from "../../observability/metrics";
 import { diffBooks } from "../depth";
 import { publicTrade } from "../../trades/public-trade";
 import { MarketEvent } from "../realtime/market-events";
@@ -287,8 +291,9 @@ export class BookRunner {
           this.logger.warn(
             `Reading the command stream failed ${this.readFailures} times in a row, reading again: ${(error as Error).message}`,
           );
+          bookReadFailures.inc({ instrument: this.instrument });
           if (this.readFailures >= READ_FAILURES_BEFORE_STUCK) {
-            await this.failed(error as Error);
+            await this.noteStuck(error as Error);
           }
           await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
           continue;
@@ -353,6 +358,10 @@ export class BookRunner {
 
   private async failed(error: Error): Promise<void> {
     bookBatchFailures.inc({ instrument: this.instrument });
+    await this.noteStuck(error);
+  }
+
+  private async noteStuck(error: Error): Promise<void> {
     this.stuck = {
       since: this.stuck?.since ?? new Date().toISOString(),
       failures: (this.stuck?.failures ?? 0) + 1,

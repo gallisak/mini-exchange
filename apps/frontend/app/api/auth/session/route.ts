@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { claimsOf, clearTokens, isFresh, readTokens, storeTokens } from '@/lib/server/session';
+import { claimsOf, isFresh, readTokens, storeTokens } from '@/lib/server/session';
 import { rotateTokens, unavailable } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
@@ -16,11 +16,7 @@ export async function GET(request: NextRequest) {
 
   const outcome = await rotateTokens(request, { refreshToken, accessToken });
   if (outcome.kind === 'unavailable') return unavailable();
-  if (outcome.kind === 'invalid') {
-    const response = NextResponse.json({ user: null });
-    clearTokens(response);
-    return response;
-  }
+  if (outcome.kind === 'invalid') return NextResponse.json({ user: null });
   const response = NextResponse.json({ user: userOf(outcome.tokens.accessToken) });
   storeTokens(response, outcome.tokens);
   return response;

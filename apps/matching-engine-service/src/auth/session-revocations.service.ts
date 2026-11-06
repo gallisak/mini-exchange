@@ -16,6 +16,9 @@ const CLEANUP_EVERY_MS = 3_600_000;
 const REDIS_TIMEOUT_MS = 1_000;
 const RETRY_BATCH = 100;
 const KEEP_RECORDS_MS = 24 * 3_600_000;
+const KEEP_REFRESH_SESSIONS_MS = 8 * 24 * 3_600_000;
+const CLEANUP_BATCH = 10_000;
+const CLEANUP_BATCHES = 10;
 
 export function revokedSessionKey(sessionId: string): string {
   return `auth:revoked-session:${sessionId}`;
@@ -89,13 +92,27 @@ export class SessionRevocations implements OnApplicationBootstrap, OnModuleDestr
       await this.send(rows.map((row) => row.familyId));
       if (Date.now() - this.lastCleanup >= CLEANUP_EVERY_MS) {
         this.lastCleanup = Date.now();
-        await this.dataSource.query(
-          `DELETE FROM "session_revocations" WHERE "revokedAt" < now() - make_interval(secs => $1)`,
-          [KEEP_RECORDS_MS / 1000],
-        );
+        await this.cleanUp();
       }
     } catch (error) {
       this.logger.warn(`Could not announce ended sessions, retrying: ${(error as Error).message}`);
+    }
+  }
+
+  async cleanUp(): Promise<void> {
+    await this.dataSource.query(
+      `DELETE FROM "session_revocations" WHERE "revokedAt" < now() - make_interval(secs => $1)`,
+      [KEEP_RECORDS_MS / 1000],
+    );
+    for (let batch = 0; batch < CLEANUP_BATCHES; batch += 1) {
+      const [, deleted]: [unknown, number] = await this.dataSource.query(
+        `DELETE FROM "refresh_sessions" WHERE "id" IN (
+           SELECT "id" FROM "refresh_sessions"
+            WHERE "createdAt" < now() - make_interval(secs => $1)
+            LIMIT ${CLEANUP_BATCH})`,
+        [KEEP_REFRESH_SESSIONS_MS / 1000],
+      );
+      if (deleted < CLEANUP_BATCH) return;
     }
   }
 

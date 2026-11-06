@@ -44,6 +44,7 @@ services:
     env_file: ./apps/matching-engine-service/.env.example
     environment:
       DATABASE_HOST: exchange-db
+      DATABASE_STATEMENT_TIMEOUT_MS: '0'
     <<: *secrets-loader
     command: ['npm', 'run', 'migration:run:prod']
     volumes:
@@ -100,6 +101,8 @@ services:
   settlement-migrate:
     build: ./apps/settlement-service
     env_file: ./apps/settlement-service/.env.example
+    environment:
+      DATABASE_STATEMENT_TIMEOUT_MS: '0'
     <<: *secrets-loader
     command: ['npm', 'run', 'migration:run:prod']
     volumes:

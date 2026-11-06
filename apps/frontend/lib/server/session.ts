@@ -6,6 +6,8 @@ export const REFRESH_COOKIE = 'mx_refresh';
 const REFRESH_MAX_AGE = 7 * 24 * 60 * 60;
 export const REFRESH_REUSE_WINDOW_MS = 5_000;
 export const ROTATION_RETRY_MS = 10 * 60_000;
+export const REMEMBERED_SESSIONS = 10_000;
+const INVALID_REMEMBERED_MS = 60_000;
 
 export interface TokenPair {
   accessToken: string;
@@ -21,7 +23,7 @@ export interface SessionTokens {
 export type Rotation =
   | { kind: 'rotated'; tokens: TokenPair }
   | { kind: 'invalid' }
-  | { kind: 'unavailable' };
+  | { kind: 'unavailable'; untouched?: boolean };
 
 export interface SessionUser {
   id: string;
@@ -78,6 +80,12 @@ export function isFresh(token: string | undefined): token is string {
 const refreshes = new Map<string, Promise<Rotation>>();
 const attempts = new Map<string, string>();
 
+function remember<V>(map: Map<string, V>, key: string, value: V): void {
+  map.delete(key);
+  while (map.size >= REMEMBERED_SESSIONS) map.delete(map.keys().next().value as string);
+  map.set(key, value);
+}
+
 const sessionKey = ({ refreshToken, accessToken, client }: SessionTokens) =>
   JSON.stringify([refreshToken, accessToken ?? '', client ?? '']);
 
@@ -89,18 +97,20 @@ export function refreshOnce(
   const pending = refreshes.get(key);
   if (pending) return pending;
   const attempt = attempts.get(key) ?? randomUUID();
-  attempts.set(key, attempt);
+  remember(attempts, key, attempt);
   const outcome = rotate(tokens.refreshToken, attempt).catch((): Rotation => ({ kind: 'unavailable' }));
-  refreshes.set(key, outcome);
+  remember(refreshes, key, outcome);
   void outcome.then((result) => {
-    if (result.kind === 'invalid') attempts.delete(key);
+    const forget = (map: Map<string, unknown>, value: unknown) => {
+      if (map.get(key) === value) map.delete(key);
+    };
+    if (result.kind === 'invalid' || (result.kind === 'unavailable' && result.untouched)) forget(attempts, attempt);
+    else setTimeout(() => forget(attempts, attempt), ROTATION_RETRY_MS).unref?.();
+    if (result.kind === 'unavailable') forget(refreshes, outcome);
     else {
-      setTimeout(() => {
-        if (attempts.get(key) === attempt) attempts.delete(key);
-      }, ROTATION_RETRY_MS).unref?.();
+      const keep = result.kind === 'invalid' ? INVALID_REMEMBERED_MS : REFRESH_REUSE_WINDOW_MS;
+      setTimeout(() => forget(refreshes, outcome), keep).unref?.();
     }
-    if (result.kind === 'unavailable') refreshes.delete(key);
-    else setTimeout(() => refreshes.delete(key), REFRESH_REUSE_WINDOW_MS).unref?.();
   });
   return outcome;
 }

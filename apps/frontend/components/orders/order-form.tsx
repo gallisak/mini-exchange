@@ -17,7 +17,7 @@ import {
   loadAttempt,
   replaceAttempt,
   saveAttempt,
-  unconfirmed,
+  sentAgain,
 } from '@/lib/client/order-attempt';
 import { useSession } from '@/lib/client/session';
 import { cn } from '@/lib/utils';
@@ -67,15 +67,16 @@ export function OrderForm({ instrument }: { instrument: string }) {
   async function onSubmit(event: React.FormEvent) {
     event.preventDefault();
     if (!ready) return;
-    const current = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
-    const resent = Boolean(attempt?.unconfirmed && attempt.key === current.key);
+    const chosen = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
+    const resent = Boolean(attempt?.unconfirmed && attempt.key === chosen.key);
     const sentBy = owner;
-    const sentFor = current.draft.instrument;
-    if (sentBy) saveAttempt(sessionStore(), sentBy, sentFor, unconfirmed(current));
-    setAttempt(unconfirmed(current));
+    const sentFor = chosen.draft.instrument;
+    const current = sentAgain(chosen, sentBy ? loadAttempt(sessionStore(), sentBy, sentFor) : null);
+    if (sentBy) saveAttempt(sessionStore(), sentBy, sentFor, current);
+    setAttempt(current);
     const settle = (next: Attempt | null) => {
-      if (sentBy) replaceAttempt(sessionStore(), sentBy, sentFor, current.key, next);
-      setAttempt((shown) => (shown?.key === current.key ? next : shown));
+      if (sentBy) replaceAttempt(sessionStore(), sentBy, sentFor, current, next);
+      setAttempt((shown) => (shown?.key === current.key && shown.sends === current.sends ? next : shown));
     };
     setBusy(true);
     try {

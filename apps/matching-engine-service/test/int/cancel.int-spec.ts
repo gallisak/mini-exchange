@@ -48,4 +48,11 @@ describe('cancelling a partially filled order', () => {
 
     expect((await listOrders(app, seller))[0].remainingQuantity).toBe('4.00000000');
   });
+
+  it('answers a repeated cancel of an order it already cancelled as accepted, so a retried request does not look like a failure', async () => {
+    const seller = await partiallyFilledThenCancelled();
+    const [order] = await listOrders(app, seller);
+
+    await cancel(app, seller, order.id).expect(202);
+  });
 });

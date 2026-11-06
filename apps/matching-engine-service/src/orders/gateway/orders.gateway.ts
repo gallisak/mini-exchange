@@ -108,8 +108,8 @@ export class OrdersGateway
           if (subscribedBefore || missedUpdates) {
             this.logger.warn('Real-time subscription restored, telling clients to reload');
             server.emit('resync', {});
-            void this.closeEndedSessions();
           }
+          void this.closeEndedSessions();
           subscribedBefore = true;
           missedUpdates = false;
         },

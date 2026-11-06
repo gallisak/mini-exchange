@@ -20,6 +20,21 @@ export const entities = [
   OutboxMessage,
 ];
 
+function databaseTimeouts(): Record<string, number> {
+  const statement = intEnv('DATABASE_STATEMENT_TIMEOUT_MS', 60_000, 0);
+  return {
+    connectionTimeoutMillis: intEnv('DATABASE_CONNECT_TIMEOUT_MS', 10_000),
+    ...(statement > 0
+      ? {
+          statement_timeout: statement,
+          query_timeout: statement + 5_000,
+          lock_timeout: intEnv('DATABASE_LOCK_TIMEOUT_MS', 10_000),
+          idle_in_transaction_session_timeout: statement,
+        }
+      : {}),
+  };
+}
+
 export function buildDataSourceOptions(): DataSourceOptions {
   return {
     type: 'postgres',
@@ -31,6 +46,7 @@ export function buildDataSourceOptions(): DataSourceOptions {
     entities,
     migrations: [join(__dirname, 'migrations', '*.{ts,js}')],
     synchronize: false,
+    extra: databaseTimeouts(),
   };
 }
 
