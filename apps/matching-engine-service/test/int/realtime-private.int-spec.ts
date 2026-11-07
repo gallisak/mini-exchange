@@ -110,6 +110,18 @@ describe('private real-time updates', () => {
     expect(reason).toBe('io server disconnect');
   });
 
+  it('refuses a ticket of another type', async () => {
+    const alice = await register(app);
+    const claims = { sub: alice.userId, until: Math.floor(Date.now() / 1000) + 900, typ: 'access' };
+    const mistyped = new JwtService().sign(claims, {
+      secret: process.env.JWT_ACCESS_SECRET,
+      audience: 'ws',
+      expiresIn: '30s',
+    });
+
+    await expect(connect(mistyped)).rejects.toThrow('Unauthorized');
+  });
+
   it('refuses a token without an expiry', async () => {
     const alice = await register(app);
     const endless = new JwtService().sign(
@@ -232,6 +244,11 @@ describe('private real-time updates', () => {
       const alice = await register(app);
 
       await expect(connect(alice.token)).resolves.toBeDefined();
+      const refreshLike = new JwtService().sign(
+        { sub: alice.userId, jti: alice.userId },
+        { secret: process.env.JWT_ACCESS_SECRET, expiresIn: '5m' },
+      );
+      await expect(connect(refreshLike)).rejects.toThrow('Unauthorized');
     } finally {
       delete process.env.WS_ACCEPT_ACCESS_TOKENS;
     }

@@ -11,6 +11,7 @@ import { RegisterDto } from './dto/register.dto';
 import { LoginDto } from './dto/login.dto';
 import { requireEnv } from '../common/env';
 import { SessionRevocations } from './session-revocations.service';
+import { ACCESS_TOKEN, REFRESH_TOKEN, WS_TICKET, isTokenOfType } from './token-claims';
 
 interface TokenPair {
   accessToken: string;
@@ -22,6 +23,7 @@ const INVALID_REFRESH = 'Refresh token is invalid or was already used';
 const SUPERSEDED_REFRESH = 'Refresh token was already replaced by a newer one, send that one';
 const SESSION_BUSY = 'The session could not be changed in time, try again';
 const EMAIL_TAKEN = 'Email is already registered';
+export const SESSION_ENDED = 'SESSION_ENDED';
 const UNIQUE_VIOLATION = '23505';
 const DUMMY_HASH = bcrypt.hashSync(randomUUID(), 10);
 const ROTATION_RETRY_MS = 10 * 60_000;
@@ -100,7 +102,7 @@ export class AuthService {
 
   wsTicket(userId: string, until: number, sessionId?: string): { ticket: string } {
     const ticket = this.jwt.sign(
-      { sub: userId, until, ...(sessionId ? { sid: sessionId } : {}) },
+      { typ: WS_TICKET, sub: userId, until, ...(sessionId ? { sid: sessionId } : {}) },
       { secret: requireEnv('JWT_ACCESS_SECRET'), audience: WS_AUDIENCE, expiresIn: '30s' },
     );
     return { ticket };
@@ -140,16 +142,22 @@ export class AuthService {
   }
 
   private refreshClaims(refreshToken: string): { userId: string; sessionId: string } {
-    let claims: { sub?: unknown; jti?: unknown };
+    let claims: { sub?: unknown; jti?: unknown; typ?: unknown };
     try {
-      claims = this.jwt.verify<{ sub?: unknown; jti?: unknown }>(refreshToken, {
+      claims = this.jwt.verify<{ sub?: unknown; jti?: unknown; typ?: unknown }>(refreshToken, {
         secret: requireEnv('JWT_REFRESH_SECRET'),
       });
     } catch {
       throw new UnauthorizedException(INVALID_REFRESH);
     }
     const { sub: userId, jti: sessionId } = claims;
-    if (typeof userId !== 'string' || !isUUID(userId) || typeof sessionId !== 'string' || !isUUID(sessionId)) {
+    if (
+      !isTokenOfType(claims, REFRESH_TOKEN) ||
+      typeof userId !== 'string' ||
+      !isUUID(userId) ||
+      typeof sessionId !== 'string' ||
+      !isUUID(sessionId)
+    ) {
       throw new UnauthorizedException(INVALID_REFRESH);
     }
     return { userId, sessionId };
@@ -199,7 +207,7 @@ export class AuthService {
     const { userId, sessionId } = this.refreshClaims(refreshToken);
     const outcome = await this.sessions.manager.transaction(async (manager) => {
       const result = await this.rotateWithin(manager, refreshToken, userId, sessionId, attempt);
-      beforeCommit();
+      if (!(result && 'reusedFamily' in result)) beforeCommit();
       return result;
     });
     if (outcome && 'superseded' in outcome) throw new ConflictException(SUPERSEDED_REFRESH);
@@ -230,9 +238,11 @@ export class AuthService {
       return families;
     });
     if (!(await this.revocations.announce(families))) {
-      throw new ServiceUnavailableException(
-        'The session is ended, but its access token could not be refused yet, sign out again',
-      );
+      throw new ServiceUnavailableException({
+        statusCode: 503,
+        code: SESSION_ENDED,
+        message: 'The session is ended, but its access token could not be refused yet, sign out again',
+      });
     }
   }
 
@@ -299,11 +309,11 @@ export class AuthService {
 
   private signTokens(user: User, sessionId: string, familyId: string, issuedAt: number): TokenPair {
     const accessToken = this.jwt.sign(
-      { sub: user.id, sid: familyId, email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
+      { typ: ACCESS_TOKEN, sub: user.id, sid: familyId, email: user.email, role: user.role === 'admin' ? 'admin' : 'user' },
       { secret: requireEnv('JWT_ACCESS_SECRET'), expiresIn: '15m' },
     );
     const refreshToken = this.jwt.sign(
-      { sub: user.id, jti: sessionId, iat: issuedAt },
+      { typ: REFRESH_TOKEN, sub: user.id, jti: sessionId, iat: issuedAt },
       { secret: requireEnv('JWT_REFRESH_SECRET'), expiresIn: '7d' },
     );
     return { accessToken, refreshToken };

@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useState, useSyncExternalStore } from 'react';
+import { useCallback, useRef, useState, useSyncExternalStore } from 'react';
 import { Loader2 } from 'lucide-react';
 import { toast } from 'sonner';
 import { Button } from '@/components/ui/button';
@@ -25,6 +25,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
   const [price, setPrice] = useState('');
   const [quantity, setQuantity] = useState('');
   const [busy, setBusy] = useState(false);
+  const quantityRevision = useRef(0);
   const { user, isSignedIn } = useSession();
   const owner = user?.id ?? null;
   const attempt = useSyncExternalStore(
@@ -54,7 +55,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
     event.preventDefault();
     if (!ready || !owner) return;
     const sentBy = owner;
-    const sentQuantity = quantity;
+    const sentRevision = quantityRevision.current;
     const chosen = attemptFor(attempt, { instrument, side, price, quantity }, () => crypto.randomUUID());
     const resent = Boolean(attempt?.unconfirmed && attempt.key === chosen.key);
     const sentFor = chosen.draft.instrument;
@@ -73,7 +74,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
       });
       if (isSignedIn(sentBy)) toast.success(`${describe(current.draft)} accepted`);
       settle(null);
-      setQuantity((typed) => (typed === sentQuantity ? '' : typed));
+      if (quantityRevision.current === sentRevision) setQuantity('');
     } catch (failure) {
       settle(afterFailure(current, failure instanceof ApiError ? failure.status : 0, resent));
       if (isSignedIn(sentBy) && !endsSession(failure)) toast.error((failure as Error).message);
@@ -85,6 +86,11 @@ export function OrderForm({ instrument }: { instrument: string }) {
 
   const edit = (setter: (value: string) => void) => (event: React.ChangeEvent<HTMLInputElement>) => {
     setter(event.target.value.trim());
+  };
+
+  const editQuantity = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.value.trim() !== quantity) quantityRevision.current += 1;
+    setQuantity(event.target.value.trim());
   };
 
   return (
@@ -148,7 +154,7 @@ export function OrderForm({ instrument }: { instrument: string }) {
               inputMode="decimal"
               placeholder="1.5"
               value={pending ? pending.quantity : quantity}
-              onChange={edit(setQuantity)}
+              onChange={editQuantity}
               disabled={Boolean(pending)}
               aria-invalid={Boolean(quantityError)}
             />

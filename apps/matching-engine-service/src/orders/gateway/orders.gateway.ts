@@ -15,6 +15,7 @@ import { Server, Socket } from 'socket.io';
 import { OrdersService } from '../orders.service';
 import { WS_AUDIENCE } from '../../auth/auth.service';
 import { LOGOUT_CHANNEL, SessionRevocations } from '../../auth/session-revocations.service';
+import { TokenClaims, WS_TICKET, assertAccessClaims, isTokenOfType } from '../../auth/token-claims';
 import { INSTRUMENTS } from '../../common/instruments';
 import { corsOrigins, intEnv, requireEnv, trustedProxies } from '../../common/env';
 import { RateLimitService } from '../../rate-limit/rate-limit.service';
@@ -218,10 +219,10 @@ export class OrdersGateway
 
   private ticketIdentity(token: string): Identity | null {
     try {
-      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; until?: unknown; sid?: unknown }>(
-        token,
-        { secret: requireEnv('JWT_ACCESS_SECRET'), audience: WS_AUDIENCE },
-      );
+      const payload = this.jwt.verify<
+        TokenClaims & { sub?: unknown; exp?: unknown; until?: unknown; sid?: unknown }
+      >(token, { secret: requireEnv('JWT_ACCESS_SECRET'), audience: WS_AUDIENCE });
+      if (!isTokenOfType(payload, WS_TICKET)) return null;
       if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) return null;
       if (typeof payload.exp !== 'number' || typeof payload.until !== 'number') return null;
       const sessionId = typeof payload.sid === 'string' ? payload.sid : undefined;
@@ -233,12 +234,11 @@ export class OrdersGateway
 
   private accessTokenIdentity(token: string): Identity | null {
     try {
-      const payload = this.jwt.verify<{ sub?: unknown; exp?: unknown; aud?: unknown; sid?: unknown }>(token, {
+      const payload = this.jwt.verify<TokenClaims & { sub?: unknown; exp?: unknown; sid?: unknown }>(token, {
         secret: requireEnv('JWT_ACCESS_SECRET'),
       });
-      if (payload.aud !== undefined || typeof payload.sub !== 'string' || !isUUID(payload.sub)) {
-        return null;
-      }
+      assertAccessClaims(payload);
+      if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) return null;
       if (typeof payload.exp !== 'number') return null;
       const sessionId = typeof payload.sid === 'string' ? payload.sid : undefined;
       return { userId: payload.sub, expiresAt: payload.exp * 1000, sessionId };

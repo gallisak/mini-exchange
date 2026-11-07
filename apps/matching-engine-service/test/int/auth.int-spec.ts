@@ -1,5 +1,6 @@
 import { INestApplication } from '@nestjs/common';
-import { randomUUID } from 'crypto';
+import { JwtService } from '@nestjs/jwt';
+import { createHash, randomUUID } from 'crypto';
 import request from 'supertest';
 import { DataSource, EntityManager } from 'typeorm';
 import { PostgresQueryRunner } from 'typeorm/driver/postgres/PostgresQueryRunner';
@@ -85,6 +86,44 @@ describe('authentication sessions', () => {
       process.env.JWT_REFRESH_SECRET = refreshSecret;
       app = await createApp();
     }
+  });
+
+  const sign = (payload: object, secret: string | undefined, options: object = { expiresIn: '5m' }) =>
+    new JwtService().sign(payload, { secret, ...options });
+
+  it('says what each token is for', async () => {
+    const session = await signUp();
+    const ticket = (await http().post('/auth/ws-ticket').set('authorization', `Bearer ${session.accessToken}`).expect(200)).body;
+
+    expect(claims(session.accessToken).typ).toBe('access');
+    expect(claims(session.refreshToken).typ).toBe('refresh');
+    expect(claims(ticket.ticket).typ).toBe('ws');
+  });
+
+  it('refuses a token of another type as an access token, and takes one from before types existed', async () => {
+    const session = await signUp();
+    const { sub, sid, email } = claims(session.accessToken);
+    const secret = process.env.JWT_ACCESS_SECRET;
+    const asAccess = (token: string) => http().get('/orders').set('authorization', `Bearer ${token}`);
+
+    await asAccess(sign({ sub, sid, email, typ: 'refresh' }, secret)).expect(401);
+    await asAccess(sign({ sub, sid, email, typ: 'ws' }, secret)).expect(401);
+    await asAccess(sign({ sub, sid, email, jti: randomUUID() }, secret)).expect(401);
+    await asAccess(sign({ sub, sid, email }, secret)).expect(200);
+  });
+
+  it('refuses a token of another type as a refresh token, and takes one from before types existed', async () => {
+    const session = await signUp();
+    const { sub, jti, exp, iat } = claims(session.refreshToken);
+    const secret = process.env.JWT_REFRESH_SECRET;
+
+    await refresh(sign({ sub, jti, typ: 'access' }, secret)).expect(401);
+    const issuedBefore = sign({ sub, jti, iat, exp }, secret, {});
+    await app
+      .get(DataSource)
+      .getRepository(RefreshSession)
+      .update({ id: jti as string }, { tokenHash: createHash('sha256').update(issuedBefore).digest('hex') });
+    await refresh(issuedBefore).expect(200);
   });
 
   it('ends the session of a refresh token a browser forgot, along with its access token', async () => {
@@ -518,7 +557,8 @@ describe('authentication sessions', () => {
     const session = await signUp();
     failNextRedisTransaction();
 
-    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(503);
+    const refused = await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(503);
+    expect(refused.body.code).toBe('SESSION_ENDED');
     await refresh(session.refreshToken).expect(401);
     await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect((response) => {
       expect([204, 401]).toContain(response.status);
@@ -638,19 +678,21 @@ describe('authentication sessions', () => {
     await refresh(session.refreshToken).expect(200);
   });
 
-  it('does not revoke behind a 503 when reuse was caught too late to answer, and catches it on the next try', async () => {
+  it('ends a family caught reusing a token even when the client was answered 503 before the commit', async () => {
     const session = await signUp();
     const rotated = (await refresh(session.refreshToken).expect(200)).body;
     const slow = delayRecords(5_500);
     try {
       await refresh(session.refreshToken).expect(503);
-      await sleep(1_000);
+      await eventually(async () => {
+        await http().get('/orders').set('authorization', `Bearer ${rotated.accessToken}`).expect(401);
+      }, 5_000);
     } finally {
       slow.mockRestore();
     }
 
-    await http().get('/orders').set('authorization', `Bearer ${rotated.accessToken}`).expect(200);
-    await refresh(session.refreshToken).expect(401);
+    const rows = await app.get(DataSource).getRepository(RefreshSession).find();
+    expect(rows.every((row) => row.revokedAt !== null)).toBe(true);
     await refresh(rotated.refreshToken).expect(401);
   });
 

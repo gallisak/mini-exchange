@@ -38,14 +38,15 @@ docker compose exec matching-engine-1 node dist/tools/grant-admin.js you@example
 
 Every service has a `.env.example`, which compose loads. Secrets are not in it: on the first start
 a one-off `secrets` service generates them per installation. Any service, the frontend included,
-started in production with a `change-me-*` placeholder from `.env.example` refuses to start. Every
+started in production with a `change-me-*` placeholder from `.env.example` refuses to start, and so
+does a frontend without `FRONTEND_PROXY_KEY`, which would sign cookies with a key of its own. Every
 Redis command a book, an order submission, the outbox relay or a lease depends on has a timeout, so
 a Redis that stops answering is treated as a failure and retried rather than waited on forever. A
 relay batch whose `EXEC` timed out may still reach the stream later and be published twice;
 settlement books each trade once, so that only costs a duplicate event. Postgres queries in both
 services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it, however they
 are started, and reconciliation uses its own pool of 8 connections limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`,
-10 minutes), and lock waits after `DATABASE_LOCK_TIMEOUT_MS` (10 s, migrations included). A Postgres
+10 minutes), and lock waits after `DATABASE_LOCK_TIMEOUT_MS` (10 s, the engine's migrations included). A Postgres
 that stops answering altogether, dead or frozen, is given up on 5 s after the statement limit: the
 query fails, its connection is closed and left out of the pool, so a stalled database shows up as a
 stuck book within about 65 s. The gateway does not wait that long: it gives up on an engine after
@@ -59,10 +60,14 @@ since giving up on it would not tell whether it happened. A commit can still end
 connection breaks after the `COMMIT` was sent, the book reloads its state from Postgres, an order
 or a rotation is retried under the same key or attempt, and a sign-out is simply sent again.
 Refresh and sign-out wait at most 2 s for the user's session lock and answer 503 after 5 s in all,
-well inside the gateway's 8 s. A change of a session answered 503 rolls back instead of committing
-later, whether it is a rotation, a repeated rotation, a sign-out or ending a family caught reusing a
-token, so 503 means nothing changed and a retry works; one whose `COMMIT` has started is waited for,
-not answered 503. If that `COMMIT` outlasts the gateway the outcome is unknown, so a client that
+well inside the gateway's 8 s. On sign-in and refresh 503 means nothing changed: a rotation or a
+repeated rotation answered 503 rolls back instead of committing later, so a retry works, and one
+whose `COMMIT` has started is waited for, not answered 503. There are two exceptions. Ending a family
+caught reusing a token always commits, even after the client was answered 503, so slowing the
+database down cannot keep a stolen token alive. A sign-out can answer 503 after the session ended,
+when the note in Redis could not be written yet; the answer then carries `code: SESSION_ENDED`, the
+frontend drops the cookies, and signing out again is safe. If the `COMMIT` of a rotation outlasts the
+gateway the outcome is unknown, so a client that
 retries should send `attempt` to `/auth/refresh`, as the frontend always does: without it the retry
 counts as reuse and ends the session. A book that is stopped waits 15 s for its batch, then lets the fence
 stop it; whatever that batch or a reload still does afterwards no longer touches the book in memory,
@@ -75,12 +80,16 @@ command stream that fails three reads in a row also marks its book stuck, counte
 `book_read_failures_total`. nginx passes a request on to the other engine only when the first one
 never received it, or for reads and cancels (`DELETE` is idempotent to nginx), so an order is never
 sent twice by the gateway; a cancel may be, which is harmless, since a cancel of an order that is
-already cancelled answers 202. A trade summary is not repeated on the other engine when the first
-one gave up on it: it is the heaviest query of a reconciliation, and it would only load Postgres twice. Only the last index migration, on `refresh_sessions`, builds its
+already cancelled answers 202. A trade summary is never passed on to the other engine, whatever went
+wrong: it is the heaviest query of a reconciliation, and open-source nginx cannot tell a connection
+that never opened from one that broke halfway. A run that meets a dead engine is `incomplete` and the
+next run repeats the period. Only the last index migration, on `refresh_sessions`, builds its
 index concurrently. Such a build waits for every older transaction of the database, which blocks no
 reads or writes, so it may wait `DATABASE_INDEX_LOCK_TIMEOUT_MS` (10 minutes) instead of the usual
-lock limit. Settlement's migrations keep the short limit, so one waiting behind a long reconciliation
-does not hold up writes, but give up and start again for `MIGRATION_LOCK_RETRY_MS` (10 minutes). One that a failed build left invalid is dropped and built again on the next run, and a
+lock limit. A settlement migration that waits for a table lock holds up every read and write of that
+table behind it, so it waits only `MIGRATION_LOCK_TIMEOUT_MS` (1.5 s). A lock timeout (`55P03`) is
+retried for `MIGRATION_LOCK_RETRY_MS` (10 minutes) after pauses that grow to 15–30 s, so a migration
+behind a long reconciliation stops writes for 1.5 s out of every 15–30 s, not all the time. One that a failed build left invalid is dropped and built again on the next run, and a
 follow-up migration does the same for an install that had already recorded the first one as done.
 The earlier ones took a write lock on their table while it was small.
 
@@ -104,20 +113,37 @@ sign-out that did not go through instead of pretending it did; if the engine ref
 token that looked valid, the frontend rotates it and signs out with the new one, so the refresh
 session ends too. Each sign-in gets its own pair of cookie names (`mx_access_<id>`,
 `mx_refresh_<id>`). The id is signed with `FRONTEND_PROXY_KEY`, so a cookie with a made-up name is
-ignored, however it sorts. With `COOKIE_SECURE=true`, which any deployment over HTTPS should set, the
-names start with `__Host-`, so a browser takes them only from this host over HTTPS and a neighbouring
-subdomain or a plain HTTP response cannot plant one; names without the prefix are ignored then. Plain
-HTTP cannot have that guarantee, so the default for `http://localhost` is the signed name alone: a
-real id of another sign-in could still be planted there. A sign-in, and a sign-out with older cookies
-around, also ends on the engine every session the browser forgets, so none lives on for its 7 days.
+ignored, however it sorts, and every value carries a signature over the id and its token, so a name
+cannot be moved onto another token. With `COOKIE_SECURE=true`, which any deployment over HTTPS should
+set, the names start with `__Host-` and the cookies live on `/`, so a browser takes them only from
+this host over HTTPS and a neighbouring subdomain or a plain HTTP response cannot plant one. Plain
+HTTP cannot have that guarantee, so the default for `http://localhost` is the signed names alone, on
+`/api`, and a production start without `COOKIE_SECURE=true` warns: a whole pair from another sign-in
+could still be planted there. Such a pair cannot take a session over: the page keeps the id of its own
+sign-in, given at sign-in and by `/api/auth/session` and remembered for the next page load, sends it
+with every request as `x-session-id`, and the frontend uses exactly that pair of cookies instead of
+the newest. Only a page that knows no sign-in yet gets the newest.
+
+A sign-in ends on the engine every session the browser forgets, and a sign-out every older one. Their
+cookies go only after the engine answered that the session is over, within 2 s; otherwise they stay
+and the next sign-in or sign-out tries again, so no session is left for its 7 days without a token to
+end it. A sign-out that cannot end an older session answers 503, or that session would take over.
+`/api/auth/session` never ends a current session, so a planted cookie cannot end a real one through a
+page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
+once `COOKIE_SECURE=true` is on) are never used; those three routes end their sessions by the same
+rule and clear them on `/` and `/api`.
+
 All tabs share the cookies, so a sign-in or sign-out reaches the other tabs through a
-`BroadcastChannel`, and a tab checks its session when it gets focus. In case a tab hears neither,
-every request says which account the page shows and the frontend answers 409 when the cookies belong
-to another one, so a stale tab cannot trade, cancel or read on an account it does not show. A page
-keeps nothing of the account before it, and `/login` sends someone signed in onward. A session that turns out to be over is cleared only under the names the
+`BroadcastChannel`, and a tab checks its session when it gets focus, at most every 30 s. In case a
+tab hears neither, the frontend answers 409 to a request for a sign-in the browser no longer has, so
+a stale tab cannot trade, cancel or read on an account it does not show. The page then checks at once
+and moves to the newest sign-in, and a socket asking for a ticket stops asking. A check that fails is
+repeated once, and a signal that arrives during a check causes one more check, so news is not lost.
+A page keeps nothing of the account before it, and `/login` sends someone signed in onward. A session that turns out to be over is cleared only under the names the
 request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
 while a dead session is still forgotten at once; the page also ignores refusals of requests sent
-before the latest sign-in. The attempt id of a rotation is
+before the latest change of session. A service that refuses an access token just rotated means the
+session is over: its cookies are cleared and the new pair is ended, not stored. The attempt id of a rotation is
 an HMAC of the cookies and the browser, so a retry always repeats it, whatever happened in between,
 without keeping anything in memory that other sessions could push out. An order
 answer only changes the stored attempt of the same send, and while an order is still on its way
@@ -130,7 +156,7 @@ a sign-in ends the loading state of a session check still retrying, and orders a
 loaded stay shown when reloading them fails. A successful answer is shown unless a newer one already
 was, even while a newer reload is running, and only the latest reload sets or clears the error, so a
 late failure cannot hang an error over fresh data. A quantity typed while an order is on its way
-stays when that order is accepted. The answer to an order or a cancel is shown only to the user who
+stays when that order is accepted, even the same number typed again. The answer to an order or a cancel is shown only to the user who
 sent it, toasts on screen go away when the signed-in user changes, and a session that ended goes
 straight to the sign-in card without a toast. Recent trades stay shown when reloading them fails too,
 and the wallet's "Updated" time is when the request started, since the balances are no newer. A
@@ -291,8 +317,9 @@ it under `assetsNotBalanced`, but no period is blamed or kept for it, so an old 
 up, and a run is clean again once the ledger is. An account with an old error in it is still found
 by every period that touches that account, since a balance has no history to compare a period with.
 A saved checkpoint does not lose the report: if the unresolved periods or the totals cannot be read
-afterwards, the run says so and is `incomplete`. The operations panel keeps the last result next to
-a refresh that failed. Pages that ask for a run while one is going get its
+afterwards, the run says so and is `incomplete`. A run with nothing new to check still adds up the
+whole ledger. The operations panel keeps the last result next to a refresh that failed and marks its
+badge stale. Pages that ask for a run while one is going get its
 report instead of starting another. The operations panel waits up to five minutes for a run and gives
 up on an answer that does not come. So a
 trade that never got settled keeps showing up, the next days are still checked, a clean history is
@@ -424,7 +451,8 @@ Redis Streams is the order log and Redis is the coordinator.
 | Messages in Ukrainian | English | Language of the project |
 | Frontend on port 3000 directly | nginx in front of it on port 3000 | Trustworthy client address |
 | Postgres on host port 5433, Redis on 6379 | Not published | No passwords, and the command stream trusts its writers |
-| Session cookies `mx_access`, `mx_refresh` on `/api` | Signed names on `/`, with `__Host-` when `COOKIE_SECURE=true` | Everyone signs in once more after this change; a planted cookie must not pick the session |
+| Session cookies `mx_access`, `mx_refresh` on `/api` | Signed names and values on `/api`, on `/` with `__Host-` when `COOKIE_SECURE=true` | Everyone signs in once more after this change, and the old sessions are ended; a planted cookie must not pick the session |
+| Tokens told apart by which claims they lack | `typ` claim: `access`, `refresh` or `ws`, required by whoever takes the token | A new kind of token cannot pass as an old one. Tokens without `typ` are still taken until the last of them expires, 7 days after this change; then drop `issuedBeforeTypes` in both `token-claims.ts` and the `undefined` case of `isTokenOfType` |
 | `POST /auth/register` of a taken email → 409 | 409 only with another password; the same password signs in | A registration whose answer was lost can be repeated |
 | `ledger.assetsNotBalanced` in a reconciliation report | `assetsNotBalanced` next to `ledger`, only when something is off | It describes the whole ledger, not the period |
 

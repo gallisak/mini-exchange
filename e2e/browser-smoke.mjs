@@ -243,6 +243,19 @@ try {
   log('a failed reload of the trades keeps the trades that loaded');
 
   const leaving = await (await browser.newContext()).newPage();
+  await leaving.addInitScript(() => {
+    window.__toasts = [];
+    new MutationObserver((changes) => {
+      for (const { addedNodes } of changes) {
+        for (const node of addedNodes) {
+          if (node.nodeType !== Node.ELEMENT_NODE) continue;
+          if (node.matches('[data-sonner-toast]') || node.querySelector('[data-sonner-toast]')) {
+            window.__toasts.push(node.textContent);
+          }
+        }
+      }
+    }).observe(document, { childList: true, subtree: true });
+  });
   await register(leaving, `browser-leaving-${run}@example.com`);
   let answerOrder;
   const unanswered = new Promise((resolve) => (answerOrder = resolve));
@@ -271,11 +284,15 @@ try {
   );
   await leaving.getByLabel('Price (USD)').fill('1.00');
   await leaving.getByLabel(/Quantity/).fill('1');
+  await leaving.evaluate(() => {
+    window.__toasts = [];
+  });
   await leaving.getByRole('button', { name: /^Buy ABC$/ }).click();
   await leaving.getByRole('link', { name: 'Sign in' }).last().waitFor();
   await leaving.waitForTimeout(300);
-  if (await leaving.locator('[data-sonner-toast]').count()) {
-    throw new Error('a session that ended flashed a toast on its way out');
+  const flashed = await leaving.evaluate(() => window.__toasts);
+  if (flashed.length > 0) {
+    throw new Error(`a session that ended flashed a toast on its way out: ${flashed.join(', ')}`);
   }
   log('a session that ended goes straight to the sign-in card, with no toast that disappears');
 
@@ -301,6 +318,31 @@ try {
     throw new Error('a tab that switched accounts kept what was typed for the previous one');
   }
   log('a tab follows a sign-in in another tab, and forgets what was typed for the previous account');
+
+  let refusedTickets = 0;
+  first.on('response', (response) => {
+    if (new URL(response.url()).pathname === '/api/ws-token' && response.status() === 409) refusedTickets += 1;
+  });
+  await first.getByLabel('Price (USD)').fill('3.00');
+  const switched = await second.evaluate(
+    (email) =>
+      fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ email, password: 'password123' }),
+      }).then((response) => response.status),
+    `browser-tab-a-${run}@example.com`,
+  );
+  if (switched !== 200) throw new Error(`the other account could not sign in: ${switched}`);
+  await first.bringToFront();
+  await first.evaluate(() => window.dispatchEvent(new Event('focus')));
+  await first.getByRole('button', { name: /browser-tab-a/ }).waitFor({ timeout: 5_000 });
+  if ((await first.getByLabel('Price (USD)').inputValue()) !== '') {
+    throw new Error('a tab that went straight to another account kept what was typed for the previous one');
+  }
+  await first.waitForTimeout(2_000);
+  if (refusedTickets > 1) throw new Error(`the socket kept asking for a ticket: ${refusedTickets} answers of 409`);
+  log('a tab goes straight from one account to another, forgets the form, and its socket does not loop on 409');
 
   const unaware = await browser.newContext();
   await unaware.addInitScript(() => delete window.BroadcastChannel);

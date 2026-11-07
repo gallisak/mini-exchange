@@ -140,6 +140,35 @@ describe('trade events outbox', () => {
       await eventually(async () => expect(await outbox.count()).toBe(0));
       await purging.onModuleDestroy();
     });
+
+    it('does not make publishing wait for a purge', async () => {
+      const instance = relay();
+      let finishPurge!: () => void;
+      const purge = jest.spyOn(instance, 'purgePublished').mockImplementation(
+        () => new Promise<number>((resolve) => (finishPurge = () => resolve(0))),
+      );
+      await dataSource.getRepository(OutboxMessage).insert({ stream: tradeStreamKey('ABC'), type: 'trade.executed', payload: {} });
+
+      instance.onApplicationBootstrap();
+      await eventually(async () => expect(await tradeEvents()).toHaveLength(1));
+
+      expect(purge).toHaveBeenCalledTimes(1);
+      finishPurge();
+      await instance.onModuleDestroy();
+    });
+
+    it('does not purge again at once while a backlog is left, so a long backlog does not take over the database', async () => {
+      process.env.OUTBOX_PURGE_BATCH = '1';
+      const instance = relay();
+      delete process.env.OUTBOX_PURGE_BATCH;
+      const purge = jest.spyOn(instance, 'purgePublished').mockResolvedValue(1);
+
+      instance.onApplicationBootstrap();
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      await instance.onModuleDestroy();
+
+      expect(purge).toHaveBeenCalledTimes(1);
+    });
   });
 });
 

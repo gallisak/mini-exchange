@@ -4,6 +4,7 @@ import { isUUID } from 'class-validator';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { requireEnv } from '../common/env';
 import { SessionRevocations } from './session-revocations.service';
+import { assertAccessClaims } from './token-claims';
 
 export interface AuthUser {
   userId: string;
@@ -23,18 +24,13 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   async validate(payload: {
     sub?: unknown;
     role?: unknown;
+    typ?: unknown;
     aud?: unknown;
     sid?: unknown;
     jti?: unknown;
   }): Promise<AuthUser> {
-    if (
-      typeof payload.sub !== 'string' ||
-      !isUUID(payload.sub) ||
-      payload.aud !== undefined ||
-      payload.jti !== undefined
-    ) {
-      throw new UnauthorizedException();
-    }
+    assertAccessClaims(payload);
+    if (typeof payload.sub !== 'string' || !isUUID(payload.sub)) throw new UnauthorizedException();
     if (typeof payload.sid === 'string' && (await this.revocations.isRevoked(payload.sid))) {
       throw new UnauthorizedException();
     }

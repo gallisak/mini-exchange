@@ -1,5 +1,6 @@
-import { createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
+import { SESSION_HEADER } from '@/lib/session-id';
 
 export const ACCESS_COOKIE = 'mx_access';
 export const REFRESH_COOKIE = 'mx_refresh';
@@ -36,28 +37,49 @@ const cookieOptions = (maxAge: number) => ({
   httpOnly: true,
   sameSite: 'lax' as const,
   secure: secureCookies(),
-  path: '/',
+  path: secureCookies() ? '/' : '/api',
   maxAge,
 });
 
 const SESSION_COOKIE = /^mx_(?:access|refresh)_([0-9a-z]{20}[0-9a-f]{16})$/;
+const ANY_SESSION_COOKIE = /^((?:__Host-)?mx_)(access|refresh)((?:_[0-9a-z]+)?)$/;
+const VALUE_SEPARATOR = '~';
 
 const cookiePrefix = () => (secureCookies() ? '__Host-' : '');
 
 export const cookieName = (base: string, session: string) => `${cookiePrefix()}${base}_${session}`;
 
-const fallbackKey = randomBytes(32);
+const fallbackKey = process.env.NODE_ENV === 'production' ? null : randomBytes(32);
 
-const signature = (id: string) =>
-  createHmac('sha256', process.env.FRONTEND_PROXY_KEY || fallbackKey)
-    .update(`session:${id}`)
-    .digest('hex')
-    .slice(0, 16);
+function signingKey(): string | Buffer {
+  const key = process.env.FRONTEND_PROXY_KEY || fallbackKey;
+  if (!key) throw new Error('FRONTEND_PROXY_KEY must be set');
+  return key;
+}
 
-function isGenuine(session: string): boolean {
-  const expected = Buffer.from(signature(session.slice(0, 20)));
-  const given = Buffer.from(session.slice(20));
-  return given.length === expected.length && timingSafeEqual(given, expected);
+const hmac = (label: string, data: string) =>
+  createHmac('sha256', signingKey()).update(`${label}:${data}`).digest('hex');
+
+const signature = (id: string) => hmac('session', id).slice(0, 16);
+
+const valueSignature = (session: string, token: string) =>
+  hmac('session', `${session}:${createHash('sha256').update(token).digest('hex')}`).slice(0, 32);
+
+const sameText = (given: string, expected: string) => {
+  const [a, b] = [Buffer.from(given), Buffer.from(expected)];
+  return a.length === b.length && timingSafeEqual(a, b);
+};
+
+const isGenuine = (session: string) => sameText(session.slice(20), signature(session.slice(0, 20)));
+
+export const signedValue = (session: string, token: string) =>
+  `${token}${VALUE_SEPARATOR}${valueSignature(session, token)}`;
+
+function tokenIn(session: string, value: string | undefined): string | undefined {
+  const separator = value?.lastIndexOf(VALUE_SEPARATOR) ?? -1;
+  if (!value || separator <= 0) return undefined;
+  const token = value.slice(0, separator);
+  return sameText(value.slice(separator + 1), valueSignature(session, token)) ? token : undefined;
 }
 
 export function newSession(): string {
@@ -67,32 +89,46 @@ export function newSession(): string {
 
 export function sessionsIn(request: NextRequest): string[] {
   const prefix = cookiePrefix();
-  const sessions = new Set<string>();
+  const named = new Set<string>();
   for (const { name } of request.cookies.getAll()) {
     if (!name.startsWith(prefix)) continue;
     const session = SESSION_COOKIE.exec(name.slice(prefix.length))?.[1];
-    if (session && isGenuine(session)) sessions.add(session);
+    if (session) named.add(session);
   }
-  return [...sessions].sort();
+  return [...named]
+    .filter((session) => {
+      if (!isGenuine(session)) return false;
+      const { accessToken, refreshToken } = tokensOf(request, session);
+      return Boolean(accessToken || refreshToken);
+    })
+    .sort();
 }
 
-export function readTokens(request: NextRequest): Partial<TokenPair> & { session: string } {
-  const session = sessionsIn(request).at(-1);
-  if (!session) return { session: '' };
+export function tokensOf(request: NextRequest, session: string): Partial<TokenPair> {
   return {
-    session,
-    accessToken: request.cookies.get(cookieName(ACCESS_COOKIE, session))?.value || undefined,
-    refreshToken: request.cookies.get(cookieName(REFRESH_COOKIE, session))?.value || undefined,
+    accessToken: tokenIn(session, request.cookies.get(cookieName(ACCESS_COOKIE, session))?.value),
+    refreshToken: tokenIn(session, request.cookies.get(cookieName(REFRESH_COOKIE, session))?.value),
   };
 }
 
-export function refreshTokenOf(request: NextRequest, session: string): string | undefined {
-  return request.cookies.get(cookieName(REFRESH_COOKIE, session))?.value || undefined;
+export function readTokens(
+  request: NextRequest,
+  sessions: string[] = sessionsIn(request),
+): Partial<TokenPair> & { session: string } {
+  const asked = request.headers.get(SESSION_HEADER);
+  const session = asked && sessions.includes(asked) ? asked : sessions.at(-1);
+  return session ? { session, ...tokensOf(request, session) } : { session: '' };
+}
+
+export function askedForAnother(request: NextRequest, session: string): boolean {
+  const asked = request.headers.get(SESSION_HEADER);
+  return Boolean(asked && session) && asked !== session;
 }
 
 export function storeTokens(response: NextResponse, tokens: TokenPair, session: string): void {
-  response.cookies.set(cookieName(ACCESS_COOKIE, session), tokens.accessToken, cookieOptions(REFRESH_MAX_AGE));
-  response.cookies.set(cookieName(REFRESH_COOKIE, session), tokens.refreshToken, cookieOptions(REFRESH_MAX_AGE));
+  const stored = (token: string) => signedValue(session, token);
+  response.cookies.set(cookieName(ACCESS_COOKIE, session), stored(tokens.accessToken), cookieOptions(REFRESH_MAX_AGE));
+  response.cookies.set(cookieName(REFRESH_COOKIE, session), stored(tokens.refreshToken), cookieOptions(REFRESH_MAX_AGE));
 }
 
 export function clearTokens(response: NextResponse, sessions: string[]): void {
@@ -102,8 +138,43 @@ export function clearTokens(response: NextResponse, sessions: string[]): void {
   }
 }
 
-export function olderSessions(request: NextRequest, current: string): string[] {
-  return sessionsIn(request).filter((session) => session < current);
+export function olderSessions(sessions: string[], current: string): string[] {
+  return sessions.filter((session) => session < current);
+}
+
+export interface LegacySession {
+  names: string[];
+  refreshToken?: string;
+}
+
+export function legacySessions(request: NextRequest, sessions: string[] = sessionsIn(request)): LegacySession[] {
+  const current = new Set(
+    sessions.flatMap((session) => [cookieName(ACCESS_COOKIE, session), cookieName(REFRESH_COOKIE, session)]),
+  );
+  const found = new Map<string, LegacySession>();
+  for (const { name, value } of request.cookies.getAll()) {
+    const parts = ANY_SESSION_COOKIE.exec(name);
+    if (!parts || current.has(name)) continue;
+    const [, prefix, kind, suffix] = parts;
+    const legacy = found.get(prefix + suffix) ?? { names: [] };
+    legacy.names.push(name);
+    if (kind === 'refresh' && value) legacy.refreshToken = value.split(VALUE_SEPARATOR)[0];
+    found.set(prefix + suffix, legacy);
+  }
+  return [...found.values()];
+}
+
+export function clearLegacyCookies(response: NextResponse, names: string[]): void {
+  const secure = secureCookies() ? '; Secure' : '';
+  for (const name of names) {
+    const expired = `${name}=; Max-Age=0; HttpOnly; SameSite=Lax`;
+    if (name.startsWith('__Host-')) {
+      response.headers.append('set-cookie', `${expired}; Path=/; Secure`);
+      continue;
+    }
+    response.headers.append('set-cookie', `${expired}; Path=/${secure}`);
+    response.headers.append('set-cookie', `${expired}; Path=/api${secure}`);
+  }
 }
 
 export function claimsOf(token: string | undefined): (SessionUser & { exp: number }) | null {
@@ -139,8 +210,7 @@ const sessionKey = ({ refreshToken, accessToken, client }: SessionTokens) =>
   JSON.stringify([refreshToken, accessToken ?? '', client ?? '']);
 
 export function rotationAttempt(tokens: SessionTokens): string {
-  const secret = process.env.FRONTEND_PROXY_KEY || fallbackKey;
-  const digest = createHmac('sha256', secret).update(`rotation:${sessionKey(tokens)}`).digest('hex');
+  const digest = hmac('rotation', sessionKey(tokens));
   return `${digest.slice(0, 8)}-${digest.slice(8, 12)}-4${digest.slice(13, 16)}-a${digest.slice(17, 20)}-${digest.slice(20, 32)}`;
 }
 

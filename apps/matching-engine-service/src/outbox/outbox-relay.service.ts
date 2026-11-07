@@ -9,6 +9,7 @@ import { withTimeout } from '../common/with-timeout';
 
 const RELAY_LOCK_KEY = 7_340_101;
 const MAX_BACKOFF_MS = 5_000;
+const PURGE_BACKLOG_PAUSE_MS = 1_000;
 
 @Injectable()
 export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestroy {
@@ -19,10 +20,10 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
   private readonly cleanupEveryMs = intEnv('OUTBOX_CLEANUP_INTERVAL_MS', 60_000);
   private readonly publishTimeoutMs = intEnv('OUTBOX_PUBLISH_TIMEOUT_MS', 5_000);
   private readonly purgeBatch = intEnv('OUTBOX_PURGE_BATCH', 1_000);
-  private lastCleanup = 0;
   private running = false;
   private loop?: Promise<void>;
-  private wake?: () => void;
+  private purging?: Promise<void>;
+  private readonly wakes = new Set<() => void>();
 
   constructor(
     private readonly dataSource: DataSource,
@@ -32,12 +33,13 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
   onApplicationBootstrap(): void {
     this.running = true;
     this.loop = this.run();
+    this.purging = this.purgeRegularly();
   }
 
   async onModuleDestroy(): Promise<void> {
     this.running = false;
-    this.wake?.();
-    await this.loop;
+    this.wakes.forEach((wake) => wake());
+    await Promise.all([this.loop, this.purging]);
   }
 
   async publishPending(): Promise<number> {
@@ -96,13 +98,14 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
     return deleted;
   }
 
-  private async purgeDue(): Promise<void> {
-    if (Date.now() - this.lastCleanup < this.cleanupEveryMs) return;
-    const purged = await this.purgePublished().catch((error: Error) => {
-      this.logger.warn(`Could not purge the outbox: ${error.message}`);
-      return 0;
-    });
-    if (purged < this.purgeBatch) this.lastCleanup = Date.now();
+  private async purgeRegularly(): Promise<void> {
+    while (this.running) {
+      const purged = await this.purgePublished().catch((error: Error) => {
+        if (this.running) this.logger.warn(`Could not purge the outbox: ${error.message}`);
+        return 0;
+      });
+      await this.sleep(purged < this.purgeBatch ? this.cleanupEveryMs : PURGE_BACKLOG_PAUSE_MS);
+    }
   }
 
   private async run(): Promise<void> {
@@ -111,7 +114,6 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
       try {
         const published = await this.publishPending();
         delay = this.pollMs;
-        await this.purgeDue();
         if (published > 0) continue;
       } catch (error) {
         if (!this.running) return;
@@ -123,12 +125,15 @@ export class OutboxRelayService implements OnApplicationBootstrap, OnModuleDestr
   }
 
   private sleep(ms: number): Promise<void> {
+    if (!this.running) return Promise.resolve();
     return new Promise((resolve) => {
-      const timer = setTimeout(resolve, ms);
-      this.wake = () => {
+      const wake = () => {
         clearTimeout(timer);
+        this.wakes.delete(wake);
         resolve();
       };
+      const timer = setTimeout(wake, ms);
+      this.wakes.add(wake);
     });
   }
 }

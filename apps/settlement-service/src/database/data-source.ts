@@ -58,7 +58,9 @@ export function buildDataSourceOptions(
 }
 
 export function migrationDataSourceOptions(database?: string): DataSourceOptions {
-  return buildDataSourceOptions(database, 0);
+  const options = buildDataSourceOptions(database, 0);
+  const lockTimeout = intEnv('MIGRATION_LOCK_TIMEOUT_MS', 1_500, 0);
+  return { ...options, extra: { ...options.extra, lock_timeout: lockTimeout } } as DataSourceOptions;
 }
 
 export default new DataSource(migrationDataSourceOptions());

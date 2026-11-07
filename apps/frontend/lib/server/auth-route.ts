@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { TokenPair, claimsOf, clearTokens, newSession, sessionsIn, storeTokens } from './session';
-import { endForgottenSessions, upstream } from './upstream';
+import { TokenPair, claimsOf, newSession, sessionsIn, storeTokens } from './session';
+import { forgetSessions, upstream } from './upstream';
 
 const JSON_BODY = /^application\/json(\s*;|$)/i;
 
@@ -16,13 +16,12 @@ export async function signIn(request: NextRequest, path: '/auth/login' | '/auth/
   if (result.status >= 400) return NextResponse.json(result.body, { status: result.status });
   const tokens = result.body as TokenPair;
   const claims = claimsOf(tokens.accessToken);
+  const session = newSession();
   const response = NextResponse.json({
     user: claims && { id: claims.id, email: claims.email, role: claims.role },
+    session,
   });
-  const session = newSession();
-  const forgotten = sessionsIn(request);
-  clearTokens(response, forgotten);
   storeTokens(response, tokens, session);
-  void endForgottenSessions(request, forgotten);
+  await forgetSessions(request, response, sessionsIn(request));
   return response;
 }

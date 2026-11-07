@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { TokenPair, claimsOf, clearTokens, isFresh, olderSessions, readTokens, storeTokens } from '@/lib/server/session';
-import { endForgottenSessions, rotateTokens, unavailable } from '@/lib/server/upstream';
+import { TokenPair, claimsOf, clearTokens, isFresh, readTokens, sessionsIn, storeTokens } from '@/lib/server/session';
+import { forgetLegacySessions, rotateTokens, unavailable } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
 
@@ -10,24 +10,20 @@ const userOf = (token: string) => {
 };
 
 export async function GET(request: NextRequest) {
-  const { accessToken, refreshToken, session } = readTokens(request);
-  const answer = (body: unknown, tokens?: TokenPair) => {
-    const response = NextResponse.json(body);
-    const forgotten = olderSessions(request, session);
-    clearTokens(response, forgotten);
+  const sessions = sessionsIn(request);
+  const { accessToken, refreshToken, session } = readTokens(request, sessions);
+  const answer = async (user: ReturnType<typeof userOf>, tokens?: TokenPair) => {
+    const response = NextResponse.json({ user, session: user ? session : null });
     if (tokens) storeTokens(response, tokens, session);
-    void endForgottenSessions(request, forgotten);
+    if (!user) clearTokens(response, [session]);
+    await forgetLegacySessions(request, response, sessions);
     return response;
   };
-  if (isFresh(accessToken)) return answer({ user: userOf(accessToken) });
-  if (!refreshToken) return answer({ user: null });
+  if (isFresh(accessToken)) return answer(userOf(accessToken));
+  if (!refreshToken) return answer(null);
 
   const outcome = await rotateTokens(request, { refreshToken, accessToken });
   if (outcome.kind === 'unavailable') return unavailable();
-  if (outcome.kind === 'invalid') {
-    const response = answer({ user: null });
-    clearTokens(response, [session]);
-    return response;
-  }
-  return answer({ user: userOf(outcome.tokens.accessToken) }, outcome.tokens);
+  if (outcome.kind === 'invalid') return answer(null);
+  return answer(userOf(outcome.tokens.accessToken), outcome.tokens);
 }

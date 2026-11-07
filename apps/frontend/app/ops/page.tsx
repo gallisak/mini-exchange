@@ -1,7 +1,7 @@
 'use client';
 
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { CheckCircle2, RefreshCw, XCircle } from 'lucide-react';
+import { CheckCircle2, Clock, RefreshCw, XCircle } from 'lucide-react';
 import { Badge } from '@/components/ui/badge';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
@@ -23,6 +23,7 @@ import {
   RECONCILE_TIMEOUT_MS,
   STATUS_REFRESH_MS,
   opsView,
+  reconciliationBadge,
   startOpsPolling,
 } from '@/lib/client/ops-polling';
 import { singleFlight } from '@/lib/client/latest';
@@ -145,6 +146,7 @@ function Ops() {
   if (view.kind === 'loading') return <LoadingRows rows={8} />;
   const { engine, settlement } = view.report;
   const reconciled = opsView(reconciliation, reconcileError);
+  const badge = reconciliation && reconciliationBadge(reconciliation.status, Boolean(reconcileError));
   const issues = reconciliation
     ? Object.entries(reconciliation.ledger).filter(([, rows]) => rows.length > 0)
     : [];
@@ -288,18 +290,12 @@ function Ops() {
               <CardTitle className="text-base">Reconciliation</CardTitle>
               <CardDescription>Engine trades against ledger postings</CardDescription>
             </div>
-            {reconciliation && (
-              <Badge
-                variant={reconciliation.status === 'ok' ? 'secondary' : 'destructive'}
-                className="gap-1"
-                data-testid="reconciliation-status"
-              >
-                {reconciliation.status === 'ok' ? (
-                  <CheckCircle2 className="h-3 w-3" />
-                ) : (
-                  <XCircle className="h-3 w-3" />
-                )}
-                {reconciliation.status}
+            {badge && (
+              <Badge variant={badge.variant} className="gap-1" data-testid="reconciliation-status">
+                {badge.icon === 'passed' && <CheckCircle2 className="h-3 w-3" />}
+                {badge.icon === 'stale' && <Clock className="h-3 w-3" />}
+                {badge.icon === 'failed' && <XCircle className="h-3 w-3" />}
+                {badge.label}
               </Badge>
             )}
           </CardHeader>

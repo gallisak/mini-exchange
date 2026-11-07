@@ -8,7 +8,22 @@ import {
   RECONCILIATION_UPSTREAM_TIMEOUT_MS,
   longestAnswer,
 } from '@/lib/timeouts';
-import { opsView, startOpsPolling } from './ops-polling';
+import { opsView, startOpsPolling, reconciliationBadge } from './ops-polling';
+
+describe('the reconciliation badge', () => {
+  it('does not stay a clean ok next to a refresh that failed', () => {
+    expect(reconciliationBadge('ok', false)).toEqual({ label: 'ok', variant: 'secondary', icon: 'passed' });
+    expect(reconciliationBadge('ok', true)).toEqual({ label: 'ok · stale', variant: 'outline', icon: 'stale' });
+  });
+
+  it('keeps a mismatch red, stale or not', () => {
+    expect(reconciliationBadge('mismatch', true)).toEqual({
+      label: 'mismatch · stale',
+      variant: 'destructive',
+      icon: 'failed',
+    });
+  });
+});
 
 describe('operations page polling', () => {
   beforeEach(() => vi.useFakeTimers());

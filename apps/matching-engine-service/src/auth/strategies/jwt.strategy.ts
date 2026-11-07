@@ -3,6 +3,7 @@ import { PassportStrategy } from '@nestjs/passport';
 import { ExtractJwt, Strategy } from 'passport-jwt';
 import { requireEnv } from '../../common/env';
 import { SessionRevocations } from '../session-revocations.service';
+import { assertAccessClaims } from '../token-claims';
 
 export interface JwtPayload {
   sub: string;
@@ -10,6 +11,7 @@ export interface JwtPayload {
   email: string;
   role?: string;
   exp: number;
+  typ?: unknown;
   aud?: unknown;
   jti?: unknown;
 }
@@ -33,7 +35,7 @@ export class JwtStrategy extends PassportStrategy(Strategy) {
   }
 
   async validate(payload: JwtPayload): Promise<AuthenticatedUser> {
-    if (payload.aud !== undefined || payload.jti !== undefined) throw new UnauthorizedException();
+    assertAccessClaims(payload);
     if (payload.sid && (await this.revocations.isRevoked(payload.sid))) throw new UnauthorizedException();
     return {
       userId: payload.sub,

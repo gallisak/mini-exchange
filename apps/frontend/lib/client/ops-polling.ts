@@ -18,6 +18,14 @@ export type OpsView<T> =
   | { kind: 'error'; message: string }
   | { kind: 'report'; report: T; staleBecause: string | null };
 
+export function reconciliationBadge(status: string, stale: boolean) {
+  return {
+    label: stale ? `${status} · stale` : status,
+    variant: status !== 'ok' ? ('destructive' as const) : stale ? ('outline' as const) : ('secondary' as const),
+    icon: status !== 'ok' ? ('failed' as const) : stale ? ('stale' as const) : ('passed' as const),
+  };
+}
+
 export function opsView<T>(report: T | null, error: string | null): OpsView<T> {
   if (report) return { kind: 'report', report, staleBecause: error };
   return error ? { kind: 'error', message: error } : { kind: 'loading' };

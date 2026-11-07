@@ -1,23 +1,51 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ApiError, SESSION_CHANGED_EVENT, api, endsSession, showingUser } from './api';
+import { ApiError, SESSION_CHANGED_EVENT, api, endsSession, rememberedSession, sessionChanged, showingSession } from './api';
 
 describe('a request to the exchange', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
-    showingUser(null);
+    showingSession(null);
   });
 
-  it('says which account the page shows, so the frontend can refuse it for another one', async () => {
+  it('says which sign-in the page shows, so the frontend picks those cookies and no others', async () => {
     const send = vi.fn(async (_path: string, _init: RequestInit) => new Response('{}', { status: 200 }));
     vi.stubGlobal('fetch', send);
 
-    showingUser('user-a');
+    showingSession('session-a');
     await api('/api/orders');
-    showingUser(null);
+    showingSession(null);
     await api('/api/market/book');
 
-    expect((send.mock.calls[0][1].headers as Record<string, string>)['x-session-user']).toBe('user-a');
-    expect((send.mock.calls[1][1].headers as Record<string, string>)['x-session-user']).toBeUndefined();
+    expect((send.mock.calls[0][1].headers as Record<string, string>)['x-session-id']).toBe('session-a');
+    expect((send.mock.calls[1][1].headers as Record<string, string>)['x-session-id']).toBeUndefined();
+  });
+
+  it('remembers the sign-in for the next page load, and forgets it with the session', () => {
+    const stored = new Map<string, string>();
+    vi.stubGlobal('localStorage', {
+      getItem: (key: string) => stored.get(key) ?? null,
+      setItem: (key: string, value: string) => stored.set(key, value),
+      removeItem: (key: string) => stored.delete(key),
+    });
+
+    showingSession('session-a');
+    expect(rememberedSession()).toBe('session-a');
+    showingSession(null);
+    expect(rememberedSession()).toBeNull();
+  });
+
+  it('works where the browser refuses to store anything', () => {
+    vi.stubGlobal('localStorage', {
+      getItem: () => {
+        throw new Error('denied');
+      },
+      setItem: () => {
+        throw new Error('denied');
+      },
+    });
+
+    expect(() => showingSession('session-a')).not.toThrow();
+    expect(rememberedSession()).toBeNull();
   });
 
   it('asks the page to check its session when the frontend says the account changed', async () => {
@@ -33,6 +61,7 @@ describe('a request to the exchange', () => {
     const failure = await api('/api/orders', { method: 'POST' }).catch((error: unknown) => error);
 
     expect((failure as ApiError).status).toBe(409);
+    expect(sessionChanged(failure)).toBe(true);
     expect(heard).toHaveBeenCalledOnce();
   });
 

@@ -2,14 +2,13 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
-import { SESSION_CHANGED_EVENT, UNAUTHORIZED_EVENT, UnauthorizedDetail, api, showingUser } from './api';
-import { singleFlight } from './latest';
-import { checkSession } from './session-check';
-import { answeredForCurrentSession } from './session-order';
+import { SESSION_CHANGED_EVENT, UNAUTHORIZED_EVENT, UnauthorizedDetail, api, rememberedSession, showingSession } from './api';
+import { SessionAnswer, trackSession } from './session-tracker';
 import { User } from './types';
 
 interface SessionValue {
   user: User | null;
+  session: string | null;
   loading: boolean;
   isSignedIn: (userId: string) => boolean;
   signIn: (mode: 'login' | 'register', email: string, password: string) => Promise<User>;
@@ -26,14 +25,28 @@ function sessionChannel(): BroadcastChannel | null {
 
 export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
+  const [session, setSession] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
-  const generation = useRef(0);
-  const signedInAt = useRef(0);
   const latestUser = useRef<User | null>(null);
   const shownBefore = useRef<User | null>(null);
   const channel = useRef<BroadcastChannel | null>(null);
   latestUser.current = user;
-  showingUser(user?.id ?? null);
+
+  const tracker = useMemo(
+    () =>
+      trackSession({
+        remembered: rememberedSession(),
+        read: () => api<SessionAnswer>('/api/auth/session'),
+        pin: showingSession,
+        show: (answer) => {
+          setUser(answer.user);
+          setSession(answer.session);
+        },
+        settled: () => setLoading(false),
+        now: () => performance.now(),
+      }),
+    [],
+  );
 
   const isSignedIn = useCallback((userId: string) => latestUser.current?.id === userId, []);
 
@@ -45,80 +58,53 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     if (before && user) toast.message(`This browser is now signed in as ${user.email}`);
   }, [user]);
 
-  const recheck = useMemo(
-    () =>
-      singleFlight(async () => {
-        const started = generation.current;
-        const body = await api<{ user: User | null }>('/api/auth/session').catch(() => null);
-        if (!body || generation.current !== started) return;
-        setUser(body.user);
-        setLoading(false);
-      }),
-    [],
-  );
-
-  const refresh = useCallback(async () => {
-    const started = generation.current;
-    const current = () => generation.current === started;
-    const outcome = await checkSession(
-      () => api<{ user: User | null }>('/api/auth/session').then((body) => body.user),
-      current,
-    );
-    if (!outcome) return;
-    setUser(outcome.user);
-    setLoading(false);
-  }, []);
-
   useEffect(() => {
-    void refresh();
-    const signedOut = (event: Event) => {
-      const startedAt = (event as CustomEvent<UnauthorizedDetail>).detail?.startedAt;
-      if (answeredForCurrentSession(startedAt, signedInAt.current)) setUser(null);
+    showingSession(rememberedSession());
+    void tracker.refresh();
+    const signedOut = (event: Event) => tracker.refused((event as CustomEvent<UnauthorizedDetail>).detail?.startedAt);
+    const focused = () => {
+      if (document.visibilityState === 'visible') void tracker.focused();
     };
-    const check = () => {
-      if (document.visibilityState === 'visible') void recheck();
-    };
+    const changed = () => void tracker.recheck();
     const announced = sessionChannel();
     channel.current = announced;
-    announced?.addEventListener('message', () => void recheck());
+    announced?.addEventListener('message', (event) => void tracker.announced(event.data));
     window.addEventListener(UNAUTHORIZED_EVENT, signedOut);
-    window.addEventListener(SESSION_CHANGED_EVENT, check);
-    window.addEventListener('focus', check);
-    document.addEventListener('visibilitychange', check);
+    window.addEventListener(SESSION_CHANGED_EVENT, changed);
+    window.addEventListener('focus', focused);
+    document.addEventListener('visibilitychange', focused);
     return () => {
       announced?.close();
       channel.current = null;
       window.removeEventListener(UNAUTHORIZED_EVENT, signedOut);
-      window.removeEventListener(SESSION_CHANGED_EVENT, check);
-      window.removeEventListener('focus', check);
-      document.removeEventListener('visibilitychange', check);
+      window.removeEventListener(SESSION_CHANGED_EVENT, changed);
+      window.removeEventListener('focus', focused);
+      document.removeEventListener('visibilitychange', focused);
     };
-  }, [refresh, recheck]);
+  }, [tracker]);
 
-  const signIn = useCallback(async (mode: 'login' | 'register', email: string, password: string) => {
-    const { user: signedIn } = await api<{ user: User }>(`/api/auth/${mode}`, {
-      method: 'POST',
-      body: JSON.stringify({ email, password }),
-      endsSessionOn401: false,
-    });
-    generation.current += 1;
-    signedInAt.current = performance.now();
-    setUser(signedIn);
-    setLoading(false);
-    channel.current?.postMessage('changed');
-    return signedIn;
-  }, []);
+  const signIn = useCallback(
+    async (mode: 'login' | 'register', email: string, password: string) => {
+      const answer = await api<SessionAnswer>(`/api/auth/${mode}`, {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+        endsSessionOn401: false,
+      });
+      tracker.signedIn(answer);
+      channel.current?.postMessage(answer.session);
+      return answer.user as User;
+    },
+    [tracker],
+  );
 
   const signOut = useCallback(async () => {
     await api('/api/auth/logout', { method: 'POST' });
-    generation.current += 1;
-    setUser(null);
-    setLoading(false);
-    channel.current?.postMessage('changed');
-  }, []);
+    tracker.signedOut();
+    channel.current?.postMessage(null);
+  }, [tracker]);
 
   return (
-    <SessionContext.Provider value={{ user, loading, isSignedIn, signIn, signOut, refresh }}>
+    <SessionContext.Provider value={{ user, session, loading, isSignedIn, signIn, signOut, refresh: tracker.refresh }}>
       {children}
     </SessionContext.Provider>
   );

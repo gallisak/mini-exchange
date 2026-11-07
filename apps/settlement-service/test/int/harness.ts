@@ -72,6 +72,7 @@ export function accessToken(userId: string, role = 'user', sessionId?: string, e
     sub: userId,
     email: `${userId}@example.com`,
     role,
+    typ: 'access',
     ...(sessionId ? { sid: sessionId } : {}),
     ...extra,
     iat: now,

@@ -148,9 +148,11 @@ export class ReconciliationService implements OnModuleDestroy {
     const progress = await this.progress();
     const { end, endedEarly } = this.endOf(latest, to, progress);
     if (from.getTime() >= end) {
-      return this.nothingNew(
-        from,
-        progress.error ?? endedEarly ?? "it is later than the last minute",
+      return this.withLedgerTotals(
+        this.nothingNew(
+          from,
+          progress.error ?? endedEarly ?? "it is later than the last minute",
+        ),
       );
     }
     const report = await this.reconcile(from, new Date(end));

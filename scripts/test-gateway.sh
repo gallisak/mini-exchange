@@ -47,6 +47,22 @@ for path in /orders /auth/refresh; do
   echo "OK: $method $path that an engine already received is not replayed on the other engine"
 done
 
+sleep 3
+dropped=0
+for n in 1 2 3 4; do
+  status=$(curl -s -o /dev/null -w '%{http_code}' "http://127.0.0.1:$port/trades/summary")
+  if [ "$status" = 503 ]; then
+    dropped=1
+    break
+  fi
+  sleep 2.2
+done
+if [ "$dropped" != 1 ]; then
+  echo "FAIL: a trade summary was run again on the other engine after the connection broke"
+  exit 1
+fi
+echo "OK: a trade summary whose connection broke is not run again on the other engine"
+
 docker rm -f "$name-nginx" "$name-dropping" "$name-answering" >/dev/null
 engine refusing matching-engine-1 "res.statusCode = 503; res.end('refused');"
 engine summing matching-engine-2 "res.end('answered');"

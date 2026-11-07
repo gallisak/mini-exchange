@@ -207,8 +207,20 @@ describe('trade settlement', () => {
   it('does not take a refresh token signed with the same secret for an access token', async () => {
     await request(app.getHttpServer())
       .get('/wallets/me')
-      .set('authorization', `Bearer ${accessToken(randomUUID(), 'user', undefined, { jti: randomUUID() })}`)
+      .set('authorization', `Bearer ${accessToken(randomUUID(), 'user', undefined, { typ: undefined, jti: randomUUID() })}`)
       .expect(401);
+  });
+
+  it('takes only access tokens, and those from before tokens had a type', async () => {
+    const asked = (extra: object) =>
+      request(app.getHttpServer())
+        .get('/wallets/me')
+        .set('authorization', `Bearer ${accessToken(randomUUID(), 'user', undefined, extra)}`);
+
+    await asked({ typ: 'refresh' }).expect(401);
+    await asked({ typ: 'ws' }).expect(401);
+    await asked({ typ: undefined }).expect(200);
+    await asked({}).expect(200);
   });
 
   it('opens an instrument added later for a user who has as many accounts as there are assets', async () => {

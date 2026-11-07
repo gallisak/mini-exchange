@@ -1,18 +1,20 @@
 import { randomUUID } from 'crypto';
-import { SESSION_CHANGED, SESSION_USER_HEADER } from '@/lib/session-user';
-import { UPSTREAM_TIMEOUT_MS } from '@/lib/timeouts';
+import { SESSION_CHANGED, SESSION_ENDED } from '@/lib/session-id';
+import { END_SESSION_TIMEOUT_MS, UPSTREAM_TIMEOUT_MS } from '@/lib/timeouts';
 import { NextRequest, NextResponse } from 'next/server';
 import {
   Rotation,
   SessionTokens,
   TokenPair,
-  claimsOf,
-  isFresh,
+  askedForAnother,
+  clearLegacyCookies,
   clearTokens,
+  isFresh,
+  legacySessions,
   readTokens,
   refreshOnce,
-  refreshTokenOf,
   storeTokens,
+  tokensOf,
 } from './session';
 
 const SERVICES = {
@@ -53,6 +55,7 @@ export async function upstream(
 ): Promise<UpstreamResult> {
   const { timeoutMs = UPSTREAM_TIMEOUT_MS, ...options } = init;
   let response: Response;
+  let text: string;
   try {
     response = await fetch(`${SERVICES[service]()}${path}`, {
       ...options,
@@ -65,11 +68,11 @@ export async function upstream(
         ...(options.headers ?? {}),
       },
     });
+    text = await response.text();
   } catch {
     const name = service === 'engine' ? 'The matching engine' : 'The settlement service';
     return { status: 503, body: { message: `${name} is unavailable, try again shortly` } };
   }
-  const text = await response.text();
   let body: unknown = null;
   try {
     body = text ? JSON.parse(text) : null;
@@ -92,22 +95,44 @@ export function rotateTokens(request: NextRequest, tokens: SessionTokens): Promi
   });
 }
 
-export async function endForgottenSessions(request: NextRequest, sessions: string[]): Promise<void> {
-  await Promise.all(
+export const endedTheSession = ({ body }: UpstreamResult) =>
+  (body as { code?: unknown } | null)?.code === SESSION_ENDED;
+
+export async function endRefreshToken(request: NextRequest, refreshToken: string): Promise<boolean> {
+  const result = await upstream(request, 'engine', '/auth/end-session', {
+    method: 'POST',
+    body: JSON.stringify({ refreshToken }),
+    timeoutMs: END_SESSION_TIMEOUT_MS,
+  });
+  const over = (result.status >= 200 && result.status < 300) || result.status === 400 || result.status === 401;
+  return over || endedTheSession(result);
+}
+
+export async function endSessions(request: NextRequest, sessions: string[]): Promise<string[]> {
+  const ended = await Promise.all(
     sessions.map(async (session) => {
-      const refreshToken = refreshTokenOf(request, session);
-      if (!refreshToken) return;
-      await upstream(request, 'engine', '/auth/end-session', {
-        method: 'POST',
-        body: JSON.stringify({ refreshToken }),
-      });
+      const { refreshToken } = tokensOf(request, session);
+      return !refreshToken || (await endRefreshToken(request, refreshToken));
+    }),
+  );
+  return sessions.filter((_, index) => ended[index]);
+}
+
+export async function forgetLegacySessions(
+  request: NextRequest,
+  response: NextResponse,
+  sessions: string[],
+): Promise<void> {
+  await Promise.all(
+    legacySessions(request, sessions).map(async ({ names, refreshToken }) => {
+      if (!refreshToken || (await endRefreshToken(request, refreshToken))) clearLegacyCookies(response, names);
     }),
   );
 }
 
-export function isAnotherUser(request: NextRequest, accessToken: string | undefined): boolean {
-  const expected = request.headers.get(SESSION_USER_HEADER);
-  return Boolean(expected) && claimsOf(accessToken)?.id !== expected;
+export async function forgetSessions(request: NextRequest, response: NextResponse, sessions: string[]): Promise<void> {
+  clearTokens(response, await endSessions(request, sessions));
+  await forgetLegacySessions(request, response, sessions);
 }
 
 export function sessionChanged(): NextResponse {
@@ -122,6 +147,7 @@ export async function withSession(
   call: (accessToken: string) => Promise<UpstreamResult>,
 ): Promise<NextResponse> {
   const tokens = readTokens(request);
+  if (askedForAnother(request, tokens.session)) return sessionChanged();
   let rotated: TokenPair | null = null;
   let accessToken = tokens.accessToken;
 
@@ -142,11 +168,6 @@ export async function withSession(
     if (failure) return failure;
   }
   if (!accessToken) return unauthorized(tokens.session);
-  if (isAnotherUser(request, accessToken)) {
-    const response = sessionChanged();
-    if (rotated) storeTokens(response, rotated, tokens.session);
-    return response;
-  }
 
   let result = await call(accessToken);
   if (result.status === 401 && tokens.refreshToken && !rotated) {
@@ -154,17 +175,12 @@ export async function withSession(
     if (failure) return failure;
     result = await call(accessToken);
   }
-  if (result.status === 401 && rotated) {
-    const response = NextResponse.json(
-      { message: 'The exchange did not accept your session, try again shortly' },
-      { status: 502 },
-    );
-    storeTokens(response, rotated, tokens.session);
-    return response;
+  if (result.status === 401) {
+    if (rotated) await endRefreshToken(request, (rotated as TokenPair).refreshToken);
+    return unauthorized(tokens.session);
   }
   const response = NextResponse.json(result.body, { status: result.status });
   if (rotated) storeTokens(response, rotated, tokens.session);
-  if (result.status === 401) clearTokens(response, [tokens.session]);
   return response;
 }
 

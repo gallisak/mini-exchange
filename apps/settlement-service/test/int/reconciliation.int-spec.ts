@@ -319,6 +319,22 @@ describe("reconciliation", () => {
     expect(after).toBe(before);
   });
 
+  it("reports a whole ledger that does not add up even when a period has nothing new to check", async () => {
+    await corrupt(
+      `INSERT INTO "accounts" ("ownerId", "asset", "kind", "balance") VALUES ($1, 'USD', 'user', 5)`,
+      [randomUUID()],
+    );
+
+    const response = await reconcile({
+      from: new Date(Date.now() + 3_600_000).toISOString(),
+    }).expect(200);
+
+    expect(response.body.status).toBe("mismatch");
+    expect(response.body.assetsNotBalanced).toEqual([
+      { asset: "USD", total: "5.00" },
+    ]);
+  });
+
   it("finds a ledger entry edited by hand", async () => {
     const [executed] = await settleInPeriod();
     await corrupt(

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
-import { latestRequest, singleFlight } from './latest';
+import { coalesced, latestRequest, singleFlight } from './latest';
 
 describe('the latest of several overlapping requests', () => {
   it('is the only one whose answer may be shown, whatever order the answers come in', () => {
@@ -45,6 +45,23 @@ describe('the latest of several overlapping requests', () => {
 
     expect(older.show()).toBe(true);
     expect(newer.show()).toBe(true);
+  });
+
+  it('runs once more after a run that a newer request arrived during, however many arrived', async () => {
+    const finishes: (() => void)[] = [];
+    const load = coalesced(() => new Promise<void>((resolve) => finishes.push(resolve)));
+
+    const first = load();
+    const second = load();
+    void load();
+    finishes[0]();
+    await vi.waitFor(() => expect(finishes).toHaveLength(2));
+    finishes[1]();
+    await Promise.all([first, second]);
+
+    expect(finishes).toHaveLength(2);
+    void load();
+    expect(finishes).toHaveLength(3);
   });
 
   it('is not started again while the previous one is still running, so a slow answer is still shown', async () => {

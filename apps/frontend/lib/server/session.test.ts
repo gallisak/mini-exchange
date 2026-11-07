@@ -1,6 +1,20 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { NextResponse } from 'next/server';
-import { REFRESH_REUSE_WINDOW_MS, REMEMBERED_SESSIONS, Rotation, newSession, refreshOnce, storeTokens } from './session';
+import { NextRequest, NextResponse } from 'next/server';
+import {
+  ACCESS_COOKIE,
+  REFRESH_COOKIE,
+  REFRESH_REUSE_WINDOW_MS,
+  REMEMBERED_SESSIONS,
+  Rotation,
+  clearLegacyCookies,
+  cookieName,
+  legacySessions,
+  newSession,
+  refreshOnce,
+  sessionsIn,
+  storeTokens,
+} from './session';
+import { sessionCookies } from './test-session';
 
 describe('sharing one refresh between requests', () => {
   beforeEach(() => vi.useFakeTimers());
@@ -132,5 +146,112 @@ describe('sharing one refresh between requests', () => {
     await refreshOnce({ refreshToken: 'dead', accessToken: 'access-i' }, rotate);
 
     expect(rotate).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('the key that signs session cookies', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('is not made up by a production process that was given none', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('FRONTEND_PROXY_KEY', '');
+    vi.resetModules();
+
+    const { newSession: signed } = await import('./session');
+
+    expect(() => signed()).toThrow('FRONTEND_PROXY_KEY must be set');
+  });
+
+  it('is made up outside production, for a laptop without one', async () => {
+    vi.stubEnv('FRONTEND_PROXY_KEY', '');
+    vi.resetModules();
+
+    const { newSession: signed } = await import('./session');
+
+    expect(signed()).toMatch(/^[0-9a-z]{36}$/);
+  });
+});
+
+describe('reading the cookies of a request', () => {
+  const carrying = (cookie: string) => new NextRequest('http://exchange.test/api/wallet', { headers: { cookie } });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+  });
+
+  it('accepts a session whose values were signed for its name', () => {
+    const session = newSession();
+
+    expect(sessionsIn(carrying(sessionCookies('access', 'refresh', session)))).toEqual([session]);
+  });
+
+  it('ignores a cookie with a genuine id but a value of someone else', () => {
+    const session = newSession();
+    const other = newSession();
+    const [access, refresh] = sessionCookies('attacker-access', 'attacker-refresh', other)
+      .split('; ')
+      .map((cookie) => cookie.split('=')[1]);
+
+    const cookie = `${cookieName(ACCESS_COOKIE, session)}=${access}; ${cookieName(REFRESH_COOKIE, session)}=${refresh}`;
+
+    expect(sessionsIn(carrying(cookie))).toEqual([]);
+  });
+
+  it('ignores a cookie with a genuine id but an unsigned value', () => {
+    const session = newSession();
+
+    expect(sessionsIn(carrying(`${cookieName(ACCESS_COOKIE, session)}=unsigned`))).toEqual([]);
+  });
+
+  it('finds cookies of every older format, and leaves the current ones alone', () => {
+    const session = newSession();
+    const before = newSession();
+    const cookie = [
+      sessionCookies('access', 'refresh', session),
+      'mx_access=bare-access',
+      'mx_refresh=bare-refresh',
+      'mx_refresh_abcdefghij0123456789=short-refresh',
+      `${cookieName(REFRESH_COOKIE, before)}=unsigned-refresh`,
+    ].join('; ');
+
+    const found = legacySessions(carrying(cookie));
+
+    expect(found.map(({ refreshToken }) => refreshToken).sort()).toEqual([
+      'bare-refresh',
+      'short-refresh',
+      'unsigned-refresh',
+    ]);
+    expect(found.find(({ refreshToken }) => refreshToken === 'bare-refresh')?.names.sort()).toEqual([
+      'mx_access',
+      'mx_refresh',
+    ]);
+  });
+
+  it('takes names without the prefix for old ones once cookies are secure, and sends their token without its signature', () => {
+    const plain = newSession();
+    const cookie = sessionCookies('old-access', 'old-refresh', plain);
+    vi.stubEnv('COOKIE_SECURE', 'true');
+
+    expect(legacySessions(carrying(cookie))).toEqual([
+      { names: expect.arrayContaining([`mx_refresh_${plain}`, `mx_access_${plain}`]), refreshToken: 'old-refresh' },
+    ]);
+  });
+
+  it('clears an old cookie on both paths, and one with the prefix the only way a browser accepts', () => {
+    const response = NextResponse.json({});
+
+    clearLegacyCookies(response, ['mx_refresh', '__Host-mx_refresh_x']);
+
+    const cookies = response.headers.getSetCookie();
+    expect(cookies.filter((cookie) => cookie.startsWith('mx_refresh=')).map((cookie) => /Path=([^;]*)/.exec(cookie)?.[1])).toEqual([
+      '/',
+      '/api',
+    ]);
+    const prefixed = cookies.filter((cookie) => cookie.startsWith('__Host-'));
+    expect(prefixed).toHaveLength(1);
+    expect(prefixed[0]).toMatch(/Path=\/; Secure/);
   });
 });

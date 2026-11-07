@@ -1,12 +1,28 @@
-import { SESSION_CHANGED, SESSION_USER_HEADER } from '@/lib/session-user';
+import { SESSION_CHANGED, SESSION_HEADER } from '@/lib/session-id';
 
 export const UNAUTHORIZED_EVENT = 'mx:unauthorized';
 export const SESSION_CHANGED_EVENT = 'mx:session-changed';
 
-let shownUser: string | null = null;
+const REMEMBERED_SESSION = 'mx:session';
 
-export function showingUser(userId: string | null): void {
-  shownUser = userId;
+let shownSession: string | null = null;
+
+export function showingSession(session: string | null): void {
+  shownSession = session;
+  try {
+    if (session) localStorage.setItem(REMEMBERED_SESSION, session);
+    else localStorage.removeItem(REMEMBERED_SESSION);
+  } catch {
+    return;
+  }
+}
+
+export function rememberedSession(): string | null {
+  try {
+    return localStorage.getItem(REMEMBERED_SESSION);
+  } catch {
+    return null;
+  }
 }
 
 export interface UnauthorizedDetail {
@@ -17,6 +33,7 @@ export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly code?: unknown,
   ) {
     super(message);
   }
@@ -24,6 +41,10 @@ export class ApiError extends Error {
 
 export function endsSession(failure: unknown): boolean {
   return failure instanceof ApiError && failure.status === 401;
+}
+
+export function sessionChanged(failure: unknown): boolean {
+  return failure instanceof ApiError && failure.code === SESSION_CHANGED;
 }
 
 function messageOf(body: unknown, status: number): string {
@@ -50,7 +71,7 @@ export async function api<T>(
       signal,
       headers: {
         'content-type': 'application/json',
-        ...(shownUser ? { [SESSION_USER_HEADER]: shownUser } : {}),
+        ...(shownSession ? { [SESSION_HEADER]: shownSession } : {}),
         ...(init.headers ?? {}),
       },
       cache: 'no-store',
@@ -72,10 +93,11 @@ export async function api<T>(
     if (response.status === 401 && endsSessionOn401 && typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent<UnauthorizedDetail>(UNAUTHORIZED_EVENT, { detail: { startedAt } }));
     }
-    if ((body as { code?: unknown } | null)?.code === SESSION_CHANGED && typeof window !== 'undefined') {
+    const code = (body as { code?: unknown } | null)?.code;
+    if (code === SESSION_CHANGED && typeof window !== 'undefined') {
       window.dispatchEvent(new Event(SESSION_CHANGED_EVENT));
     }
-    throw new ApiError(response.status, messageOf(body, response.status));
+    throw new ApiError(response.status, messageOf(body, response.status), code);
   }
   return body as T;
 }

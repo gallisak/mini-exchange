@@ -21,6 +21,27 @@ export function latestRequest(): () => RequestTurn {
   };
 }
 
+export function coalesced(run: () => Promise<void>): () => Promise<void> {
+  let running: Promise<void> | null = null;
+  let again = false;
+  const runUntilCaughtUp = async () => {
+    do {
+      again = false;
+      await run();
+    } while (again);
+  };
+  return () => {
+    if (running) {
+      again = true;
+      return running;
+    }
+    running = runUntilCaughtUp().finally(() => {
+      running = null;
+    });
+    return running;
+  };
+}
+
 export function singleFlight<T>(run: () => Promise<T>): () => Promise<T> {
   let running: Promise<T> | null = null;
   return () => {

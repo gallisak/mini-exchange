@@ -1,13 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { clearTokens, isFresh, olderSessions, readTokens, sessionsIn, storeTokens, TokenPair } from '@/lib/server/session';
-import { endForgottenSessions, isAnotherUser, rotateTokens, sessionChanged, upstream } from '@/lib/server/upstream';
-
-const notSignedOut = (status: number) =>
-  NextResponse.json({ message: 'Could not sign out, try again' }, { status });
+import {
+  TokenPair,
+  askedForAnother,
+  clearTokens,
+  isFresh,
+  olderSessions,
+  readTokens,
+  sessionsIn,
+  storeTokens,
+} from '@/lib/server/session';
+import {
+  endRefreshToken,
+  endSessions,
+  endedTheSession,
+  forgetLegacySessions,
+  rotateTokens,
+  sessionChanged,
+  upstream,
+} from '@/lib/server/upstream';
 
 export async function POST(request: NextRequest) {
-  const { accessToken, refreshToken, session } = readTokens(request);
-  if (accessToken && isAnotherUser(request, accessToken)) return sessionChanged();
+  const sessions = sessionsIn(request);
+  const { accessToken, refreshToken, session } = readTokens(request, sessions);
+  if (askedForAnother(request, session)) return sessionChanged();
+
+  const older = olderSessions(sessions, session);
+  const ended = await endSessions(request, older);
+  const notSignedOut = (status: number) => {
+    const response = NextResponse.json({ message: 'Could not sign out, try again' }, { status });
+    clearTokens(response, ended);
+    return response;
+  };
+  if (ended.length < older.length) return notSignedOut(503);
+
   let token = isFresh(accessToken) ? accessToken : undefined;
   let rotated: TokenPair | null = null;
   const rotate = async (): Promise<NextResponse | null> => {
@@ -30,11 +55,12 @@ export async function POST(request: NextRequest) {
       if (failure) return failure;
       if (token) result = await upstream(request, 'engine', '/auth/logout', { method: 'POST' }, token);
     }
-    if (result.status === 401 && rotated) {
-      const response = notSignedOut(502);
-      storeTokens(response, rotated, session);
+    if (endedTheSession(result)) {
+      const response = notSignedOut(result.status);
+      clearTokens(response, [session]);
       return response;
     }
+    if (result.status === 401 && rotated) await endRefreshToken(request, (rotated as TokenPair).refreshToken);
     if (result.status !== 204 && result.status !== 401) {
       const response = notSignedOut(result.status >= 500 ? result.status : 502);
       if (rotated) storeTokens(response, rotated, session);
@@ -42,7 +68,7 @@ export async function POST(request: NextRequest) {
     }
   }
   const response = new NextResponse(null, { status: 204 });
-  clearTokens(response, sessionsIn(request));
-  void endForgottenSessions(request, olderSessions(request, session));
+  clearTokens(response, [...ended, session]);
+  await forgetLegacySessions(request, response, sessions);
   return response;
 }

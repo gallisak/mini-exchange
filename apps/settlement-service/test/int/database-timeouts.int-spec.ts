@@ -1,6 +1,13 @@
 import { DataSource } from 'typeorm';
-import { buildDataSourceOptions, reconciliationDataSourceOptions } from '../../src/database/data-source';
-import { migrate } from '../../src/database/migrate';
+import {
+  buildDataSourceOptions,
+  migrationDataSourceOptions,
+  reconciliationDataSourceOptions,
+} from '../../src/database/data-source';
+import { migrate, pauseBeforeRetry } from '../../src/database/migrate';
+
+const lockTimeout = (message = 'canceling statement due to lock timeout') =>
+  Object.assign(new Error(message), { code: '55P03' });
 
 describe('a database that stops answering', () => {
   const saved = { ...process.env };
@@ -58,7 +65,7 @@ describe('a database that stops answering', () => {
   it('tries a migration again that gave up on a lock, so a long reconciliation does not fail a deploy', async () => {
     const run = jest
       .spyOn(DataSource.prototype, 'runMigrations')
-      .mockRejectedValueOnce(new Error('canceling statement due to lock timeout'))
+      .mockRejectedValueOnce(lockTimeout())
       .mockResolvedValue([]);
     try {
       await migrate(60_000, 1);
@@ -72,15 +79,86 @@ describe('a database that stops answering', () => {
   it('stops trying a migration again once its time is up, and at once on any other failure', async () => {
     const run = jest.spyOn(DataSource.prototype, 'runMigrations');
     try {
-      run.mockRejectedValue(new Error('canceling statement due to lock timeout'));
+      run.mockRejectedValue(lockTimeout());
       await expect(migrate(0, 1)).rejects.toThrow(/lock timeout/);
       run.mockClear();
       run.mockRejectedValue(new Error('column "x" does not exist'));
       await expect(migrate(60_000, 1)).rejects.toThrow(/does not exist/);
       expect(run).toHaveBeenCalledTimes(1);
+      run.mockClear();
+      run.mockRejectedValue(new Error('a message that only mentions a lock timeout'));
+      await expect(migrate(60_000, 1)).rejects.toThrow(/mentions/);
+      expect(run).toHaveBeenCalledTimes(1);
     } finally {
       run.mockRestore();
     }
+  });
+
+  it('gives a migration a much shorter lock wait than other queries, so it holds up writes only briefly', async () => {
+    delete process.env.MIGRATION_LOCK_TIMEOUT_MS;
+    const dataSource = await new DataSource(migrationDataSourceOptions()).initialize();
+    try {
+      expect(await dataSource.query('SHOW lock_timeout')).toEqual([{ lock_timeout: '1500ms' }]);
+    } finally {
+      await dataSource.destroy();
+    }
+  });
+
+  it('waits ever longer between attempts, up to half a minute, and spreads them out', () => {
+    expect([0, 1, 2, 3, 4, 10].map((attempt) => pauseBeforeRetry(attempt, 5_000, 1))).toEqual([
+      5_000, 10_000, 20_000, 30_000, 30_000, 30_000,
+    ]);
+    expect(pauseBeforeRetry(10, 5_000, 0)).toBe(15_000);
+  });
+
+  it('leaves writes waiting no longer than one attempt while a long read keeps a migration out', async () => {
+    Object.assign(process.env, {
+      MIGRATION_LOCK_TIMEOUT_MS: '200',
+      DATABASE_LOCK_TIMEOUT_MS: '5000',
+      DATABASE_STATEMENT_TIMEOUT_MS: '60000',
+    });
+    const writer = await new DataSource(buildDataSourceOptions()).initialize();
+    const reader = writer.createQueryRunner();
+    await writer.query('DROP TABLE IF EXISTS "migration_lock_probe"');
+    await writer.query('CREATE TABLE "migration_lock_probe" ("id" int PRIMARY KEY, "n" int NOT NULL DEFAULT 0)');
+    await writer.query('INSERT INTO "migration_lock_probe" ("id") VALUES (1), (2)');
+    await reader.connect();
+    await reader.startTransaction();
+    await reader.query('SELECT * FROM "migration_lock_probe" WHERE "id" = 1 FOR SHARE');
+    let attempts = 0;
+    const run = jest.spyOn(DataSource.prototype, 'runMigrations').mockImplementation(async function (
+      this: DataSource,
+    ) {
+      attempts += 1;
+      await this.query('ALTER TABLE "migration_lock_probe" ADD COLUMN "added" int');
+      return [];
+    });
+    let longestWrite = 0;
+    let migrating = true;
+    const writes = (async () => {
+      while (migrating) {
+        const started = Date.now();
+        await writer.query('UPDATE "migration_lock_probe" SET "n" = "n" + 1 WHERE "id" = 2');
+        longestWrite = Math.max(longestWrite, Date.now() - started);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    })();
+    const migrated = migrate(60_000, 100);
+    try {
+      await new Promise((resolve) => setTimeout(resolve, 1_500));
+      await reader.commitTransaction();
+      await migrated;
+    } finally {
+      migrating = false;
+      await writes;
+      run.mockRestore();
+      await reader.release();
+      await writer.query('DROP TABLE IF EXISTS "migration_lock_probe"');
+      await writer.destroy();
+    }
+
+    expect(attempts).toBeGreaterThan(1);
+    expect(longestWrite).toBeLessThan(600);
   });
 
   it('gives reconciliation its own, longer limit than every other query', async () => {
