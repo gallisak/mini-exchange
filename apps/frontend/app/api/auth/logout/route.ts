@@ -3,9 +3,11 @@ import {
   TokenPair,
   askedForAnother,
   clearTokens,
+  endingIn,
   isFresh,
   olderSessions,
   readTokens,
+  rememberEnding,
   sessionsIn,
   storeTokens,
 } from '@/lib/server/session';
@@ -68,7 +70,9 @@ export async function POST(request: NextRequest) {
     }
   }
   const response = new NextResponse(null, { status: 204 });
-  clearTokens(response, [...ended, session]);
+  const over = [...ended, session];
+  clearTokens(response, over);
+  rememberEnding(request, response, endingIn(request, sessions).filter((id) => !over.includes(id)));
   await forgetLegacySessions(request, response, sessions);
   return response;
 }

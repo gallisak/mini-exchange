@@ -10,7 +10,7 @@ export interface SessionAnswer {
 
 interface Deps {
   remembered: string | null;
-  read: () => Promise<SessionAnswer>;
+  read: (session: string | null) => Promise<SessionAnswer>;
   pin: (session: string | null) => void;
   show: (answer: SessionAnswer) => void;
   settled: () => void;
@@ -28,6 +28,7 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
   let generation = 0;
   let signedInAt = 0;
   let focusCheckedAt = -Infinity;
+  let announcedSession: string | null = null;
 
   const present = (answer: SessionAnswer) => {
     shown = answer;
@@ -51,8 +52,11 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
 
   const loadSession = async ({ retries }: { retries: number }) => {
     const started = generation;
-    const outcome = await checkSession(read, () => generation === started, retries, wait);
-    if (outcome && 'answer' in outcome) apply(outcome.answer);
+    const outcome = await checkSession(() => read(announcedSession), () => generation === started, retries, wait);
+    if (outcome && 'answer' in outcome) {
+      if (outcome.answer.session === announcedSession) announcedSession = null;
+      apply(outcome.answer);
+    }
     return outcome;
   };
 
@@ -62,12 +66,16 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
 
   return {
     recheck,
-    signedIn: newSession,
+    signedIn(answer: SessionAnswer) {
+      announcedSession = null;
+      newSession(answer);
+    },
     async refresh() {
       const outcome = await loadSession({ retries: START_RETRIES });
       if (outcome && 'failed' in outcome) apply(NOBODY);
     },
     signedOut() {
+      announcedSession = null;
       generation += 1;
       present(NOBODY);
     },
@@ -80,7 +88,7 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
       return recheck();
     },
     announced(session: unknown) {
-      if (typeof session === 'string') pin(session);
+      announcedSession = typeof session === 'string' ? session : null;
       return recheck();
     },
   };

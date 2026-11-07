@@ -219,6 +219,19 @@ describe('signing in through the frontend', () => {
     expect(clearedNames(response)).toEqual([]);
   });
 
+  it('notes which session it could not end, and drops the note once the next sign-in ended it', async () => {
+    engineEnding(503);
+    const old = newSession();
+    const cookie = sessionCookies('old-access', 'old-refresh', old);
+
+    const noted = (await signInOver(cookie)).headers.getSetCookie().find((line) => line.startsWith('mx_ending='));
+
+    expect(noted).toContain(`mx_ending=${old}~`);
+    engineEnding(204);
+    const after = await signInOver(`${cookie}; ${noted?.split(';')[0]}`);
+    expect(clearedNames(after)).toEqual([cookieName(ACCESS_COOKIE, old), 'mx_ending', cookieName(REFRESH_COOKIE, old)].sort());
+  });
+
   it('keeps the cookies of a session whose end the engine never answered', async () => {
     const tokens = { accessToken: 'a.e30.s', refreshToken: 'refresh' };
     vi.stubGlobal(

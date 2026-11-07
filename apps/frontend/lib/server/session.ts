@@ -4,6 +4,7 @@ import { SESSION_HEADER } from '@/lib/session-id';
 
 export const ACCESS_COOKIE = 'mx_access';
 export const REFRESH_COOKIE = 'mx_refresh';
+const ENDING_COOKIE = 'mx_ending';
 const REFRESH_MAX_AGE = 7 * 24 * 60 * 60;
 export const REFRESH_REUSE_WINDOW_MS = 5_000;
 export const REMEMBERED_SESSIONS = 10_000;
@@ -49,6 +50,8 @@ const cookiePrefix = () => (secureCookies() ? '__Host-' : '');
 
 export const cookieName = (base: string, session: string) => `${cookiePrefix()}${base}_${session}`;
 
+const endingCookie = () => `${cookiePrefix()}${ENDING_COOKIE}`;
+
 const fallbackKey = process.env.NODE_ENV === 'production' ? null : randomBytes(32);
 
 function signingKey(): string | Buffer {
@@ -64,6 +67,8 @@ const signature = (id: string) => hmac('session', id).slice(0, 16);
 
 const valueSignature = (session: string, token: string) =>
   hmac('session', `${session}:${createHash('sha256').update(token).digest('hex')}`).slice(0, 32);
+
+const endingSignature = (list: string) => hmac('ending', list).slice(0, 32);
 
 const sameText = (given: string, expected: string) => {
   const [a, b] = [Buffer.from(given), Buffer.from(expected)];
@@ -135,6 +140,22 @@ export function clearTokens(response: NextResponse, sessions: string[]): void {
   for (const session of sessions.filter(Boolean)) {
     response.cookies.set(cookieName(ACCESS_COOKIE, session), '', cookieOptions(0));
     response.cookies.set(cookieName(REFRESH_COOKIE, session), '', cookieOptions(0));
+  }
+}
+
+export function endingIn(request: NextRequest, sessions: string[]): string[] {
+  const [list, signed] = (request.cookies.get(endingCookie())?.value ?? '').split(VALUE_SEPARATOR);
+  if (!list || !signed || !sameText(signed, endingSignature(list))) return [];
+  const listed = list.split('.');
+  return sessions.filter((session) => listed.includes(session));
+}
+
+export function rememberEnding(request: NextRequest, response: NextResponse, sessions: string[]): void {
+  const list = sessions.join('.');
+  if (list) {
+    response.cookies.set(endingCookie(), `${list}${VALUE_SEPARATOR}${endingSignature(list)}`, cookieOptions(REFRESH_MAX_AGE));
+  } else if (request.cookies.has(endingCookie())) {
+    response.cookies.set(endingCookie(), '', cookieOptions(0));
   }
 }
 

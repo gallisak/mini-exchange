@@ -12,7 +12,7 @@ function tracked(reads: (SessionAnswer | Error | Promise<SessionAnswer>)[], reme
   let time = 1_000;
   const shown: SessionAnswer[] = [];
   const pins: (string | null)[] = [];
-  const read = vi.fn(async () => {
+  const read = vi.fn(async (_session: string | null) => {
     const next = reads.length > 1 ? reads.shift() : reads[0];
     if (next instanceof Error) throw next;
     return next as SessionAnswer | Promise<SessionAnswer>;
@@ -162,11 +162,58 @@ describe('following the session of a tab', () => {
   });
 
   it('asks for the sign-in another tab announced, even if the old cookies are still there', async () => {
-    const { tracker, pins } = tracked([signedInAs('b')]);
+    const { tracker, read, pins } = tracked([signedInAs('b')]);
 
     await tracker.announced('session-b');
 
-    expect(pins[0]).toBe('session-b');
+    expect(read).toHaveBeenCalledWith('session-b');
+    expect(pins).toEqual(['session-b']);
+  });
+
+  it('keeps sending requests for the account it shows until it shows the one another tab announced', async () => {
+    const answer = held();
+    const { tracker, pins } = tracked([signedInAs('a'), answer.promise]);
+    await tracker.refresh();
+
+    const checking = tracker.announced('session-b');
+    await Promise.resolve();
+
+    expect(pins).toEqual(['session-a']);
+    answer.answer(signedInAs('b'));
+    await checking;
+    expect(pins).toEqual(['session-a', 'session-b']);
+  });
+
+  it('does not move requests to an announced sign-in it could not check, and asks for it next time', async () => {
+    const { tracker, read, pins, shown } = tracked([
+      signedInAs('a'),
+      new ApiError(503, 'down'),
+      new ApiError(503, 'down'),
+      signedInAs('b'),
+    ]);
+    await tracker.refresh();
+
+    await tracker.announced('session-b');
+
+    expect(pins).toEqual(['session-a']);
+    expect(shown.at(-1)).toEqual(signedInAs('a'));
+
+    await tracker.recheck();
+
+    expect(read).toHaveBeenLastCalledWith('session-b');
+    expect(shown.at(-1)).toEqual(signedInAs('b'));
+  });
+
+  it('stops asking for an announced sign-in once it is shown, or when the other tab signed out', async () => {
+    const { tracker, read } = tracked([signedInAs('b'), signedInAs('b'), nobody]);
+
+    await tracker.announced('session-b');
+    await tracker.recheck();
+    expect(read).toHaveBeenLastCalledWith(null);
+
+    await tracker.announced('session-c');
+    await tracker.announced(null);
+    expect(read).toHaveBeenLastCalledWith(null);
   });
 
   it('ignores a check that was running when the user signed in', async () => {

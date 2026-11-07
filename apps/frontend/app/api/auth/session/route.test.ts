@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { newSession } from '@/lib/server/session';
-import { sessionCookies } from '@/lib/server/test-session';
+import { endingNote, sessionCookies } from '@/lib/server/test-session';
 import { GET } from './route';
 
 const access = (sub: string) =>
@@ -38,6 +38,19 @@ describe('asking who is signed in', () => {
     expect(await response.json()).toMatchObject({ user: { id: 'attacker' }, session: newer });
     expect(engine).not.toHaveBeenCalled();
     expect(response.headers.getSetCookie()).toEqual([]);
+  });
+
+  it('ends only a session a sign-in of this browser could not end, and forgets it', async () => {
+    const engine = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', engine);
+    const { cookie, older, newer } = twoSignIns();
+
+    const response = await GET(asking(`${cookie}; ${endingNote([older])}`, { 'x-session-id': newer }));
+
+    expect(JSON.parse(String(engine.mock.calls[0][1]?.body))).toEqual({ refreshToken: 'victim-refresh' });
+    expect(engine).toHaveBeenCalledOnce();
+    const cleared = response.headers.getSetCookie().map((line) => line.split('=')[0]);
+    expect(cleared.sort()).toEqual([`mx_access_${older}`, 'mx_ending', `mx_refresh_${older}`].sort());
   });
 
   it('stays with the sign-in the page shows when a newer one appears', async () => {

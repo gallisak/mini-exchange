@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { newSession } from '@/lib/server/session';
-import { sessionCookies } from '@/lib/server/test-session';
+import { endingNote, sessionCookies } from '@/lib/server/test-session';
 import { POST } from './route';
 
 const access = ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: Math.floor(Date.now() / 1000) + 900 })).toString('base64url'), 's'].join('.');
@@ -104,6 +104,16 @@ describe('signing out through the frontend', () => {
     vi.useRealTimers();
     return `${sessionCookies(access, 'older-refresh', older)}; ${sessionCookies(access, 'newer-refresh', newer)}`;
   };
+
+  it('drops the note about a session once that session is signed out', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
+    const session = newSession();
+
+    const response = await POST(carrying(`${sessionCookies(access, 'refresh', session)}; ${endingNote([session])}`));
+
+    expect(response.status).toBe(204);
+    expect(response.headers.getSetCookie().some((cookie) => /^mx_ending=;.*Max-Age=0/.test(cookie))).toBe(true);
+  });
 
   it('ends an older session too, and forgets every cookie once it did', async () => {
     const paths: string[] = [];

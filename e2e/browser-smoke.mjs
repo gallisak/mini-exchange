@@ -2,6 +2,7 @@ import { execFileSync } from 'node:child_process';
 import { chromium } from 'playwright';
 
 const BASE = process.env.FRONTEND_URL ?? 'http://localhost:3000';
+const ENGINE = process.env.ENGINE_URL ?? 'http://localhost:3001';
 const COMPOSE = (process.env.COMPOSE ?? 'docker compose').split(/\s+/);
 const SHOTS = process.env.SCREENSHOTS;
 const started = Date.now();
@@ -324,6 +325,7 @@ try {
     if (new URL(response.url()).pathname === '/api/ws-token' && response.status() === 409) refusedTickets += 1;
   });
   await first.getByLabel('Price (USD)').fill('3.00');
+  const replaced = (await shared.cookies()).find(({ name }) => name.includes('mx_refresh_'));
   const switched = await second.evaluate(
     (email) =>
       fetch('/api/auth/login', {
@@ -334,6 +336,16 @@ try {
     `browser-tab-a-${run}@example.com`,
   );
   if (switched !== 200) throw new Error(`the other account could not sign in: ${switched}`);
+  if ((await shared.cookies()).some(({ name }) => name === replaced.name)) {
+    throw new Error('a sign-in kept the cookies of a session the engine ended');
+  }
+  const stillAlive = await fetch(`${ENGINE}/auth/refresh`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ refreshToken: replaced.value.split('~')[0] }),
+  });
+  if (stillAlive.status !== 401) throw new Error(`a forgotten session still works: ${stillAlive.status}`);
+  log('a sign-in ends on the engine the session it replaces, and only then forgets its cookies');
   await first.bringToFront();
   await first.evaluate(() => window.dispatchEvent(new Event('focus')));
   await first.getByRole('button', { name: /browser-tab-a/ }).waitFor({ timeout: 5_000 });

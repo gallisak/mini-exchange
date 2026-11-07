@@ -2,6 +2,7 @@
 
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { toast } from 'sonner';
+import { SESSION_HEADER } from '@/lib/session-id';
 import { SESSION_CHANGED_EVENT, UNAUTHORIZED_EVENT, UnauthorizedDetail, api, rememberedSession, showingSession } from './api';
 import { SessionAnswer, trackSession } from './session-tracker';
 import { User } from './types';
@@ -36,7 +37,8 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
     () =>
       trackSession({
         remembered: rememberedSession(),
-        read: () => api<SessionAnswer>('/api/auth/session'),
+        read: (session) =>
+          api<SessionAnswer>('/api/auth/session', session ? { headers: { [SESSION_HEADER]: session } } : {}),
         pin: showingSession,
         show: (answer) => {
           setUser(answer.user);

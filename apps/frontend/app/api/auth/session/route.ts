@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { TokenPair, claimsOf, clearTokens, isFresh, readTokens, sessionsIn, storeTokens } from '@/lib/server/session';
-import { forgetLegacySessions, rotateTokens, unavailable } from '@/lib/server/upstream';
+import { finishEnding, forgetLegacySessions, rotateTokens, unavailable } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,6 +16,7 @@ export async function GET(request: NextRequest) {
     const response = NextResponse.json({ user, session: user ? session : null });
     if (tokens) storeTokens(response, tokens, session);
     if (!user) clearTokens(response, [session]);
+    await finishEnding(request, response, sessions, session);
     await forgetLegacySessions(request, response, sessions);
     return response;
   };

@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { newSession } from './session';
-import { sessionCookies } from './test-session';
+import { endingNote, sessionCookies } from './test-session';
 import { upstream, withSession } from './upstream';
 
 const token = (secondsLeft: number) =>
@@ -98,6 +98,66 @@ describe('calling a service with the session', () => {
     expect(cleared(response)).toBe(2);
     expect(stored(response, 'new-refresh')).toBe(false);
     expect(ended).toEqual([{ refreshToken: 'new-refresh' }]);
+  });
+
+  describe('with a session a sign-in could not end', () => {
+    const old = newSession();
+    const current = newSession();
+    const asking = (note: string, shows = current) =>
+      new NextRequest('http://exchange.test/api/wallet', {
+        headers: {
+          cookie: `${sessionCookies(token(900), 'old-refresh', old)}; ${sessionCookies(token(900), 'refresh', current)}; ${note}`,
+          'x-session-id': shows,
+        },
+      });
+    const engineEnding = (status: number) => {
+      const engine = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status }));
+      vi.stubGlobal('fetch', engine);
+      return engine;
+    };
+    const call = async () => ({ status: 200, body: {} });
+    const clearedNames = (response: Response) =>
+      response.headers
+        .getSetCookie()
+        .filter((cookie) => /Max-Age=0/.test(cookie))
+        .map((cookie) => cookie.split('=')[0]);
+
+    it('tries again on the next request, and forgets it once the engine ended it', async () => {
+      const engine = engineEnding(204);
+
+      const response = await withSession(asking(endingNote([old])), call);
+
+      expect(response.status).toBe(200);
+      expect(String(engine.mock.calls[0][0])).toMatch(/\/auth\/end-session$/);
+      expect(JSON.parse(String(engine.mock.calls[0][1]?.body))).toEqual({ refreshToken: 'old-refresh' });
+      expect(clearedNames(response).sort()).toEqual([`mx_access_${old}`, 'mx_ending', `mx_refresh_${old}`].sort());
+    });
+
+    it('keeps its cookies and the note while the engine cannot end it', async () => {
+      engineEnding(503);
+
+      const response = await withSession(asking(endingNote([old])), call);
+
+      expect(response.status).toBe(200);
+      expect(response.headers.getSetCookie()).toEqual([]);
+    });
+
+    it('ends nothing on a note the frontend did not sign, so a planted one cannot end a real session', async () => {
+      const engine = engineEnding(204);
+
+      const response = await withSession(asking(`mx_ending=${old}~${'0'.repeat(32)}`), call);
+
+      expect(engine).not.toHaveBeenCalled();
+      expect(response.headers.getSetCookie()).toEqual([]);
+    });
+
+    it('does not end the session a request came with, even if the note lists it', async () => {
+      const engine = engineEnding(204);
+
+      await withSession(asking(endingNote([old]), old), call);
+
+      expect(engine).not.toHaveBeenCalled();
+    });
   });
 
   it('answers 503 when the body of an answer breaks off, instead of failing the request', async () => {

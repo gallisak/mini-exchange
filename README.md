@@ -125,13 +125,14 @@ with every request as `x-session-id`, and the frontend uses exactly that pair of
 the newest. Only a page that knows no sign-in yet gets the newest.
 
 A sign-in ends on the engine every session the browser forgets, and a sign-out every older one. Their
-cookies go only after the engine answered that the session is over, within 2 s; otherwise they stay
-and the next sign-in or sign-out tries again, so no session is left for its 7 days without a token to
-end it. A sign-out that cannot end an older session answers 503, or that session would take over.
-`/api/auth/session` never ends a current session, so a planted cookie cannot end a real one through a
-page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
-once `COOKIE_SECURE=true` is on) are never used; those three routes end their sessions by the same
-rule and clear them on `/` and `/api`.
+cookies go only after the engine answered that the session is over, within 2 s; otherwise they stay,
+a sign-in lists them in `mx_ending`, a cookie signed with `FRONTEND_PROXY_KEY`, and the next request
+of another session tries again, so no session is left for its 7 days. A sign-out that cannot end an
+older session answers 503, or that session would take over. Apart from that list `/api/auth/session`
+and the other routes never end a session, and only the frontend can sign the list, so a planted cookie
+cannot end a real session through a page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
+once `COOKIE_SECURE=true` is on) are never used; sign-in, sign-out and `/api/auth/session` end their
+sessions by the same rule and clear them on `/` and `/api`.
 
 All tabs share the cookies, so a sign-in or sign-out reaches the other tabs through a
 `BroadcastChannel`, and a tab checks its session when it gets focus, at most every 30 s. In case a
@@ -139,6 +140,8 @@ tab hears neither, the frontend answers 409 to a request for a sign-in the brows
 a stale tab cannot trade, cancel or read on an account it does not show. The page then checks at once
 and moves to the newest sign-in, and a socket asking for a ticket stops asking. A check that fails is
 repeated once, and a signal that arrives during a check causes one more check, so news is not lost.
+A tab asks about a sign-in another tab announced, but its requests keep the id of the account it shows
+until the answer is on screen, so nothing is sent for an account the page does not show yet.
 A page keeps nothing of the account before it, and `/login` sends someone signed in onward. A session that turns out to be over is cleared only under the names the
 request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
 while a dead session is still forgotten at once; the page also ignores refusals of requests sent

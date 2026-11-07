@@ -118,17 +118,6 @@ case "$book_seq" in
 esac
 echo "OK: the public order book is at seq $book_seq"
 
-spoofed=$(seq 1 12 | while read -r n; do
-  curl -s -o /dev/null -w '%{http_code}\n' -X POST "$ENGINE_URL/auth/login" \
-    -H "x-forwarded-for: 10.9.8.$n" -H 'content-type: application/json' \
-    -d '{"email":"nobody@example.com","password":"wrong-password"}'
-done | grep -c '^429$' || true)
-if [ "$spoofed" -lt 1 ]; then
-  echo "FAIL: a forged X-Forwarded-For header gets around the login rate limit"
-  exit 1
-fi
-echo "OK: forging X-Forwarded-For does not get around the login rate limit"
-
 wait_for "frontend serves the order book page" \
   curl -fsS "$FRONTEND_URL/orderbook"
 
@@ -142,6 +131,17 @@ curl -fsS -b "$jar" -X POST "$FRONTEND_URL/api/orders" -H 'content-type: applica
 curl -fsS -b "$jar" "$FRONTEND_URL/api/wallet" | jq -e '.balances | length == 4' >/dev/null
 rm -f "$jar"
 echo "OK: the frontend signs in with httpOnly cookies, places an order and reads the wallet"
+
+spoofed=$(seq 1 12 | while read -r n; do
+  curl -s -o /dev/null -w '%{http_code}\n' -X POST "$ENGINE_URL/auth/login" \
+    -H "x-forwarded-for: 10.9.8.$n" -H 'content-type: application/json' \
+    -d '{"email":"nobody@example.com","password":"wrong-password"}'
+done | grep -c '^429$' || true)
+if [ "$spoofed" -lt 1 ]; then
+  echo "FAIL: a forged X-Forwarded-For header gets around the login rate limit"
+  exit 1
+fi
+echo "OK: forging X-Forwarded-For does not get around the login rate limit"
 
 forged=$(seq 1 12 | while read -r n; do
   curl -s -o /dev/null -w '%{http_code}\n' -X POST "$FRONTEND_URL/api/auth/login" \

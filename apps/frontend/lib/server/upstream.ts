@@ -9,10 +9,13 @@ import {
   askedForAnother,
   clearLegacyCookies,
   clearTokens,
+  endingIn,
   isFresh,
   legacySessions,
   readTokens,
   refreshOnce,
+  rememberEnding,
+  sessionsIn,
   storeTokens,
   tokensOf,
 } from './session';
@@ -131,8 +134,23 @@ export async function forgetLegacySessions(
 }
 
 export async function forgetSessions(request: NextRequest, response: NextResponse, sessions: string[]): Promise<void> {
-  clearTokens(response, await endSessions(request, sessions));
+  const ended = await endSessions(request, sessions);
+  clearTokens(response, ended);
+  rememberEnding(request, response, sessions.filter((session) => !ended.includes(session)));
   await forgetLegacySessions(request, response, sessions);
+}
+
+export async function finishEnding(
+  request: NextRequest,
+  response: NextResponse,
+  sessions: string[],
+  current: string,
+): Promise<void> {
+  const listed = endingIn(request, sessions);
+  const ended = await endSessions(request, listed.filter((session) => session !== current));
+  if (ended.length === 0) return;
+  clearTokens(response, ended);
+  rememberEnding(request, response, listed.filter((session) => !ended.includes(session)));
 }
 
 export function sessionChanged(): NextResponse {
@@ -146,8 +164,19 @@ export async function withSession(
   request: NextRequest,
   call: (accessToken: string) => Promise<UpstreamResult>,
 ): Promise<NextResponse> {
-  const tokens = readTokens(request);
+  const sessions = sessionsIn(request);
+  const tokens = readTokens(request, sessions);
   if (askedForAnother(request, tokens.session)) return sessionChanged();
+  const response = await callWith(request, tokens, call);
+  await finishEnding(request, response, sessions, tokens.session);
+  return response;
+}
+
+async function callWith(
+  request: NextRequest,
+  tokens: ReturnType<typeof readTokens>,
+  call: (accessToken: string) => Promise<UpstreamResult>,
+): Promise<NextResponse> {
   let rotated: TokenPair | null = null;
   let accessToken = tokens.accessToken;
 
