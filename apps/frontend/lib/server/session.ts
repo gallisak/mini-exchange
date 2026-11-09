@@ -1,4 +1,4 @@
-import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
+import { createHash, createHmac, hkdfSync, randomBytes, randomUUID, timingSafeEqual } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import { SESSION_HEADER } from '@/lib/session-id';
 
@@ -43,7 +43,9 @@ const cookieOptions = (maxAge: number) => ({
 });
 
 const SESSION_COOKIE = /^mx_(?:access|refresh)_([0-9a-z]{20}[0-9a-f]{16})$/;
-const ANY_SESSION_COOKIE = /^((?:__Host-)?mx_)(access|refresh)((?:_[0-9a-z]+)?)$/;
+const OLD_SESSION_COOKIE = /^((?:__Host-)?mx_)(access|refresh)((?:_[0-9a-z]{20}(?:[0-9a-f]{16})?)?)$/;
+const TOKEN_SHAPE = /^[\w-]+\.[\w-]+\.[\w-]+$/;
+export const OLD_SESSIONS_PER_REQUEST = 4;
 const VALUE_SEPARATOR = '~';
 
 const cookiePrefix = () => (secureCookies() ? '__Host-' : '');
@@ -54,10 +56,22 @@ const endingCookie = () => `${cookiePrefix()}${ENDING_COOKIE}`;
 
 const fallbackKey = process.env.NODE_ENV === 'production' ? null : randomBytes(32);
 
-function signingKey(): string | Buffer {
+const derivedKeys = new Map<string, Buffer>();
+
+export function derivedKey(key: string | Buffer, purpose: string): Buffer {
+  const id = `${purpose}:${Buffer.from(key).toString('hex')}`;
+  let derived = derivedKeys.get(id);
+  if (!derived) {
+    derived = Buffer.from(hkdfSync('sha256', key, '', purpose, 32));
+    derivedKeys.set(id, derived);
+  }
+  return derived;
+}
+
+function signingKey(): Buffer {
   const key = process.env.FRONTEND_PROXY_KEY || fallbackKey;
   if (!key) throw new Error('FRONTEND_PROXY_KEY must be set');
-  return key;
+  return derivedKey(key, 'mx-cookie-signing');
 }
 
 const hmac = (label: string, data: string) =>
@@ -120,8 +134,10 @@ export function readTokens(
   request: NextRequest,
   sessions: string[] = sessionsIn(request),
 ): Partial<TokenPair> & { session: string } {
+  const ending = endingIn(request, sessions);
+  const usable = sessions.filter((session) => !ending.includes(session));
   const asked = request.headers.get(SESSION_HEADER);
-  const session = asked && sessions.includes(asked) ? asked : sessions.at(-1);
+  const session = asked && usable.includes(asked) ? asked : usable.at(-1);
   return session ? { session, ...tokensOf(request, session) } : { session: '' };
 }
 
@@ -159,10 +175,6 @@ export function rememberEnding(request: NextRequest, response: NextResponse, ses
   }
 }
 
-export function olderSessions(sessions: string[], current: string): string[] {
-  return sessions.filter((session) => session < current);
-}
-
 export interface LegacySession {
   names: string[];
   refreshToken?: string;
@@ -174,13 +186,16 @@ export function legacySessions(request: NextRequest, sessions: string[] = sessio
   );
   const found = new Map<string, LegacySession>();
   for (const { name, value } of request.cookies.getAll()) {
-    const parts = ANY_SESSION_COOKIE.exec(name);
+    const parts = OLD_SESSION_COOKIE.exec(name);
     if (!parts || current.has(name)) continue;
     const [, prefix, kind, suffix] = parts;
-    const legacy = found.get(prefix + suffix) ?? { names: [] };
-    legacy.names.push(name);
-    if (kind === 'refresh' && value) legacy.refreshToken = value.split(VALUE_SEPARATOR)[0];
-    found.set(prefix + suffix, legacy);
+    const legacy = found.get(prefix + suffix);
+    if (!legacy && found.size >= OLD_SESSIONS_PER_REQUEST) continue;
+    const entry = legacy ?? { names: [] };
+    entry.names.push(name);
+    const token = value.split(VALUE_SEPARATOR)[0];
+    if (kind === 'refresh' && TOKEN_SHAPE.test(token)) entry.refreshToken = token;
+    found.set(prefix + suffix, entry);
   }
   return [...found.values()];
 }

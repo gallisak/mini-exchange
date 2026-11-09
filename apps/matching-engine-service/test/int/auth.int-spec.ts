@@ -116,13 +116,15 @@ describe('authentication sessions', () => {
     const session = await signUp();
     const { sub, jti, exp, iat } = claims(session.refreshToken);
     const secret = process.env.JWT_REFRESH_SECRET;
+    const sessions = app.get(DataSource).getRepository(RefreshSession);
+    const storedAs = (token: string) =>
+      sessions.update({ id: jti as string }, { tokenHash: createHash('sha256').update(token).digest('hex') });
 
-    await refresh(sign({ sub, jti, typ: 'access' }, secret)).expect(401);
+    const asAccess = sign({ sub, jti, iat, exp, typ: 'access' }, secret, {});
+    await storedAs(asAccess);
+    await refresh(asAccess).expect(401);
     const issuedBefore = sign({ sub, jti, iat, exp }, secret, {});
-    await app
-      .get(DataSource)
-      .getRepository(RefreshSession)
-      .update({ id: jti as string }, { tokenHash: createHash('sha256').update(issuedBefore).digest('hex') });
+    await storedAs(issuedBefore);
     await refresh(issuedBefore).expect(200);
   });
 

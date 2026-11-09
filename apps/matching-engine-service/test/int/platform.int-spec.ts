@@ -7,6 +7,7 @@ import { io } from 'socket.io-client';
 import request from 'supertest';
 import { EngineProcess, startEngine, stopEngine } from './engines';
 import { createApp, range, register, resetState, submit } from './harness';
+import { proxyHeaderFor } from '../../src/rate-limit/rate-limit.guard';
 
 function withEnv(overrides: Record<string, string>): () => void {
   const previous = Object.fromEntries(Object.keys(overrides).map((key) => [key, process.env[key]]));
@@ -61,7 +62,7 @@ describe('platform protections', () => {
         request(app.getHttpServer())
           .post('/auth/login')
           .set('x-client-ip', address)
-          .set('x-proxy-key', key)
+          .set('x-proxy-key', proxyHeaderFor(key))
           .send({ email: 'nobody@example.com', password: 'wrong-password' });
       try {
         for (let attempt = 0; attempt < 5; attempt += 1) await login('203.0.113.7', 'proxy-key');

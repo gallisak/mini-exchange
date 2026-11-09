@@ -292,9 +292,9 @@ function Ops() {
             </div>
             {badge && (
               <Badge variant={badge.variant} className="gap-1" data-testid="reconciliation-status">
-                {badge.icon === 'passed' && <CheckCircle2 className="h-3 w-3" />}
-                {badge.icon === 'stale' && <Clock className="h-3 w-3" />}
-                {badge.icon === 'failed' && <XCircle className="h-3 w-3" />}
+                {badge.state === 'passed' && <CheckCircle2 className="h-3 w-3" />}
+                {badge.state === 'stale' && <Clock className="h-3 w-3" />}
+                {badge.state === 'failed' && <XCircle className="h-3 w-3" />}
                 {badge.label}
               </Badge>
             )}

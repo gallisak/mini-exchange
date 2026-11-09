@@ -1,6 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { TokenPair, claimsOf, clearTokens, isFresh, readTokens, sessionsIn, storeTokens } from '@/lib/server/session';
-import { finishEnding, forgetLegacySessions, rotateTokens, unavailable } from '@/lib/server/upstream';
+import {
+  TokenPair,
+  claimsOf,
+  clearLegacyCookies,
+  clearTokens,
+  isFresh,
+  readTokens,
+  sessionsIn,
+  storeTokens,
+} from '@/lib/server/session';
+import { endLegacySessions, endListed, rotateTokens, unavailable } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
 
@@ -16,8 +25,9 @@ export async function GET(request: NextRequest) {
     const response = NextResponse.json({ user, session: user ? session : null });
     if (tokens) storeTokens(response, tokens, session);
     if (!user) clearTokens(response, [session]);
-    await finishEnding(request, response, sessions, session);
-    await forgetLegacySessions(request, response, sessions);
+    const [ended, legacy] = await Promise.all([endListed(request, sessions), endLegacySessions(request, sessions)]);
+    clearTokens(response, ended);
+    clearLegacyCookies(response, legacy);
     return response;
   };
   if (isFresh(accessToken)) return answer(userOf(accessToken));

@@ -88,10 +88,10 @@ export function OrderForm({ instrument }: { instrument: string }) {
     setter(event.target.value.trim());
   };
 
-  const editQuantity = (event: React.ChangeEvent<HTMLInputElement>) => {
-    if (event.target.value.trim() !== quantity) quantityRevision.current += 1;
-    setQuantity(event.target.value.trim());
-  };
+  const editQuantity = edit((value) => {
+    if (value !== quantity) quantityRevision.current += 1;
+    setQuantity(value);
+  });
 
   return (
     <Card>

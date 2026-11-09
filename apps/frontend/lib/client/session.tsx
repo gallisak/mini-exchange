@@ -11,6 +11,7 @@ interface SessionValue {
   user: User | null;
   session: string | null;
   loading: boolean;
+  unchecked: boolean;
   isSignedIn: (userId: string) => boolean;
   signIn: (mode: 'login' | 'register', email: string, password: string) => Promise<User>;
   signOut: () => Promise<void>;
@@ -28,6 +29,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   const [user, setUser] = useState<User | null>(null);
   const [session, setSession] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
+  const [unchecked, setUnchecked] = useState(false);
   const latestUser = useRef<User | null>(null);
   const shownBefore = useRef<User | null>(null);
   const channel = useRef<BroadcastChannel | null>(null);
@@ -44,7 +46,14 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
           setUser(answer.user);
           setSession(answer.session);
         },
-        settled: () => setLoading(false),
+        settled: () => {
+          setUnchecked(false);
+          setLoading(false);
+        },
+        unchecked: () => {
+          setUnchecked(true);
+          setLoading(false);
+        },
         now: () => performance.now(),
       }),
     [],
@@ -106,7 +115,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, [tracker]);
 
   return (
-    <SessionContext.Provider value={{ user, session, loading, isSignedIn, signIn, signOut, refresh: tracker.refresh }}>
+    <SessionContext.Provider value={{ user, session, loading, unchecked, isSignedIn, signIn, signOut, refresh: tracker.refresh }}>
       {children}
     </SessionContext.Provider>
   );

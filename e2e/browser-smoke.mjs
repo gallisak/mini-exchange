@@ -130,15 +130,16 @@ try {
   await buyer.getByLabel(/Quantity/).fill('1');
   await buyer.getByRole('button', { name: /^Buy ABC$/ }).click();
   await buyer.getByLabel(/Quantity/).fill('7');
+  await buyer.getByLabel(/Quantity/).fill('1');
   releaseOrder();
   await buyer.getByText(/Buy 1 ABC @ 1.00 accepted/).first().waitFor();
   await buyer.unroute('**/api/orders');
   await buyer.waitForTimeout(300);
-  if ((await buyer.getByLabel(/Quantity/).inputValue()) !== '7') {
-    throw new Error('the answer to an order wiped the quantity typed for the next one');
+  if ((await buyer.getByLabel(/Quantity/).inputValue()) !== '1') {
+    throw new Error('the answer to an order wiped the quantity typed for the next one, the same number as its own');
   }
   await buyer.getByLabel(/Quantity/).fill('');
-  log('the quantity typed for the next order survived the answer to the previous one');
+  log('the quantity typed for the next order survived the answer to the previous one, even the same number');
 
   let releaseSecond;
   const secondHeld = new Promise((resolve) => (releaseSecond = resolve));

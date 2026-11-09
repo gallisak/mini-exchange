@@ -26,7 +26,7 @@ const LINKS = [
 export function SiteHeader() {
   const pathname = usePathname();
   const router = useRouter();
-  const { user, loading, signOut } = useSession();
+  const { user, loading, unchecked, signOut } = useSession();
   const links = user?.role === 'admin' ? [...LINKS, { href: '/ops', label: 'Ops' }] : LINKS;
 
   return (
@@ -53,7 +53,7 @@ export function SiteHeader() {
           ))}
         </nav>
         <div className="ml-auto">
-          {loading ? null : user ? (
+          {loading || (unchecked && !user) ? null : user ? (
             <DropdownMenu>
               <DropdownMenuTrigger asChild>
                 <Button variant="outline" size="sm" className="gap-2">

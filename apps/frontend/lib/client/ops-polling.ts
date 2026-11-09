@@ -18,12 +18,11 @@ export type OpsView<T> =
   | { kind: 'error'; message: string }
   | { kind: 'report'; report: T; staleBecause: string | null };
 
+const BADGE_VARIANTS = { passed: 'secondary', stale: 'outline', failed: 'destructive' } as const;
+
 export function reconciliationBadge(status: string, stale: boolean) {
-  return {
-    label: stale ? `${status} · stale` : status,
-    variant: status !== 'ok' ? ('destructive' as const) : stale ? ('outline' as const) : ('secondary' as const),
-    icon: status !== 'ok' ? ('failed' as const) : stale ? ('stale' as const) : ('passed' as const),
-  };
+  const state = status !== 'ok' ? 'failed' : stale ? 'stale' : 'passed';
+  return { label: stale ? `${status} · stale` : status, state, variant: BADGE_VARIANTS[state] };
 }
 
 export function opsView<T>(report: T | null, error: string | null): OpsView<T> {

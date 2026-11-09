@@ -12,15 +12,15 @@ import { opsView, startOpsPolling, reconciliationBadge } from './ops-polling';
 
 describe('the reconciliation badge', () => {
   it('does not stay a clean ok next to a refresh that failed', () => {
-    expect(reconciliationBadge('ok', false)).toEqual({ label: 'ok', variant: 'secondary', icon: 'passed' });
-    expect(reconciliationBadge('ok', true)).toEqual({ label: 'ok · stale', variant: 'outline', icon: 'stale' });
+    expect(reconciliationBadge('ok', false)).toEqual({ label: 'ok', variant: 'secondary', state: 'passed' });
+    expect(reconciliationBadge('ok', true)).toEqual({ label: 'ok · stale', variant: 'outline', state: 'stale' });
   });
 
   it('keeps a mismatch red, stale or not', () => {
     expect(reconciliationBadge('mismatch', true)).toEqual({
       label: 'mismatch · stale',
       variant: 'destructive',
-      icon: 'failed',
+      state: 'failed',
     });
   });
 });

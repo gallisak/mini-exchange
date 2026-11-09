@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { newSession } from './session';
 import { endingNote, sessionCookies } from './test-session';
-import { upstream, withSession } from './upstream';
+import { forwardedHeaders, upstream, withSession } from './upstream';
 
 const token = (secondsLeft: number) =>
   ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: Math.floor(Date.now() / 1000) + secondsLeft })).toString('base64url'), 's'].join('.');
@@ -18,7 +18,7 @@ function upstreamAnswers(answer: (url: string, init?: RequestInit) => { status: 
     'fetch',
     vi.fn(async (url: string, init?: RequestInit) => {
       const { status, body } = answer(url, init);
-      return new Response(JSON.stringify(body), { status });
+      return new Response(status === 204 ? null : JSON.stringify(body), { status });
     }),
   );
 }
@@ -100,6 +100,24 @@ describe('calling a service with the session', () => {
     expect(ended).toEqual([{ refreshToken: 'new-refresh' }]);
   });
 
+  it('keeps the new pair and answers 503 when the engine cannot end a session a service refused, so the next request ends it', async () => {
+    const fresh = { accessToken: token(900), refreshToken: 'new-refresh' };
+    upstreamAnswers((url) => {
+      if (url.endsWith('/auth/refresh')) return { status: 200, body: fresh };
+      if (url.endsWith('/auth/end-session')) return { status: 503, body: {} };
+      return { status: 401, body: {} };
+    });
+    const incoming = request(token(900), 'refused-refresh');
+
+    const response = await withSession(incoming, (accessToken) =>
+      upstream(incoming, 'settlement', '/wallets/me', {}, accessToken),
+    );
+
+    expect(response.status).toBe(503);
+    expect(cleared(response)).toBe(0);
+    expect(stored(response, 'new-refresh')).toBe(true);
+  });
+
   describe('with a session a sign-in could not end', () => {
     const old = newSession();
     const current = newSession();
@@ -175,13 +193,42 @@ describe('calling a service with the session', () => {
       expect(response.headers.getSetCookie()).toEqual([]);
     });
 
-    it('does not end the session a request came with, even if the note lists it', async () => {
-      const engine = engineEnding(204);
+    it('refuses a request for a session a sign-in is ending, so the page moves to that sign-in', async () => {
+      engineEnding(204);
+      const slow = vi.fn(call);
 
-      await withSession(asking(endingNote([old]), old), call);
+      const response = await withSession(asking(endingNote([old]), old), slow);
 
-      expect(engine).not.toHaveBeenCalled();
+      expect(response.status).toBe(409);
+      expect(await response.json()).toMatchObject({ code: 'SESSION_CHANGED' });
+      expect(slow).not.toHaveBeenCalled();
     });
+
+    it('takes a session that is being ended for no sign-in at all once nothing else is left', async () => {
+      engineEnding(503);
+      const slow = vi.fn(call);
+      const incoming = new NextRequest('http://exchange.test/api/wallet', {
+        headers: { cookie: `${sessionCookies(token(900), 'old-refresh', old)}; ${endingNote([old])}`, 'x-session-id': old },
+      });
+
+      const response = await withSession(incoming, slow);
+
+      expect(response.status).toBe(401);
+      expect(slow).not.toHaveBeenCalled();
+    });
+  });
+
+  it('vouches for the address of the browser to the engine with a key made for that, and tells settlement nothing', () => {
+    vi.stubEnv('FRONTEND_PROXY_KEY', 'proxy-key');
+    const incoming = request(token(900), 'refresh', { 'x-forwarded-for': '203.0.113.7' });
+
+    const engine = forwardedHeaders(incoming, 'engine');
+    const settlement = forwardedHeaders(incoming, 'settlement');
+    vi.unstubAllEnvs();
+
+    expect(engine['x-client-ip']).toBe('203.0.113.7');
+    expect(engine['x-proxy-key']).toBe('45b3e07d034673b9e8bfa1e6e415e26a669844bdce1b7493ebe33c82d094cc76');
+    expect(settlement).toEqual({ 'x-request-id': expect.any(String) });
   });
 
   it('answers 503 when the body of an answer breaks off, instead of failing the request', async () => {

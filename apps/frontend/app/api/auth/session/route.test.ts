@@ -91,9 +91,9 @@ describe('asking who is signed in', () => {
       }),
     );
 
-    const response = await GET(asking('mx_refresh=old-refresh'));
+    const response = await GET(asking('mx_refresh=old.refresh.token'));
 
-    expect(ended).toEqual([{ refreshToken: 'old-refresh' }]);
+    expect(ended).toEqual([{ refreshToken: 'old.refresh.token' }]);
     const cleared = response.headers.getSetCookie();
     expect(cleared.map((cookie) => /Path=([^;]*)/.exec(cookie)?.[1])).toEqual(['/', '/api']);
     for (const cookie of cleared) expect(cookie).toMatch(/^mx_refresh=; Max-Age=0/);
@@ -102,9 +102,61 @@ describe('asking who is signed in', () => {
   it('keeps an old cookie the engine could not end, to try again', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
 
-    const response = await GET(asking('mx_refresh=old-refresh'));
+    const response = await GET(asking('mx_refresh=old.refresh.token'));
 
     expect(response.headers.getSetCookie()).toEqual([]);
+  });
+
+  it('clears an old cookie that holds no token without asking the engine', async () => {
+    const engine = vi.fn();
+    vi.stubGlobal('fetch', engine);
+
+    const response = await GET(asking('mx_refresh=planted'));
+
+    expect(engine).not.toHaveBeenCalled();
+    expect(response.headers.getSetCookie()).toHaveLength(2);
+  });
+
+  it('asks the engine to end only a few old sessions per request, however many cookies were planted', async () => {
+    const engine = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', engine);
+    const planted = Array.from({ length: 12 }, (_, n) => `mx_refresh_${String(n).padStart(20, '0')}=a.b.c`).join('; ');
+
+    await GET(asking(planted));
+
+    expect(engine).toHaveBeenCalledTimes(4);
+  });
+
+  it('moves a page off a session a sign-in is ending, to that sign-in, and ends the old one', async () => {
+    const engine = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', engine);
+    const { cookie, older, newer } = twoSignIns();
+
+    const response = await GET(asking(`${cookie}; ${endingNote([older])}`, { 'x-session-id': older }));
+
+    expect(await response.json()).toMatchObject({ user: { id: 'attacker' }, session: newer });
+    expect(JSON.parse(String(engine.mock.calls[0][1]?.body))).toEqual({ refreshToken: 'victim-refresh' });
+  });
+
+  it('ends a listed session and an old cookie side by side, and keeps every cookie it clears', async () => {
+    const waiting: (() => void)[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(
+        () =>
+          new Promise<Response>((resolve) => {
+            waiting.push(() => resolve(new Response(null, { status: 204 })));
+            if (waiting.length === 2) waiting.forEach((answer) => answer());
+            setTimeout(() => resolve(new Response('{}', { status: 503 })), 1_000);
+          }),
+      ),
+    );
+    const { cookie, older, newer } = twoSignIns();
+
+    const response = await GET(asking(`${cookie}; ${endingNote([older])}; mx_refresh=old.refresh.token`, { 'x-session-id': newer }));
+
+    const cleared = response.headers.getSetCookie().map((line) => line.split('=')[0]);
+    expect(cleared.sort()).toEqual([`mx_access_${older}`, `mx_refresh_${older}`, 'mx_refresh', 'mx_refresh'].sort());
   });
 
   it('clears old cookies alongside a rotation of the current session', async () => {

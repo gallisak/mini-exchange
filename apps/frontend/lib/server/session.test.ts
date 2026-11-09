@@ -6,8 +6,10 @@ import {
   REFRESH_REUSE_WINDOW_MS,
   REMEMBERED_SESSIONS,
   Rotation,
+  OLD_SESSIONS_PER_REQUEST,
   clearLegacyCookies,
   cookieName,
+  derivedKey,
   legacySessions,
   newSession,
   refreshOnce,
@@ -175,6 +177,17 @@ describe('the key that signs session cookies', () => {
   });
 });
 
+describe('the keys made from FRONTEND_PROXY_KEY', () => {
+  it('give cookies and the services keys of their own, neither of them the key itself', () => {
+    const cookies = derivedKey('proxy-key', 'mx-cookie-signing');
+    const proxy = derivedKey('proxy-key', 'mx-proxy');
+
+    expect(cookies.equals(proxy)).toBe(false);
+    expect(cookies.equals(Buffer.from('proxy-key'))).toBe(false);
+    expect(proxy.toString('hex')).toBe('45b3e07d034673b9e8bfa1e6e415e26a669844bdce1b7493ebe33c82d094cc76');
+  });
+});
+
 describe('reading the cookies of a request', () => {
   const carrying = (cookie: string) => new NextRequest('http://exchange.test/api/wallet', { headers: { cookie } });
 
@@ -211,20 +224,20 @@ describe('reading the cookies of a request', () => {
     const before = newSession();
     const cookie = [
       sessionCookies('access', 'refresh', session),
-      'mx_access=bare-access',
-      'mx_refresh=bare-refresh',
-      'mx_refresh_abcdefghij0123456789=short-refresh',
-      `${cookieName(REFRESH_COOKIE, before)}=unsigned-refresh`,
+      'mx_access=bare.access.token',
+      'mx_refresh=bare.refresh.token',
+      'mx_refresh_abcdefghij0123456789=short.refresh.token',
+      `${cookieName(REFRESH_COOKIE, before)}=unsigned.refresh.token`,
     ].join('; ');
 
     const found = legacySessions(carrying(cookie));
 
     expect(found.map(({ refreshToken }) => refreshToken).sort()).toEqual([
-      'bare-refresh',
-      'short-refresh',
-      'unsigned-refresh',
+      'bare.refresh.token',
+      'short.refresh.token',
+      'unsigned.refresh.token',
     ]);
-    expect(found.find(({ refreshToken }) => refreshToken === 'bare-refresh')?.names.sort()).toEqual([
+    expect(found.find(({ refreshToken }) => refreshToken === 'bare.refresh.token')?.names.sort()).toEqual([
       'mx_access',
       'mx_refresh',
     ]);
@@ -232,12 +245,28 @@ describe('reading the cookies of a request', () => {
 
   it('takes names without the prefix for old ones once cookies are secure, and sends their token without its signature', () => {
     const plain = newSession();
-    const cookie = sessionCookies('old-access', 'old-refresh', plain);
+    const cookie = sessionCookies('old.access.token', 'old.refresh.token', plain);
     vi.stubEnv('COOKIE_SECURE', 'true');
 
     expect(legacySessions(carrying(cookie))).toEqual([
-      { names: expect.arrayContaining([`mx_refresh_${plain}`, `mx_access_${plain}`]), refreshToken: 'old-refresh' },
+      { names: expect.arrayContaining([`mx_refresh_${plain}`, `mx_access_${plain}`]), refreshToken: 'old.refresh.token' },
     ]);
+  });
+
+  it('takes only the exact names older versions used, not any name that starts the same way', () => {
+    const cookie = ['mx_refresh_x=a.b.c', 'mx_refresh_ABCDEFGHIJ0123456789=a.b.c', `mx_refresh_${'a'.repeat(21)}=a.b.c`, 'mx_refreshes=a.b.c'].join('; ');
+
+    expect(legacySessions(carrying(cookie))).toEqual([]);
+  });
+
+  it('takes a few old sessions per request, however many cookies were planted', () => {
+    const cookie = Array.from({ length: 12 }, (_, n) => `mx_refresh_${String(n).padStart(20, '0')}=a.b.c`).join('; ');
+
+    expect(legacySessions(carrying(cookie))).toHaveLength(OLD_SESSIONS_PER_REQUEST);
+  });
+
+  it('sends no value that is not a token, and still lets its cookie be cleared', () => {
+    expect(legacySessions(carrying('mx_refresh=not-a-token'))).toEqual([{ names: ['mx_refresh'] }]);
   });
 
   it('clears an old cookie on both paths, and one with the prefix the only way a browser accepts', () => {

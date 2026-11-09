@@ -94,6 +94,19 @@ describe('a database that stops answering', () => {
     }
   });
 
+  it('makes its last attempt when its time is up, instead of pausing past it first', async () => {
+    const run = jest.spyOn(DataSource.prototype, 'runMigrations').mockRejectedValue(lockTimeout());
+    const started = Date.now();
+    try {
+      await expect(migrate(300, 60_000)).rejects.toThrow(/lock timeout/);
+
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(run).toHaveBeenCalledTimes(2);
+    } finally {
+      run.mockRestore();
+    }
+  });
+
   it('gives a migration a much shorter lock wait than other queries, so it holds up writes only briefly', async () => {
     delete process.env.MIGRATION_LOCK_TIMEOUT_MS;
     const dataSource = await new DataSource(migrationDataSourceOptions()).initialize();

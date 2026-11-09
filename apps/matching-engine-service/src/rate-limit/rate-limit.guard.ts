@@ -9,7 +9,7 @@ import {
   SetMetadata,
 } from '@nestjs/common';
 import { Reflector } from '@nestjs/core';
-import { createHash, timingSafeEqual } from 'crypto';
+import { createHash, hkdfSync, timingSafeEqual } from 'crypto';
 import { Request, Response } from 'express';
 import { RateLimitName, rateLimitPolicy } from './rate-limit.policies';
 import { RateLimitService } from './rate-limit.service';
@@ -19,8 +19,11 @@ const ADDRESS = /^[0-9A-Fa-f:.]{2,45}$/;
 
 const digest = (value: string) => createHash('sha256').update(value).digest();
 
+export const proxyHeaderFor = (key: string) => Buffer.from(hkdfSync('sha256', key, '', 'mx-proxy', 32)).toString('hex');
+
 export function clientAddress(request: Request): string | undefined {
-  const expected = process.env.FRONTEND_PROXY_KEY;
+  const key = process.env.FRONTEND_PROXY_KEY;
+  const expected = key && proxyHeaderFor(key);
   const provided = request.header('x-proxy-key');
   const forwarded = request.header('x-client-ip');
   if (

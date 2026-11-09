@@ -147,10 +147,14 @@ describe('trade events outbox', () => {
       const purge = jest.spyOn(instance, 'purgePublished').mockImplementation(
         () => new Promise<number>((resolve) => (finishPurge = () => resolve(0))),
       );
-      await dataSource.getRepository(OutboxMessage).insert({ stream: tradeStreamKey('ABC'), type: 'trade.executed', payload: {} });
+      const outbox = dataSource.getRepository(OutboxMessage);
+      await outbox.insert({ stream: tradeStreamKey('ABC'), type: 'trade.executed', payload: {} });
 
       instance.onApplicationBootstrap();
       await eventually(async () => expect(await tradeEvents()).toHaveLength(1));
+      await eventually(async () => expect(purge).toHaveBeenCalledTimes(1));
+      await outbox.insert({ stream: tradeStreamKey('ABC'), type: 'trade.executed', payload: {} });
+      await eventually(async () => expect(await tradeEvents()).toHaveLength(2));
 
       expect(purge).toHaveBeenCalledTimes(1);
       finishPurge();

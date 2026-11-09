@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { newSession } from '@/lib/server/session';
 import { endingNote, sessionCookies } from '@/lib/server/test-session';
+import { END_SESSION_TIMEOUT_MS, SIGN_OUT_END_TIMEOUT_MS } from '@/lib/timeouts';
 import { POST } from './route';
 
 const access = ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: Math.floor(Date.now() / 1000) + 900 })).toString('base64url'), 's'].join('.');
@@ -18,6 +19,7 @@ const cleared = (response: Response) =>
 describe('signing out through the frontend', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
+    vi.restoreAllMocks();
   });
 
   const carrying = (cookie: string, headers: Record<string, string> = {}) =>
@@ -64,7 +66,7 @@ describe('signing out through the frontend', () => {
     expect(response.status).toBe(204);
   });
 
-  it('clears the cookies when the engine says the session ended but its note is not written yet', async () => {
+  it('signs out when the engine says the session ended but its note is not written yet', async () => {
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => Response.json({ code: 'SESSION_ENDED', message: 'ended' }, { status: 503 })),
@@ -72,8 +74,25 @@ describe('signing out through the frontend', () => {
 
     const response = await POST(signedIn());
 
-    expect(response.status).toBe(503);
+    expect(response.status).toBe(204);
     expect(cleared(response)).toBe(2);
+  });
+
+  it('keeps the new pair and reports a failed sign-out when the engine refused it and could not end its session', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const path = new URL(url).pathname;
+        if (path === '/auth/refresh') return Response.json({ accessToken: 'new-access', refreshToken: 'new-refresh' });
+        return new Response('{}', { status: path === '/auth/logout' ? 401 : 503 });
+      }),
+    );
+
+    const response = await POST(signedIn());
+
+    expect(response.status).toBe(503);
+    expect(cleared(response)).toBe(0);
+    expect(response.headers.getSetCookie().some((cookie) => /^mx_refresh_[0-9a-z]+=new-refresh~/.test(cookie))).toBe(true);
   });
 
   it('forgets a session whose new access token the engine refused, since it is over', async () => {
@@ -130,6 +149,56 @@ describe('signing out through the frontend', () => {
     expect(paths.sort()).toEqual(['/auth/end-session', '/auth/logout']);
     expect(response.status).toBe(204);
     expect(cleared(response)).toBe(4);
+  });
+
+  it('ends a newer session too, so nothing is left to take over the page after a sign-out', async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const shown = newSession();
+    vi.setSystemTime(2_000_000);
+    const planted = newSession();
+    vi.useRealTimers();
+    const ended: unknown[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        if (new URL(url).pathname === '/auth/end-session') ended.push(JSON.parse(String(init.body)));
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const response = await POST(
+      carrying(`${sessionCookies(access, 'shown-refresh', shown)}; ${sessionCookies(access, 'planted-refresh', planted)}`, {
+        'x-session-id': shown,
+      }),
+    );
+
+    expect(ended).toEqual([{ refreshToken: 'planted-refresh' }]);
+    expect(response.status).toBe(204);
+    expect(cleared(response)).toBe(4);
+  });
+
+  it('refuses to sign out a session a sign-in is ending, so the page moves to that sign-in first', async () => {
+    const engine = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', engine);
+    vi.useFakeTimers({ now: 1_000_000 });
+    const old = newSession();
+    vi.useRealTimers();
+    const cookie = `${sessionCookies(access, 'old-refresh', old)}; ${sessionCookies(access, 'new-refresh')}; ${endingNote([old])}`;
+
+    const response = await POST(carrying(cookie, { 'x-session-id': old }));
+
+    expect(response.status).toBe(409);
+    expect(engine).not.toHaveBeenCalled();
+  });
+
+  it('waits for the end of another session as long as the engine may take, since the answer is shown to the user', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
+    const timeouts = vi.spyOn(AbortSignal, 'timeout');
+
+    await POST(carrying(signedInTwice()));
+
+    expect(timeouts).toHaveBeenCalledWith(SIGN_OUT_END_TIMEOUT_MS);
+    expect(timeouts).not.toHaveBeenCalledWith(END_SESSION_TIMEOUT_MS);
   });
 
   it('does not sign out while an older session could not be ended, or that session would take over', async () => {

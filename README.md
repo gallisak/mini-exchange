@@ -65,8 +65,9 @@ repeated rotation answered 503 rolls back instead of committing later, so a retr
 whose `COMMIT` has started is waited for, not answered 503. There are two exceptions. Ending a family
 caught reusing a token always commits, even after the client was answered 503, so slowing the
 database down cannot keep a stolen token alive. A sign-out can answer 503 after the session ended,
-when the note in Redis could not be written yet; the answer then carries `code: SESSION_ENDED`, the
-frontend drops the cookies, and signing out again is safe. If the `COMMIT` of a rotation outlasts the
+when the note in Redis could not be written yet; the answer then carries `code: SESSION_ENDED`, and the
+frontend counts it as a sign-out: it drops the cookies and answers 204, since the session is over and
+every engine keeps writing the note. If the `COMMIT` of a rotation outlasts the
 gateway the outcome is unknown, so a client that
 retries should send `attempt` to `/auth/refresh`, as the frontend always does: without it the retry
 counts as reuse and ends the session. A book that is stopped waits 15 s for its batch, then lets the fence
@@ -88,8 +89,10 @@ index concurrently. Such a build waits for every older transaction of the databa
 reads or writes, so it may wait `DATABASE_INDEX_LOCK_TIMEOUT_MS` (10 minutes) instead of the usual
 lock limit. A settlement migration that waits for a table lock holds up every read and write of that
 table behind it, so it waits only `MIGRATION_LOCK_TIMEOUT_MS` (1.5 s). A lock timeout (`55P03`) is
-retried for `MIGRATION_LOCK_RETRY_MS` (10 minutes) after pauses that grow to 15–30 s, so a migration
-behind a long reconciliation stops writes for 1.5 s out of every 15–30 s, not all the time. One that a failed build left invalid is dropped and built again on the next run, and a
+retried for `MIGRATION_LOCK_RETRY_MS` (10 minutes), with the last attempt when that time is up rather
+than after it, and pauses of 2.5–5 s, 5–10 s and 10–20 s, then 15–30 s each. A migration behind a long
+reconciliation so stops writes for 1.5 s at a time, with gaps of at least 2.5 s at first and 15 s
+from about the first half minute on, not all the time. One that a failed build left invalid is dropped and built again on the next run, and a
 follow-up migration does the same for an install that had already recorded the first one as done.
 The earlier ones took a write lock on their table while it was small.
 
@@ -103,18 +106,23 @@ docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget 
 token at once (a note in Redis for 30 minutes, twice the life of an access token, checked by both
 services and by every WebSocket connection) and closes its WebSocket connections. The ended session
 is recorded in Postgres in the same transaction, and every engine retries the Redis note until it is
-written. A sign-out answers 503 until the note is written, since an access token is refused only
-through that note (a Redis that refuses writes but still answers reads would otherwise let it work
-for up to 15 minutes); signing out again finishes it. Expired refresh sessions are deleted when an engine starts and hourly after that, skipping rows another engine is deleting; a stopping engine cancels a cleanup still running instead of waiting for it, and the cleanup keeps its connection until the cancel went through, so the cancel cannot reach a request that got that connection next. After its Redis subscription comes back an engine checks which
+written. The engine answers a sign-out 503 with `code: SESSION_ENDED` until the note is written, since
+an access token is refused only through that note (a Redis that refuses writes but still answers reads
+would otherwise let it work for up to 15 minutes); a client of the API can sign out again to finish
+it, while the frontend counts the session as signed out and leaves the note to the engines. Expired refresh sessions are deleted when an engine starts and hourly after that, skipping rows another engine is deleting; a stopping engine cancels a cleanup still running instead of waiting for it, and the cleanup keeps its connection until the cancel went through, so the cancel cannot reach a request that got that connection next. After its Redis subscription comes back an engine checks which
 connected sessions ended, and keeps checking until Redis answers instead of closing every connection. A rotation and a sign-out of the same user take one
 Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
 saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
 sign-out that did not go through instead of pretending it did; if the engine refuses an access
 token that looked valid, the frontend rotates it and signs out with the new one, so the refresh
-session ends too. Each sign-in gets its own pair of cookie names (`mx_access_<id>`,
-`mx_refresh_<id>`). The id is signed with `FRONTEND_PROXY_KEY`, so a cookie with a made-up name is
-ignored, however it sorts, and every value carries a signature over the id and its token, so a name
-cannot be moved onto another token. With `COOKIE_SECURE=true`, which any deployment over HTTPS should
+session ends too, and if the engine cannot end that new session yet, the frontend keeps its cookies
+and reports the sign-out as failed, so signing out again ends it. Each sign-in gets its own pair of
+cookie names (`mx_access_<id>`, `mx_refresh_<id>`). The id is signed with a key the frontend derives
+from `FRONTEND_PROXY_KEY` with HKDF, so a cookie with a made-up name is ignored, however it sorts, and
+every value carries a signature over the id and its token, so a name cannot be moved onto another
+token. The client address the frontend vouches for to the engine (`x-client-ip`) goes with another key
+derived from it (`x-proxy-key`), never the key itself, so a header that leaks into a log cannot sign a
+cookie; settlement, which has no rate limits, gets neither. With `COOKIE_SECURE=true`, which any deployment over HTTPS should
 set, the names start with `__Host-` and the cookies live on `/`, so a browser takes them only from
 this host over HTTPS and a neighbouring subdomain or a plain HTTP response cannot plant one. Plain
 HTTP cannot have that guarantee, so the default for `http://localhost` is the signed names alone, on
@@ -122,26 +130,39 @@ HTTP cannot have that guarantee, so the default for `http://localhost` is the si
 could still be planted there. Such a pair cannot take a session over: the page keeps the id of its own
 sign-in, given at sign-in and by `/api/auth/session` and remembered for the next page load, sends it
 with every request as `x-session-id`, and the frontend uses exactly that pair of cookies instead of
-the newest. Only a page that knows no sign-in yet gets the newest.
+the newest. Only `/api/auth/session` tells a page the newest, when the page knows no sign-in yet or
+its own is gone; every other route answers such a page 409. A sign-out ends every session the browser
+holds, newer ones included, so none is left to take over the page after it.
 
-A sign-in ends on the engine every session the browser forgets, and a sign-out every older one. Their
-cookies go only after the engine answered that the session is over, within 2 s; otherwise they stay,
-a sign-in lists them in `mx_ending`, a cookie signed with `FRONTEND_PROXY_KEY`, and the next request
-of another session tries again alongside its own call, so no session is left for its 7 days. That
-request only clears the cookies of what it ended: only a sign-in or a sign-out writes the list, so a
-request that crosses a sign-in cannot drop what the sign-in listed. A sign-out that cannot end an
-older session answers 503, or that session would take over. Apart from that list `/api/auth/session`
-and the other routes never end a session, and only the frontend can sign the list, so a planted cookie
-cannot end a real session through a page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
+A sign-in ends on the engine every session the browser forgets, and a sign-out every other one. Their
+cookies go only after the engine answered that the session is over, within 2 s (6 s for a sign-out,
+whose answer the user waits for and which the engine may take 5 s to give); otherwise they stay, a
+sign-in lists them in `mx_ending`, a cookie signed with the frontend's key, and the next request tries
+again alongside its own call, so no session is left for its 7 days. A listed session is no longer
+used, whether or not the engine has ended it yet: a request for it is answered 409, so a page that
+missed the sign-in moves to it instead of trading on in the old account. That request only clears the
+cookies of what it ended: only a sign-in or a sign-out writes the list, so a request that crosses a
+sign-in cannot drop what the sign-in listed. A sign-out that cannot end another session answers 503,
+or that session would take over. Apart from that list `/api/auth/session` and the other routes never
+end a session, and only the frontend can sign the list, so a planted cookie cannot end a real session
+through a page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
 once `COOKIE_SECURE=true` is on) are never used; sign-in, sign-out and `/api/auth/session` end their
-sessions by the same rule and clear them on `/` and `/api`.
+sessions by the same rule and clear them on `/` and `/api`. Only the exact names older versions gave
+count, four sessions at most per request, and a value that is not a token is cleared without asking
+the engine, so planted cookies cannot turn a page load into a flood of requests to the engine. A
+sign-in and `/api/auth/session` end listed sessions and old cookies side by side, then set the cookies
+in an order that keeps every one of them, since Next.js rewrites all `Set-Cookie` headers whenever it
+sets a cookie.
 
 All tabs share the cookies, so a sign-in or sign-out reaches the other tabs through a
 `BroadcastChannel`, and a tab checks its session when it gets focus, at most every 30 s. In case a
 tab hears neither, the frontend answers 409 to a request for a sign-in the browser no longer has, so
 a stale tab cannot trade, cancel or read on an account it does not show. The page then checks at once
 and moves to the newest sign-in, and a socket asking for a ticket stops asking. A check that fails is
-repeated once, and a signal that arrives during a check causes one more check, so news is not lost.
+repeated once, and a signal that arrives during a check causes one more check, so news is not lost. A
+check that still fails is tried again after 5 s, then after pauses that double up to 30 s, until it
+gets an answer. A first check that gets none keeps the remembered sign-in and says the page could not
+check it, instead of showing the user as signed out and making them sign in again.
 A tab asks about a sign-in another tab announced, but its requests keep the id of the account it shows
 until the answer is on screen, so nothing is sent for an account the page does not show yet. Once
 that question is answered, even with another sign-in because the announced one is already over, the
@@ -153,7 +174,8 @@ before the latest change of session. A refusal of the session the page shows sen
 card at once, and the page then checks whether the browser holds another sign-in, so a tab refused
 in the middle of a sign-in elsewhere moves to it, even when the refusal overtook a check already on
 its way. A service that refuses an access token just rotated means the
-session is over: its cookies are cleared and the new pair is ended, not stored. The attempt id of a rotation is
+session is over: its cookies are cleared and the new pair is ended, not stored; if the engine cannot
+end it yet, the new pair is stored and the answer is 503, so the next request ends it. The attempt id of a rotation is
 an HMAC of the cookies and the browser, so a retry always repeats it, whatever happened in between,
 without keeping anything in memory that other sessions could push out. An order
 answer only changes the stored attempt of the same send, and while an order is still on its way
@@ -464,6 +486,7 @@ Redis Streams is the order log and Redis is the coordinator.
 | Session cookies `mx_access`, `mx_refresh` on `/api` | Signed names and values on `/api`, on `/` with `__Host-` when `COOKIE_SECURE=true` | Everyone signs in once more after this change, and the old sessions are ended; a planted cookie must not pick the session |
 | Tokens told apart by which claims they lack | `typ` claim: `access`, `refresh` or `ws`, required by whoever takes the token | A new kind of token cannot pass as an old one. Tokens without `typ` are still taken until the last of them expires, 7 days after this change; then drop `issuedBeforeTypes` in both `token-claims.ts` and the `undefined` case of `isTokenOfType` |
 | `POST /auth/register` of a taken email → 409 | 409 only with another password; the same password signs in | A registration whose answer was lost can be repeated |
+| `x-proxy-key` carried `FRONTEND_PROXY_KEY`, which also signed the cookies | Two keys derived from it with HKDF, one for the header and one for the cookies | A header that leaks cannot sign cookies. Update the engines and the frontend together, or the engines count the frontend's address instead of the user's for a while; everyone signs in once more, and the old sessions are ended |
 | `ledger.assetsNotBalanced` in a reconciliation report | `assetsNotBalanced` next to `ledger`, only when something is off | It describes the whole ledger, not the period |
 
 ## Not done, or done differently next time

@@ -7,14 +7,13 @@ import {
   SessionTokens,
   TokenPair,
   askedForAnother,
-  clearLegacyCookies,
   clearTokens,
+  derivedKey,
   endingIn,
   isFresh,
   legacySessions,
   readTokens,
   refreshOnce,
-  rememberEnding,
   sessionsIn,
   storeTokens,
   tokensOf,
@@ -36,14 +35,14 @@ function clientAddress(request: NextRequest): string | undefined {
   return request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() || undefined;
 }
 
-export function forwardedHeaders(request: NextRequest): Record<string, string> {
+export function forwardedHeaders(request: NextRequest, service: Service): Record<string, string> {
   const headers: Record<string, string> = {
     'x-request-id': request.headers.get('x-request-id') ?? randomUUID(),
   };
   const proxyKey = process.env.FRONTEND_PROXY_KEY;
   const address = clientAddress(request);
-  if (proxyKey && address) {
-    headers['x-proxy-key'] = proxyKey;
+  if (service === 'engine' && proxyKey && address) {
+    headers['x-proxy-key'] = derivedKey(proxyKey, 'mx-proxy').toString('hex');
     headers['x-client-ip'] = address;
   }
   return headers;
@@ -66,7 +65,7 @@ export async function upstream(
       signal: AbortSignal.timeout(timeoutMs),
       headers: {
         'content-type': 'application/json',
-        ...forwardedHeaders(request),
+        ...forwardedHeaders(request, service),
         ...(accessToken ? { authorization: `Bearer ${accessToken}` } : {}),
         ...(options.headers ?? {}),
       },
@@ -101,56 +100,45 @@ export function rotateTokens(request: NextRequest, tokens: SessionTokens): Promi
 export const endedTheSession = ({ body }: UpstreamResult) =>
   (body as { code?: unknown } | null)?.code === SESSION_ENDED;
 
-export async function endRefreshToken(request: NextRequest, refreshToken: string): Promise<boolean> {
+export async function endRefreshToken(
+  request: NextRequest,
+  refreshToken: string,
+  timeoutMs = END_SESSION_TIMEOUT_MS,
+): Promise<boolean> {
   const result = await upstream(request, 'engine', '/auth/end-session', {
     method: 'POST',
     body: JSON.stringify({ refreshToken }),
-    timeoutMs: END_SESSION_TIMEOUT_MS,
+    timeoutMs,
   });
   const over = (result.status >= 200 && result.status < 300) || result.status === 400 || result.status === 401;
   return over || endedTheSession(result);
 }
 
-export async function endSessions(request: NextRequest, sessions: string[]): Promise<string[]> {
+export async function endSessions(
+  request: NextRequest,
+  sessions: string[],
+  timeoutMs = END_SESSION_TIMEOUT_MS,
+): Promise<string[]> {
   const ended = await Promise.all(
     sessions.map(async (session) => {
       const { refreshToken } = tokensOf(request, session);
-      return !refreshToken || (await endRefreshToken(request, refreshToken));
+      return !refreshToken || (await endRefreshToken(request, refreshToken, timeoutMs));
     }),
   );
   return sessions.filter((_, index) => ended[index]);
 }
 
-export async function forgetLegacySessions(
-  request: NextRequest,
-  response: NextResponse,
-  sessions: string[],
-): Promise<void> {
-  await Promise.all(
-    legacySessions(request, sessions).map(async ({ names, refreshToken }) => {
-      if (!refreshToken || (await endRefreshToken(request, refreshToken))) clearLegacyCookies(response, names);
-    }),
+export async function endLegacySessions(request: NextRequest, sessions: string[]): Promise<string[]> {
+  const ended = await Promise.all(
+    legacySessions(request, sessions).map(async ({ names, refreshToken }) =>
+      !refreshToken || (await endRefreshToken(request, refreshToken)) ? names : [],
+    ),
   );
+  return ended.flat();
 }
 
-export async function forgetSessions(request: NextRequest, response: NextResponse, sessions: string[]): Promise<void> {
-  const ended = await endSessions(request, sessions);
-  clearTokens(response, ended);
-  rememberEnding(request, response, sessions.filter((session) => !ended.includes(session)));
-  await forgetLegacySessions(request, response, sessions);
-}
-
-function endListed(request: NextRequest, sessions: string[], current: string): Promise<string[]> {
-  return endSessions(request, endingIn(request, sessions).filter((session) => session !== current));
-}
-
-export async function finishEnding(
-  request: NextRequest,
-  response: NextResponse,
-  sessions: string[],
-  current: string,
-): Promise<void> {
-  clearTokens(response, await endListed(request, sessions, current));
+export function endListed(request: NextRequest, sessions: string[]): Promise<string[]> {
+  return endSessions(request, endingIn(request, sessions));
 }
 
 export function sessionChanged(): NextResponse {
@@ -167,12 +155,50 @@ export async function withSession(
   const sessions = sessionsIn(request);
   const tokens = readTokens(request, sessions);
   if (askedForAnother(request, tokens.session)) return sessionChanged();
-  const [response, ended] = await Promise.all([
-    callWith(request, tokens, call),
-    endListed(request, sessions, tokens.session),
-  ]);
+  const [response, ended] = await Promise.all([callWith(request, tokens, call), endListed(request, sessions)]);
   clearTokens(response, ended);
   return response;
+}
+
+export type SessionCall =
+  | { kind: 'answered'; result: UpstreamResult; rotated: TokenPair | null }
+  | { kind: 'over' }
+  | { kind: 'unavailable'; rotated: TokenPair | null };
+
+const rotationFailed = (outcome: Rotation): SessionCall =>
+  outcome.kind === 'invalid' ? { kind: 'over' } : { kind: 'unavailable', rotated: null };
+
+export async function callRotating(
+  request: NextRequest,
+  tokens: Partial<TokenPair>,
+  call: (accessToken: string) => Promise<UpstreamResult>,
+  endTimeoutMs = END_SESSION_TIMEOUT_MS,
+): Promise<SessionCall> {
+  const { refreshToken } = tokens;
+  const rotate = () => rotateTokens(request, { refreshToken: refreshToken as string, accessToken: tokens.accessToken });
+  let rotated: TokenPair | null = null;
+  let accessToken = tokens.accessToken;
+
+  if (!isFresh(accessToken) && refreshToken) {
+    const outcome = await rotate();
+    if (outcome.kind !== 'rotated') return rotationFailed(outcome);
+    rotated = outcome.tokens;
+    accessToken = rotated.accessToken;
+  }
+  if (!accessToken) return { kind: 'over' };
+
+  let result = await call(accessToken);
+  if (result.status === 401 && refreshToken && !rotated) {
+    const outcome = await rotate();
+    if (outcome.kind !== 'rotated') return rotationFailed(outcome);
+    rotated = outcome.tokens;
+    result = await call(rotated.accessToken);
+  }
+  if (result.status !== 401) return { kind: 'answered', result, rotated };
+  if (rotated && !(await endRefreshToken(request, rotated.refreshToken, endTimeoutMs))) {
+    return { kind: 'unavailable', rotated };
+  }
+  return { kind: 'over' };
 }
 
 async function callWith(
@@ -180,39 +206,11 @@ async function callWith(
   tokens: ReturnType<typeof readTokens>,
   call: (accessToken: string) => Promise<UpstreamResult>,
 ): Promise<NextResponse> {
-  let rotated: TokenPair | null = null;
-  let accessToken = tokens.accessToken;
-
-  const rotate = async (): Promise<NextResponse | null> => {
-    const outcome = await rotateTokens(request, {
-      refreshToken: tokens.refreshToken as string,
-      accessToken: tokens.accessToken,
-    });
-    if (outcome.kind === 'invalid') return unauthorized(tokens.session);
-    if (outcome.kind === 'unavailable') return unavailable();
-    rotated = outcome.tokens;
-    accessToken = outcome.tokens.accessToken;
-    return null;
-  };
-
-  if (!isFresh(accessToken) && tokens.refreshToken) {
-    const failure = await rotate();
-    if (failure) return failure;
-  }
-  if (!accessToken) return unauthorized(tokens.session);
-
-  let result = await call(accessToken);
-  if (result.status === 401 && tokens.refreshToken && !rotated) {
-    const failure = await rotate();
-    if (failure) return failure;
-    result = await call(accessToken);
-  }
-  if (result.status === 401) {
-    if (rotated) await endRefreshToken(request, (rotated as TokenPair).refreshToken);
-    return unauthorized(tokens.session);
-  }
-  const response = NextResponse.json(result.body, { status: result.status });
-  if (rotated) storeTokens(response, rotated, tokens.session);
+  const outcome = await callRotating(request, tokens, call);
+  if (outcome.kind === 'over') return unauthorized(tokens.session);
+  const response =
+    outcome.kind === 'answered' ? NextResponse.json(outcome.result.body, { status: outcome.result.status }) : unavailable();
+  if (outcome.rotated) storeTokens(response, outcome.rotated, tokens.session);
   return response;
 }
 

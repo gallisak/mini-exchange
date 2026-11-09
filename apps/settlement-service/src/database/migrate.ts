@@ -46,7 +46,8 @@ export async function migrate(
       if ((error as { code?: unknown }).code !== LOCK_NOT_AVAILABLE || Date.now() >= deadline) throw error;
       console.error(`A migration waited too long for a lock, trying again: ${(error as Error).message}`);
     }
-    await new Promise((resolve) => setTimeout(resolve, pauseBeforeRetry(attempt, firstPauseMs)));
+    const pause = Math.min(pauseBeforeRetry(attempt, firstPauseMs), Math.max(0, deadline - Date.now()));
+    await new Promise((resolve) => setTimeout(resolve, pause));
   }
 }
 

@@ -14,21 +14,31 @@ interface Deps {
   pin: (session: string | null) => void;
   show: (answer: SessionAnswer) => void;
   settled: () => void;
+  unchecked: () => void;
   now: () => number;
   wait?: (ms: number) => Promise<void>;
+  schedule?: (ms: number, run: () => Promise<void>) => void;
 }
 
 export const FOCUS_CHECK_EVERY_MS = 30_000;
+export const FIRST_RETRY_MS = 5_000;
+export const LONGEST_RETRY_MS = 30_000;
 const START_RETRIES = 4;
 const RECHECK_RETRIES = 1;
 const NOBODY: SessionAnswer = { user: null, session: null };
 
-export function trackSession({ remembered, read, pin, show, settled, now, wait }: Deps) {
+const later = (ms: number, run: () => Promise<void>) => {
+  setTimeout(() => void run(), ms);
+};
+
+export function trackSession({ remembered, read, pin, show, settled, unchecked, now, wait, schedule = later }: Deps) {
   let shown: SessionAnswer = { user: null, session: remembered };
   let generation = 0;
   let signedInAt = 0;
   let focusCheckedAt = -Infinity;
   let announcedSession: string | null = null;
+  let retryPause = 0;
+  let retryPending = false;
 
   const present = (answer: SessionAnswer) => {
     shown = answer;
@@ -59,8 +69,11 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
     };
     const outcome = await checkSession(ask, () => generation === started, retries, wait);
     if (outcome && 'answer' in outcome) {
+      retryPause = 0;
       if (announcedSession === asked) announcedSession = null;
       apply(outcome.answer);
+    } else if (outcome) {
+      retryLater();
     }
     return outcome;
   };
@@ -68,6 +81,16 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
   const recheck = coalesced(async () => {
     await loadSession({ retries: RECHECK_RETRIES });
   });
+
+  const retryLater = () => {
+    if (retryPending) return;
+    retryPending = true;
+    retryPause = Math.min(retryPause ? retryPause * 2 : FIRST_RETRY_MS, LONGEST_RETRY_MS);
+    schedule(retryPause, () => {
+      retryPending = false;
+      return recheck();
+    });
+  };
 
   return {
     recheck,
@@ -77,7 +100,7 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
     },
     async refresh() {
       const outcome = await loadSession({ retries: START_RETRIES });
-      if (outcome && 'failed' in outcome) apply(NOBODY);
+      if (outcome && 'failed' in outcome) unchecked();
     },
     signedOut() {
       announcedSession = null;

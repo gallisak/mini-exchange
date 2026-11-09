@@ -3,7 +3,7 @@
 import { Fragment } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Lock } from 'lucide-react';
+import { Lock, WifiOff } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { LoadingRows } from '@/components/states';
@@ -17,10 +17,21 @@ export function RequireSession({
   admin?: boolean;
   children: (user: User) => React.ReactNode;
 }) {
-  const { user, loading } = useSession();
+  const { user, loading, unchecked } = useSession();
   const pathname = usePathname();
 
   if (loading) return <LoadingRows rows={6} />;
+  if (!user && unchecked) {
+    return (
+      <Card className="mx-auto mt-10 max-w-md text-center">
+        <CardHeader>
+          <WifiOff className="mx-auto h-8 w-8 text-muted-foreground" />
+          <CardTitle>Could not check your sign-in</CardTitle>
+          <CardDescription>The exchange is not answering. This page tries again by itself.</CardDescription>
+        </CardHeader>
+      </Card>
+    );
+  }
   if (!user || (admin && user.role !== 'admin')) {
     return (
       <Card className="mx-auto mt-10 max-w-md text-center">

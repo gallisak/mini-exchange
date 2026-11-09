@@ -2,77 +2,53 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   TokenPair,
   askedForAnother,
+  clearLegacyCookies,
   clearTokens,
-  endingIn,
-  isFresh,
-  olderSessions,
   readTokens,
   rememberEnding,
   sessionsIn,
   storeTokens,
 } from '@/lib/server/session';
 import {
-  endRefreshToken,
+  callRotating,
+  endLegacySessions,
   endSessions,
   endedTheSession,
-  forgetLegacySessions,
-  rotateTokens,
   sessionChanged,
   upstream,
 } from '@/lib/server/upstream';
+import { SIGN_OUT_END_TIMEOUT_MS } from '@/lib/timeouts';
 
 export async function POST(request: NextRequest) {
   const sessions = sessionsIn(request);
   const { accessToken, refreshToken, session } = readTokens(request, sessions);
   if (askedForAnother(request, session)) return sessionChanged();
 
-  const older = olderSessions(sessions, session);
-  const ended = await endSessions(request, older);
-  const notSignedOut = (status: number) => {
+  const others = sessions.filter((id) => id !== session);
+  const ended = await endSessions(request, others, SIGN_OUT_END_TIMEOUT_MS);
+  const notSignedOut = (status: number, rotated: TokenPair | null = null) => {
     const response = NextResponse.json({ message: 'Could not sign out, try again' }, { status });
     clearTokens(response, ended);
+    if (rotated) storeTokens(response, rotated, session);
     return response;
   };
-  if (ended.length < older.length) return notSignedOut(503);
+  if (ended.length < others.length) return notSignedOut(503);
 
-  let token = isFresh(accessToken) ? accessToken : undefined;
-  let rotated: TokenPair | null = null;
-  const rotate = async (): Promise<NextResponse | null> => {
-    if (!refreshToken) return null;
-    const outcome = await rotateTokens(request, { refreshToken, accessToken });
-    if (outcome.kind === 'unavailable') return notSignedOut(503);
-    rotated = outcome.kind === 'rotated' ? outcome.tokens : null;
-    token = rotated?.accessToken;
-    return null;
-  };
+  const outcome = await callRotating(
+    request,
+    { accessToken, refreshToken },
+    (token) => upstream(request, 'engine', '/auth/logout', { method: 'POST' }, token),
+    SIGN_OUT_END_TIMEOUT_MS,
+  );
+  if (outcome.kind === 'unavailable') return notSignedOut(503, outcome.rotated);
+  if (outcome.kind === 'answered' && outcome.result.status !== 204 && !endedTheSession(outcome.result)) {
+    const { status } = outcome.result;
+    return notSignedOut(status >= 500 ? status : 502, outcome.rotated);
+  }
 
-  if (!token) {
-    const failure = await rotate();
-    if (failure) return failure;
-  }
-  if (token) {
-    let result = await upstream(request, 'engine', '/auth/logout', { method: 'POST' }, token);
-    if (result.status === 401 && !rotated) {
-      const failure = await rotate();
-      if (failure) return failure;
-      if (token) result = await upstream(request, 'engine', '/auth/logout', { method: 'POST' }, token);
-    }
-    if (endedTheSession(result)) {
-      const response = notSignedOut(result.status);
-      clearTokens(response, [session]);
-      return response;
-    }
-    if (result.status === 401 && rotated) await endRefreshToken(request, (rotated as TokenPair).refreshToken);
-    if (result.status !== 204 && result.status !== 401) {
-      const response = notSignedOut(result.status >= 500 ? result.status : 502);
-      if (rotated) storeTokens(response, rotated, session);
-      return response;
-    }
-  }
   const response = new NextResponse(null, { status: 204 });
-  const over = [...ended, session];
-  clearTokens(response, over);
-  rememberEnding(request, response, endingIn(request, sessions).filter((id) => !over.includes(id)));
-  await forgetLegacySessions(request, response, sessions);
+  clearTokens(response, [...ended, session]);
+  rememberEnding(request, response, []);
+  clearLegacyCookies(response, await endLegacySessions(request, sessions));
   return response;
 }

@@ -267,15 +267,38 @@ describe('signing in through the frontend', () => {
   it('ends a session of an old cookie and clears it on both paths when someone signs in', async () => {
     const engine = engineEnding(204);
 
-    const response = await signInOver('mx_access=old-access; mx_refresh=old-refresh');
+    const response = await signInOver('mx_access=old.access.token; mx_refresh=old.refresh.token');
 
     const ended = engine.mock.calls.find(([url]) => String(url).endsWith('/auth/end-session'));
-    expect(JSON.parse(String(ended?.[1]?.body))).toEqual({ refreshToken: 'old-refresh' });
+    expect(JSON.parse(String(ended?.[1]?.body))).toEqual({ refreshToken: 'old.refresh.token' });
     const cleared = response.headers.getSetCookie().filter((cookie) => /Max-Age=0/.test(cookie));
     for (const name of ['mx_access', 'mx_refresh']) {
       expect(cleared.filter((cookie) => cookie.startsWith(`${name}=`) && /Path=\/api(;|$)/.test(cookie))).toHaveLength(1);
       expect(cleared.filter((cookie) => cookie.startsWith(`${name}=`) && /Path=\/(;|$)/.test(cookie))).toHaveLength(1);
     }
     expect(response.headers.getSetCookie().filter((cookie) => !/Max-Age=0/.test(cookie))).toHaveLength(2);
+  });
+
+  it('ends a forgotten session and an old cookie side by side, and keeps every cookie it clears', async () => {
+    const tokens = { accessToken: 'a.e30.s', refreshToken: 'refresh' };
+    const waiting: (() => void)[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (!String(url).endsWith('/auth/end-session')) return Promise.resolve(new Response(JSON.stringify(tokens), { status: 200 }));
+        return new Promise<Response>((resolve) => {
+          waiting.push(() => resolve(new Response(null, { status: 204 })));
+          if (waiting.length === 2) waiting.forEach((answer) => answer());
+          setTimeout(() => resolve(new Response('{}', { status: 503 })), 1_000);
+        });
+      }),
+    );
+    const old = newSession();
+
+    const response = await signInOver(`${sessionCookies('old-access', 'old-refresh', old)}; mx_refresh=old.refresh.token`);
+
+    expect(clearedNames(response)).toEqual(
+      [cookieName(ACCESS_COOKIE, old), cookieName(REFRESH_COOKIE, old), 'mx_refresh', 'mx_refresh'].sort(),
+    );
   });
 });

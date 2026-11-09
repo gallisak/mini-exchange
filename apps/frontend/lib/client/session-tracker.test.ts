@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 import { ApiError } from './api';
-import { FOCUS_CHECK_EVERY_MS, SessionAnswer, trackSession } from './session-tracker';
+import { FIRST_RETRY_MS, FOCUS_CHECK_EVERY_MS, LONGEST_RETRY_MS, SessionAnswer, trackSession } from './session-tracker';
 
 const signedInAs = (name: string, role: 'user' | 'admin' = 'user'): SessionAnswer => ({
   user: { id: `id-${name}`, email: `${name}@example.com`, role },
@@ -18,16 +18,21 @@ function tracked(reads: (SessionAnswer | Error | Promise<SessionAnswer>)[], reme
     return next as SessionAnswer | Promise<SessionAnswer>;
   });
   const settled = vi.fn();
+  const unchecked = vi.fn();
+  const retries: { ms: number; run: () => Promise<void> }[] = [];
   const tracker = trackSession({
     remembered,
     read,
     pin: (session) => pins.push(session),
     show: (answer) => shown.push(answer),
     settled,
+    unchecked,
     now: () => time,
     wait: async () => undefined,
+    schedule: (ms, run) => retries.push({ ms, run }),
   });
-  return { tracker, read, shown, pins, settled, pass: (ms: number) => (time += ms) };
+  const retry = () => (retries.shift() as { run: () => Promise<void> }).run();
+  return { tracker, read, shown, pins, settled, unchecked, retries, retry, pass: (ms: number) => (time += ms) };
 }
 
 const held = () => {
@@ -130,12 +135,62 @@ describe('following the session of a tab', () => {
     expect(shown).toEqual([signedInAs('a')]);
   });
 
-  it('counts as signed out when the first check never gets an answer', async () => {
-    const { tracker, settled } = tracked([new ApiError(503, 'down')]);
+  it('checks again later after a recheck failed, so a change it missed still reaches the tab', async () => {
+    const down = new ApiError(503, 'down');
+    const { tracker, shown, retries, retry } = tracked([signedInAs('a'), down, down, signedInAs('b')]);
+    await tracker.refresh();
+    await tracker.recheck();
+
+    expect(retries.map(({ ms }) => ms)).toEqual([FIRST_RETRY_MS]);
+    await retry();
+
+    expect(shown.at(-1)).toEqual(signedInAs('b'));
+    expect(retries).toEqual([]);
+  });
+
+  it('keeps one retry waiting at a time, however many checks fail meanwhile', async () => {
+    const { tracker, retries } = tracked([signedInAs('a'), new ApiError(503, 'down')]);
+    await tracker.refresh();
+
+    await tracker.recheck();
+    await tracker.recheck();
+
+    expect(retries).toHaveLength(1);
+  });
+
+  it('keeps the remembered sign-in and says it could not check when the first check never gets an answer', async () => {
+    const { tracker, shown, pins, settled, unchecked, retries } = tracked([new ApiError(503, 'down')], 'session-a');
 
     await tracker.refresh();
 
+    expect(unchecked).toHaveBeenCalled();
+    expect(settled).not.toHaveBeenCalled();
+    expect(shown).toEqual([]);
+    expect(pins).toEqual([]);
+    expect(retries.map(({ ms }) => ms)).toEqual([FIRST_RETRY_MS]);
+  });
+
+  it('keeps trying a first check that failed, waiting longer each time, and shows the sign-in once it gets an answer', async () => {
+    const down = new ApiError(503, 'down');
+    const { tracker, shown, pins, settled, retries, retry } = tracked(
+      [down, down, down, down, down, ...Array.from({ length: 8 }, () => down), signedInAs('a')],
+      'session-a',
+    );
+    await tracker.refresh();
+
+    const pauses = [];
+    for (let attempt = 0; attempt < 4; attempt += 1) {
+      pauses.push(retries[0].ms);
+      await retry();
+    }
+    expect(pauses).toEqual([FIRST_RETRY_MS, 2 * FIRST_RETRY_MS, 4 * FIRST_RETRY_MS, LONGEST_RETRY_MS]);
+    expect(retries.map(({ ms }) => ms)).toEqual([LONGEST_RETRY_MS]);
+    await retry();
+
+    expect(shown).toEqual([signedInAs('a')]);
+    expect(pins).toEqual(['session-a']);
     expect(settled).toHaveBeenCalled();
+    expect(retries).toEqual([]);
   });
 
   it('does not render again when a recheck finds the same user', async () => {
