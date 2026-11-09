@@ -26,6 +26,6 @@ export async function signIn(request: NextRequest, path: '/auth/login' | '/auth/
   const [ended, legacy] = await Promise.all([endSessions(request, forgotten), endLegacySessions(request, forgotten)]);
   clearTokens(response, ended);
   rememberEnding(request, response, forgotten.filter((id) => !ended.includes(id)));
-  clearLegacyCookies(response, legacy);
+  clearLegacyCookies(response, legacy.names);
   return response;
 }

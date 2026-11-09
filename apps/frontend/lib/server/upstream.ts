@@ -100,6 +100,12 @@ export function rotateTokens(request: NextRequest, tokens: SessionTokens): Promi
 export const endedTheSession = ({ body }: UpstreamResult) =>
   (body as { code?: unknown } | null)?.code === SESSION_ENDED;
 
+const sessionIsOver = (result: UpstreamResult) =>
+  (result.status >= 200 && result.status < 300) ||
+  result.status === 400 ||
+  result.status === 401 ||
+  endedTheSession(result);
+
 export async function endRefreshToken(
   request: NextRequest,
   refreshToken: string,
@@ -110,8 +116,18 @@ export async function endRefreshToken(
     body: JSON.stringify({ refreshToken }),
     timeoutMs,
   });
-  const over = (result.status >= 200 && result.status < 300) || result.status === 400 || result.status === 401;
-  return over || endedTheSession(result);
+  return sessionIsOver(result);
+}
+
+export async function endTokens(
+  request: NextRequest,
+  { refreshToken, accessToken }: Partial<TokenPair>,
+  timeoutMs = END_SESSION_TIMEOUT_MS,
+): Promise<boolean> {
+  if (refreshToken) return endRefreshToken(request, refreshToken, timeoutMs);
+  if (!accessToken) return true;
+  const result = await upstream(request, 'engine', '/auth/logout', { method: 'POST', timeoutMs }, accessToken);
+  return sessionIsOver(result);
 }
 
 export async function endSessions(
@@ -119,22 +135,26 @@ export async function endSessions(
   sessions: string[],
   timeoutMs = END_SESSION_TIMEOUT_MS,
 ): Promise<string[]> {
-  const ended = await Promise.all(
-    sessions.map(async (session) => {
-      const { refreshToken } = tokensOf(request, session);
-      return !refreshToken || (await endRefreshToken(request, refreshToken, timeoutMs));
-    }),
-  );
+  const ended = await Promise.all(sessions.map((session) => endTokens(request, tokensOf(request, session), timeoutMs)));
   return sessions.filter((_, index) => ended[index]);
 }
 
-export async function endLegacySessions(request: NextRequest, sessions: string[]): Promise<string[]> {
+export interface LegacyEnding {
+  names: string[];
+  complete: boolean;
+}
+
+export async function endLegacySessions(
+  request: NextRequest,
+  sessions: string[],
+  timeoutMs = END_SESSION_TIMEOUT_MS,
+): Promise<LegacyEnding> {
   const ended = await Promise.all(
-    legacySessions(request, sessions).map(async ({ names, refreshToken }) =>
-      !refreshToken || (await endRefreshToken(request, refreshToken)) ? names : [],
+    legacySessions(request, sessions).map(async ({ names, ...tokens }) =>
+      (await endTokens(request, tokens, timeoutMs)) ? names : null,
     ),
   );
-  return ended.flat();
+  return { names: ended.flatMap((names) => names ?? []), complete: !ended.includes(null) };
 }
 
 export function endListed(request: NextRequest, sessions: string[]): Promise<string[]> {

@@ -46,7 +46,7 @@ export function useTrades(instrument: string) {
     const onTrade = (trade: Trade) => {
       if (trade.instrument !== instrument) return;
       if (!loaded.current) {
-        arrived.current.push(trade);
+        arrived.current = mergeTrades(arrived.current, [trade], KEEP);
         return;
       }
       const skipped = skipsTrades(newest.current, trade);

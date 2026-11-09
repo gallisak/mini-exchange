@@ -27,7 +27,7 @@ export async function GET(request: NextRequest) {
     if (!user) clearTokens(response, [session]);
     const [ended, legacy] = await Promise.all([endListed(request, sessions), endLegacySessions(request, sessions)]);
     clearTokens(response, ended);
-    clearLegacyCookies(response, legacy);
+    clearLegacyCookies(response, legacy.names);
     return response;
   };
   if (isFresh(accessToken)) return answer(userOf(accessToken));

@@ -25,14 +25,18 @@ export async function POST(request: NextRequest) {
   if (askedForAnother(request, session)) return sessionChanged();
 
   const others = sessions.filter((id) => id !== session);
-  const ended = await endSessions(request, others, SIGN_OUT_END_TIMEOUT_MS);
+  const [ended, legacy] = await Promise.all([
+    endSessions(request, others, SIGN_OUT_END_TIMEOUT_MS),
+    endLegacySessions(request, sessions, SIGN_OUT_END_TIMEOUT_MS),
+  ]);
   const notSignedOut = (status: number, rotated: TokenPair | null = null) => {
     const response = NextResponse.json({ message: 'Could not sign out, try again' }, { status });
     clearTokens(response, ended);
     if (rotated) storeTokens(response, rotated, session);
+    clearLegacyCookies(response, legacy.names);
     return response;
   };
-  if (ended.length < others.length) return notSignedOut(503);
+  if (ended.length < others.length || !legacy.complete) return notSignedOut(503);
 
   const outcome = await callRotating(
     request,
@@ -49,6 +53,6 @@ export async function POST(request: NextRequest) {
   const response = new NextResponse(null, { status: 204 });
   clearTokens(response, [...ended, session]);
   rememberEnding(request, response, []);
-  clearLegacyCookies(response, await endLegacySessions(request, sessions));
+  clearLegacyCookies(response, legacy.names);
   return response;
 }

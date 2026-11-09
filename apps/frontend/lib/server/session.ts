@@ -178,6 +178,7 @@ export function rememberEnding(request: NextRequest, response: NextResponse, ses
 export interface LegacySession {
   names: string[];
   refreshToken?: string;
+  accessToken?: string;
 }
 
 export function legacySessions(request: NextRequest, sessions: string[] = sessionsIn(request)): LegacySession[] {
@@ -194,7 +195,7 @@ export function legacySessions(request: NextRequest, sessions: string[] = sessio
     const entry = legacy ?? { names: [] };
     entry.names.push(name);
     const token = value.split(VALUE_SEPARATOR)[0];
-    if (kind === 'refresh' && TOKEN_SHAPE.test(token)) entry.refreshToken = token;
+    if (TOKEN_SHAPE.test(token)) entry[kind === 'refresh' ? 'refreshToken' : 'accessToken'] = token;
     found.set(prefix + suffix, entry);
   }
   return [...found.values()];

@@ -131,33 +131,37 @@ could still be planted there. Such a pair cannot take a session over: the page k
 sign-in, given at sign-in and by `/api/auth/session` and remembered for the next page load, sends it
 with every request as `x-session-id`, and the frontend uses exactly that pair of cookies instead of
 the newest. Only `/api/auth/session` tells a page the newest, when the page knows no sign-in yet or
-its own is gone; every other route answers 409 to a page whose own sign-in is gone. A sign-out ends every session the browser
-holds, newer ones included, so none is left to take over the page after it.
+its own is gone; every other route answers 409 to a page whose own sign-in is gone while the browser
+holds another, and 401 once it holds none. A sign-out ends every session the browser holds, newer
+ones included, so none is left to take over the page after it.
 
-A sign-in ends on the engine every session the browser forgets, and a sign-out every other one. Their
-cookies go only after the engine answered that the session is over, within 2 s (6 s for a sign-out,
+A sign-in ends on the engine every session the browser forgets, and a sign-out every other one, by its
+refresh token, or by its access token when only that cookie is left. Their cookies go only after the
+engine answered that the session is over, within 2 s (6 s for a sign-out,
 whose answer the user waits for and which the engine may take 5 s to give); otherwise they stay, a
 sign-in lists them in `mx_ending`, a cookie signed with the frontend's key, and the next request tries
 again alongside its own call, so no session is left for its 7 days. A listed session is no longer
-used, whether or not the engine has ended it yet: a request for it is answered 409, so a page that
-missed the sign-in moves to it instead of trading on in the old account. That request only clears the
+used, whether or not the engine has ended it yet: a request for it is answered 409 while the sign-in
+that listed it is there, so a page that missed the sign-in moves to it instead of trading on in the
+old account. That request only clears the
 cookies of what it ended: only a sign-in or a sign-out writes the list, so a request that crosses a
 sign-in cannot drop what the sign-in listed. A sign-out that cannot end another session answers 503,
 or that session would take over. Apart from that list `/api/auth/session` and the other routes never
 end a session, and only the frontend can sign the list, so a planted cookie cannot end a real session
 through a page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
 once `COOKIE_SECURE=true` is on) are never used; sign-in, sign-out and `/api/auth/session` end their
-sessions by the same rule and clear them on `/` and `/api`. Only the exact names older versions gave
+sessions by the same rule and clear them on `/` and `/api`, and a sign-out waits 6 s for them too and
+answers 503 while one of them is not ended. Only the exact names older versions gave
 count, four sessions at most per request, and a value that is not a token is cleared without asking
 the engine, so planted cookies cannot turn a page load into a flood of requests to the engine. A
-sign-in and `/api/auth/session` end listed sessions and old cookies side by side, then set the cookies
+sign-in, a sign-out and `/api/auth/session` end those sessions and old cookies side by side, then set the cookies
 in an order that keeps every one of them, since Next.js rewrites all `Set-Cookie` headers whenever it
 sets a cookie.
 
 All tabs share the cookies, so a sign-in or sign-out reaches the other tabs through a
 `BroadcastChannel`, and a tab checks its session when it gets focus, at most every 30 s. In case a
-tab hears neither, the frontend answers 409 to a request for a sign-in the browser no longer has, so
-a stale tab cannot trade, cancel or read on an account it does not show. The page then checks at once
+tab hears neither, the frontend answers 409 to a request for a sign-in the browser no longer has (401
+when it holds no sign-in at all), so a stale tab cannot trade, cancel or read on an account it does not show. The page then checks at once
 and moves to the newest sign-in, and a socket asking for a ticket stops asking. A check that fails is
 repeated once, and a signal that arrives during a check causes one more check, so news is not lost. A
 check that still fails is tried again after 5 s, then after pauses that double up to 30 s, until it

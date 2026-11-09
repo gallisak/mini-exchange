@@ -249,7 +249,17 @@ describe('reading the cookies of a request', () => {
     vi.stubEnv('COOKIE_SECURE', 'true');
 
     expect(legacySessions(carrying(cookie))).toEqual([
-      { names: expect.arrayContaining([`mx_refresh_${plain}`, `mx_access_${plain}`]), refreshToken: 'old.refresh.token' },
+      {
+        names: expect.arrayContaining([`mx_refresh_${plain}`, `mx_access_${plain}`]),
+        refreshToken: 'old.refresh.token',
+        accessToken: 'old.access.token',
+      },
+    ]);
+  });
+
+  it('keeps the access token of an old session whose refresh cookie is gone, so that session can still be ended', () => {
+    expect(legacySessions(carrying('mx_access=bare.access.token'))).toEqual([
+      { names: ['mx_access'], accessToken: 'bare.access.token' },
     ]);
   });
 

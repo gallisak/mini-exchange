@@ -264,6 +264,33 @@ describe('signing in through the frontend', () => {
     for (const cookie of response.headers.getSetCookie()) expect(cookie).toMatch(/; Path=\/api(;|$)/i);
   });
 
+  it('ends a forgotten session that has only its access cookie left with that token, and keeps it while the engine cannot', async () => {
+    const tokens = { accessToken: 'a.e30.s', refreshToken: 'refresh' };
+    const old = newSession();
+    const signInWhileLogoutAnswers = async (status: number) => {
+      const calls: { path: string; authorization: string | null }[] = [];
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async (url: string, init: RequestInit) => {
+          const path = new URL(url).pathname;
+          calls.push({ path, authorization: new Headers(init.headers).get('authorization') });
+          return path === '/auth/logout' ? new Response(status === 204 ? null : '{}', { status }) : Response.json(tokens);
+        }),
+      );
+      return { calls, response: await signInOver(sessionCookies('old.access.token', undefined, old)) };
+    };
+
+    const ended = await signInWhileLogoutAnswers(204);
+
+    expect(ended.calls).toContainEqual({ path: '/auth/logout', authorization: 'Bearer old.access.token' });
+    expect(clearedNames(ended.response)).toEqual([cookieName(ACCESS_COOKIE, old), cookieName(REFRESH_COOKIE, old)].sort());
+
+    const kept = await signInWhileLogoutAnswers(503);
+
+    expect(clearedNames(kept.response)).toEqual([]);
+    expect(kept.response.headers.getSetCookie().some((cookie) => cookie.startsWith(`mx_ending=${old}~`))).toBe(true);
+  });
+
   it('ends a session of an old cookie and clears it on both paths when someone signs in', async () => {
     const engine = engineEnding(204);
 

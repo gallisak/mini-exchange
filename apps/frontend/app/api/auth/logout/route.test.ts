@@ -218,6 +218,67 @@ describe('signing out through the frontend', () => {
     expect(cleared(response)).toBe(0);
   });
 
+  it('does not sign out while an old cookie could not be ended, and waits for it as long as for any other session', async () => {
+    const paths: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        paths.push(new URL(url).pathname);
+        return new Response('{}', { status: new URL(url).pathname === '/auth/end-session' ? 503 : 204 });
+      }),
+    );
+    const timeouts = vi.spyOn(AbortSignal, 'timeout');
+
+    const response = await POST(carrying(`${sessionCookies(access, 'refresh')}; mx_refresh=old.refresh.token`));
+
+    expect(paths).toEqual(['/auth/end-session']);
+    expect(timeouts).toHaveBeenCalledWith(SIGN_OUT_END_TIMEOUT_MS);
+    expect(timeouts).not.toHaveBeenCalledWith(END_SESSION_TIMEOUT_MS);
+    expect(response.status).toBe(503);
+    expect(response.headers.getSetCookie()).toEqual([]);
+  });
+
+  it('ends an old cookie alongside the other sessions, and clears it with them', async () => {
+    const waiting: (() => void)[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (new URL(url).pathname !== '/auth/end-session') return Promise.resolve(new Response(null, { status: 204 }));
+        return new Promise<Response>((resolve) => {
+          waiting.push(() => resolve(new Response(null, { status: 204 })));
+          if (waiting.length === 2) waiting.forEach((answer) => answer());
+          setTimeout(() => resolve(new Response('{}', { status: 503 })), 1_000);
+        });
+      }),
+    );
+
+    const response = await POST(carrying(`${signedInTwice()}; mx_refresh=old.refresh.token`));
+
+    expect(response.status).toBe(204);
+    expect(cleared(response)).toBe(4);
+    expect(response.headers.getSetCookie().filter((cookie) => /^mx_refresh=; Max-Age=0/.test(cookie))).toHaveLength(2);
+  });
+
+  it('ends another session that has only its access cookie left with that token', async () => {
+    vi.useFakeTimers({ now: 1_000_000 });
+    const older = newSession();
+    vi.useRealTimers();
+    const calls: { path: string; authorization: string | null }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ path: new URL(url).pathname, authorization: new Headers(init.headers).get('authorization') });
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const response = await POST(carrying(`${sessionCookies('older.access.token', undefined, older)}; ${sessionCookies(access, 'refresh')}`));
+
+    expect(calls).toContainEqual({ path: '/auth/logout', authorization: 'Bearer older.access.token' });
+    expect(response.status).toBe(204);
+    expect(cleared(response)).toBe(4);
+  });
+
   it('does not report success or forget the session when the engine could not end it', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
 

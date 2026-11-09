@@ -99,6 +99,22 @@ describe('asking who is signed in', () => {
     for (const cookie of cleared) expect(cookie).toMatch(/^mx_refresh=; Max-Age=0/);
   });
 
+  it('ends the session of an old cookie with its access token when its refresh cookie is gone', async () => {
+    const calls: { path: string; authorization: string | null }[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ path: new URL(url).pathname, authorization: new Headers(init.headers).get('authorization') });
+        return new Response(null, { status: 204 });
+      }),
+    );
+
+    const response = await GET(asking('mx_access=old.access.token'));
+
+    expect(calls).toEqual([{ path: '/auth/logout', authorization: 'Bearer old.access.token' }]);
+    expect(response.headers.getSetCookie().filter((cookie) => /^mx_access=; Max-Age=0/.test(cookie))).toHaveLength(2);
+  });
+
   it('keeps an old cookie the engine could not end, to try again', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response('{}', { status: 503 })));
 
