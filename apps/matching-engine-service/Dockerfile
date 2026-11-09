@@ -1,4 +1,7 @@
 FROM node:20-alpine AS build
+RUN apk add --no-cache python3 make g++
+ENV npm_config_build_from_source=true \
+    npm_config_nodedir=/usr/local
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci

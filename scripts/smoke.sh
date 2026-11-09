@@ -122,8 +122,18 @@ wait_for "frontend serves the order book page" \
   curl -fsS "$FRONTEND_URL/orderbook"
 
 jar=$(mktemp)
-curl -fsS -c "$jar" -X POST "$FRONTEND_URL/api/auth/register" -H 'content-type: application/json' \
-  -d "{\"email\":\"frontend-$(date +%s)@example.com\",\"password\":\"password123\"}" >/dev/null
+register_through_frontend() {
+  curl -sS -o /dev/null -w '%{http_code}' -c "$jar" -X POST "$FRONTEND_URL/api/auth/register" \
+    -H 'content-type: application/json' \
+    -d "{\"email\":\"frontend-$(date +%s)@example.com\",\"password\":\"password123\"}"
+}
+deadline=$(($(date +%s) + 70))
+status=$(register_through_frontend)
+while [ "$status" = 429 ] && [ "$(date +%s)" -lt "$deadline" ]; do
+  sleep 5
+  status=$(register_through_frontend)
+done
+[ "$status" = 200 ] || { echo "FAIL: signing up through the frontend answered $status"; exit 1; }
 grep -q 'HttpOnly_.*mx_refresh' "$jar" || { echo "FAIL: the frontend did not keep the session in an httpOnly cookie"; exit 1; }
 curl -fsS -b "$jar" -X POST "$FRONTEND_URL/api/orders" -H 'content-type: application/json' \
   -H "idempotency-key: frontend-$(date +%s)" \
