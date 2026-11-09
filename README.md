@@ -127,7 +127,9 @@ the newest. Only a page that knows no sign-in yet gets the newest.
 A sign-in ends on the engine every session the browser forgets, and a sign-out every older one. Their
 cookies go only after the engine answered that the session is over, within 2 s; otherwise they stay,
 a sign-in lists them in `mx_ending`, a cookie signed with `FRONTEND_PROXY_KEY`, and the next request
-of another session tries again, so no session is left for its 7 days. A sign-out that cannot end an
+of another session tries again alongside its own call, so no session is left for its 7 days. That
+request only clears the cookies of what it ended: only a sign-in or a sign-out writes the list, so a
+request that crosses a sign-in cannot drop what the sign-in listed. A sign-out that cannot end an
 older session answers 503, or that session would take over. Apart from that list `/api/auth/session`
 and the other routes never end a session, and only the frontend can sign the list, so a planted cookie
 cannot end a real session through a page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
@@ -141,7 +143,9 @@ a stale tab cannot trade, cancel or read on an account it does not show. The pag
 and moves to the newest sign-in, and a socket asking for a ticket stops asking. A check that fails is
 repeated once, and a signal that arrives during a check causes one more check, so news is not lost.
 A tab asks about a sign-in another tab announced, but its requests keep the id of the account it shows
-until the answer is on screen, so nothing is sent for an account the page does not show yet.
+until the answer is on screen, so nothing is sent for an account the page does not show yet. Once
+that question is answered, even with another sign-in because the announced one is already over, the
+tab stops asking about it, unless a newer announcement came in meanwhile.
 A page keeps nothing of the account before it, and `/login` sends someone signed in onward. A session that turns out to be over is cleared only under the names the
 request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
 while a dead session is still forgotten at once; the page also ignores refusals of requests sent

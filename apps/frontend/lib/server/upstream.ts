@@ -140,17 +140,17 @@ export async function forgetSessions(request: NextRequest, response: NextRespons
   await forgetLegacySessions(request, response, sessions);
 }
 
+function endListed(request: NextRequest, sessions: string[], current: string): Promise<string[]> {
+  return endSessions(request, endingIn(request, sessions).filter((session) => session !== current));
+}
+
 export async function finishEnding(
   request: NextRequest,
   response: NextResponse,
   sessions: string[],
   current: string,
 ): Promise<void> {
-  const listed = endingIn(request, sessions);
-  const ended = await endSessions(request, listed.filter((session) => session !== current));
-  if (ended.length === 0) return;
-  clearTokens(response, ended);
-  rememberEnding(request, response, listed.filter((session) => !ended.includes(session)));
+  clearTokens(response, await endListed(request, sessions, current));
 }
 
 export function sessionChanged(): NextResponse {
@@ -167,8 +167,11 @@ export async function withSession(
   const sessions = sessionsIn(request);
   const tokens = readTokens(request, sessions);
   if (askedForAnother(request, tokens.session)) return sessionChanged();
-  const response = await callWith(request, tokens, call);
-  await finishEnding(request, response, sessions, tokens.session);
+  const [response, ended] = await Promise.all([
+    callWith(request, tokens, call),
+    endListed(request, sessions, tokens.session),
+  ]);
+  clearTokens(response, ended);
   return response;
 }
 

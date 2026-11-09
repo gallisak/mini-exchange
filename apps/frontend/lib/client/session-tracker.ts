@@ -52,9 +52,14 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
 
   const loadSession = async ({ retries }: { retries: number }) => {
     const started = generation;
-    const outcome = await checkSession(() => read(announcedSession), () => generation === started, retries, wait);
+    let asked: string | null = null;
+    const ask = () => {
+      asked = announcedSession;
+      return read(asked);
+    };
+    const outcome = await checkSession(ask, () => generation === started, retries, wait);
     if (outcome && 'answer' in outcome) {
-      if (outcome.answer.session === announcedSession) announcedSession = null;
+      if (announcedSession === asked) announcedSession = null;
       apply(outcome.answer);
     }
     return outcome;

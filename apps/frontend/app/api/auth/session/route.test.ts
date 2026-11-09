@@ -50,7 +50,7 @@ describe('asking who is signed in', () => {
     expect(JSON.parse(String(engine.mock.calls[0][1]?.body))).toEqual({ refreshToken: 'victim-refresh' });
     expect(engine).toHaveBeenCalledOnce();
     const cleared = response.headers.getSetCookie().map((line) => line.split('=')[0]);
-    expect(cleared.sort()).toEqual([`mx_access_${older}`, 'mx_ending', `mx_refresh_${older}`].sort());
+    expect(cleared.sort()).toEqual([`mx_access_${older}`, `mx_refresh_${older}`].sort());
   });
 
   it('stays with the sign-in the page shows when a newer one appears', async () => {

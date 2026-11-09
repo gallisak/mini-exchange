@@ -216,6 +216,30 @@ describe('following the session of a tab', () => {
     expect(read).toHaveBeenLastCalledWith(null);
   });
 
+  it('stops asking for an announced sign-in that turned out to be over', async () => {
+    const { tracker, read, shown } = tracked([signedInAs('a')]);
+    await tracker.refresh();
+
+    await tracker.announced('session-b');
+    await tracker.recheck();
+
+    expect(read.mock.calls.map(([session]) => session)).toEqual([null, 'session-b', null]);
+    expect(shown.at(-1)).toEqual(signedInAs('a'));
+  });
+
+  it('still asks for a sign-in announced while an earlier check was running', async () => {
+    const slow = held();
+    const { tracker, read, shown } = tracked([slow.promise, signedInAs('b')]);
+    const running = tracker.recheck();
+
+    const announcing = tracker.announced('session-b');
+    slow.answer(signedInAs('a'));
+    await Promise.all([running, announcing]);
+
+    expect(read.mock.calls.map(([session]) => session)).toEqual([null, 'session-b']);
+    expect(shown.at(-1)).toEqual(signedInAs('b'));
+  });
+
   it('ignores a check that was running when the user signed in', async () => {
     const slow = held();
     const { tracker, shown } = tracked([slow.promise]);

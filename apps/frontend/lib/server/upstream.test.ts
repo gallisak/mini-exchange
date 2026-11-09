@@ -130,7 +130,31 @@ describe('calling a service with the session', () => {
       expect(response.status).toBe(200);
       expect(String(engine.mock.calls[0][0])).toMatch(/\/auth\/end-session$/);
       expect(JSON.parse(String(engine.mock.calls[0][1]?.body))).toEqual({ refreshToken: 'old-refresh' });
-      expect(clearedNames(response).sort()).toEqual([`mx_access_${old}`, 'mx_ending', `mx_refresh_${old}`].sort());
+      expect(clearedNames(response).sort()).toEqual([`mx_access_${old}`, `mx_refresh_${old}`].sort());
+    });
+
+    it('leaves the note alone, so a request that crossed a sign-in cannot drop what that sign-in noted', async () => {
+      engineEnding(204);
+
+      const response = await withSession(asking(endingNote([old])), call);
+
+      expect(response.headers.getSetCookie().filter((cookie) => cookie.startsWith('mx_ending'))).toEqual([]);
+    });
+
+    it('ends the session alongside the call instead of after it', async () => {
+      const engine = engineEnding(204);
+      let finish!: () => void;
+      const slow = vi.fn(
+        () => new Promise<{ status: number; body: unknown }>((resolve) => (finish = () => resolve({ status: 200, body: {} }))),
+      );
+
+      const answered = withSession(asking(endingNote([old])), slow);
+      await vi.waitFor(() => expect(engine).toHaveBeenCalledOnce());
+      finish();
+      const response = await answered;
+
+      expect(slow).toHaveBeenCalledOnce();
+      expect(clearedNames(response).sort()).toEqual([`mx_access_${old}`, `mx_refresh_${old}`].sort());
     });
 
     it('keeps its cookies and the note while the engine cannot end it', async () => {
