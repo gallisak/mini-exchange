@@ -144,6 +144,7 @@ services:
     environment:
       MATCHING_ENGINE_URL: http://matching-engine-service:3001
       SETTLEMENT_URL: http://settlement-service:3002
+      ALLOW_INSECURE_COOKIES: 'true'
     <<: *secrets-loader
     command: ['node', 'server.js']
     volumes:

@@ -37,9 +37,23 @@ describe('secrets of the frontend', () => {
     expect(warn).toHaveBeenCalledOnce();
   });
 
+  it('refuse cookies a neighbouring subdomain can plant in production, unless a stack over plain HTTP allows them', () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('FRONTEND_PROXY_KEY', 'a1b2c3');
+    vi.stubEnv('COOKIE_SECURE', 'false');
+    expect(() => refuseUnsafeSecrets()).toThrow('COOKIE_SECURE must be true');
+
+    vi.stubEnv('ALLOW_INSECURE_COOKIES', 'true');
+    expect(() => refuseUnsafeSecrets()).not.toThrow();
+    vi.stubEnv('ALLOW_INSECURE_COOKIES', '');
+    vi.stubEnv('NODE_ENV', 'development');
+    expect(() => refuseUnsafeSecrets()).not.toThrow();
+  });
+
   it('accept a generated key in production and anything outside it', () => {
     vi.stubEnv('NODE_ENV', 'production');
     vi.stubEnv('FRONTEND_PROXY_KEY', 'a1b2c3');
+    vi.stubEnv('COOKIE_SECURE', 'true');
     expect(() => refuseUnsafeSecrets()).not.toThrow();
     vi.stubEnv('NODE_ENV', 'development');
     vi.stubEnv('FRONTEND_PROXY_KEY', 'change-me-proxy');

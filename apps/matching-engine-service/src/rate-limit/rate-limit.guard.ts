@@ -21,17 +21,20 @@ const digest = (value: string) => createHash('sha256').update(value).digest();
 
 export const proxyHeaderFor = (key: string) => Buffer.from(hkdfSync('sha256', key, '', 'mx-proxy', 32)).toString('hex');
 
+let expected: Buffer | undefined;
+
+const expectedHeader = (key: string) => (expected ??= digest(proxyHeaderFor(key)));
+
 export function clientAddress(request: Request): string | undefined {
   const key = process.env.FRONTEND_PROXY_KEY;
-  const expected = key && proxyHeaderFor(key);
   const provided = request.header('x-proxy-key');
   const forwarded = request.header('x-client-ip');
   if (
-    expected &&
+    key &&
     provided &&
     forwarded &&
     ADDRESS.test(forwarded) &&
-    timingSafeEqual(digest(expected), digest(provided))
+    timingSafeEqual(expectedHeader(key), digest(provided))
   ) {
     return `client:${forwarded}`;
   }

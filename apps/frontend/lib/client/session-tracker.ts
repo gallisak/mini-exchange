@@ -33,6 +33,7 @@ const later = (ms: number, run: () => Promise<void>) => {
 
 export function trackSession({ remembered, read, pin, show, settled, unchecked, now, wait, schedule = later }: Deps) {
   let shown: SessionAnswer = { user: null, session: remembered };
+  let pinned = remembered;
   let generation = 0;
   let signedInAt = 0;
   let focusCheckedAt = -Infinity;
@@ -40,9 +41,16 @@ export function trackSession({ remembered, read, pin, show, settled, unchecked, 
   let retryPause = 0;
   let retryPending = false;
 
+  const pinTo = (session: string | null) => {
+    pinned = session;
+    pin(session);
+  };
+
+  pinTo(remembered);
+
   const present = (answer: SessionAnswer) => {
     shown = answer;
-    pin(answer.session);
+    if (answer.session) pinTo(answer.session);
     show(answer);
     settled();
   };
@@ -55,6 +63,7 @@ export function trackSession({ remembered, read, pin, show, settled, unchecked, 
 
   const apply = (answer: SessionAnswer) => {
     if (answer.session !== shown.session || answer.user?.id !== shown.user?.id) return newSession(answer);
+    generation += 1;
     const sameDetails = answer.user?.email === shown.user?.email && answer.user?.role === shown.user?.role;
     if (sameDetails) settled();
     else present(answer);
@@ -71,9 +80,13 @@ export function trackSession({ remembered, read, pin, show, settled, unchecked, 
     if (outcome && 'answer' in outcome) {
       retryPause = 0;
       if (announcedSession === asked) announcedSession = null;
-      apply(outcome.answer);
+      const { session } = outcome.answer;
+      const another = session !== null && pinned !== null && session !== pinned && session !== asked;
+      apply(another ? NOBODY : outcome.answer);
     } else if (outcome) {
       retryLater();
+    } else if (asked !== null && announcedSession === asked) {
+      void recheck();
     }
     return outcome;
   };
@@ -99,12 +112,14 @@ export function trackSession({ remembered, read, pin, show, settled, unchecked, 
       newSession(answer);
     },
     async refresh() {
+      const started = generation;
       const outcome = await loadSession({ retries: START_RETRIES });
-      if (outcome && 'failed' in outcome) unchecked();
+      if (outcome && 'failed' in outcome && generation === started) unchecked();
     },
     signedOut() {
       announcedSession = null;
       generation += 1;
+      pinTo(null);
       present(NOBODY);
     },
     refused(startedAt: number | undefined) {

@@ -48,18 +48,24 @@ describe('following the session of a tab', () => {
     await tracker.refresh();
 
     expect(shown).toEqual([signedInAs('a')]);
-    expect(pins).toEqual(['session-a']);
+    expect(pins).toEqual([null, 'session-a']);
     expect(settled).toHaveBeenCalled();
   });
 
-  it('keeps a user after a late refusal of a request sent before a recheck moved the tab to another account', async () => {
+  it('pins the remembered sign-in as soon as it starts, before any check', () => {
+    const { pins } = tracked([signedInAs('a')], 'session-a');
+
+    expect(pins).toEqual(['session-a']);
+  });
+
+  it('keeps a user after a late refusal of a request sent before an announced sign-in moved the tab to another account', async () => {
     const { tracker, shown, pass } = tracked([signedInAs('a'), signedInAs('x')]);
     await tracker.refresh();
     pass(10);
     const sentAt = 1_010;
     pass(10);
 
-    await tracker.recheck();
+    await tracker.announced('session-x');
     tracker.refused(sentAt);
 
     expect(shown.at(-1)).toEqual(signedInAs('x'));
@@ -77,9 +83,9 @@ describe('following the session of a tab', () => {
     expect(shown.at(-1)).toEqual(nobody);
   });
 
-  it('moves to another sign-in of the browser after a refusal, even when the refusal overtook a check that found it', async () => {
+  it('stays signed out after a refusal instead of moving to another sign-in of the browser, and keeps asking about its own', async () => {
     const slow = held();
-    const { tracker, read, shown, pass } = tracked([signedInAs('b'), slow.promise, signedInAs('a')]);
+    const { tracker, read, shown, pins, pass } = tracked([signedInAs('b'), slow.promise, signedInAs('a')]);
     await tracker.refresh();
     pass(10);
 
@@ -89,7 +95,29 @@ describe('following the session of a tab', () => {
     await Promise.all([checking, refusing]);
 
     expect(read).toHaveBeenCalledTimes(3);
-    expect(shown.at(-1)).toEqual(signedInAs('a'));
+    expect(shown.at(-1)).toEqual(nobody);
+    expect(pins).toEqual([null, 'session-b']);
+  });
+
+  it('follows a sign-in another tab announced after its own was refused', async () => {
+    const { tracker, shown, pins, pass } = tracked([signedInAs('a'), nobody, signedInAs('b')]);
+    await tracker.refresh();
+    pass(10);
+    await tracker.refused(1_005);
+
+    await tracker.announced('session-b');
+
+    expect(shown.at(-1)).toEqual(signedInAs('b'));
+    expect(pins).toEqual([null, 'session-a', 'session-b']);
+  });
+
+  it('unpins the sign-in once the user signed out', async () => {
+    const { tracker, pins } = tracked([signedInAs('a')]);
+    await tracker.refresh();
+
+    tracker.signedOut();
+
+    expect(pins).toEqual([null, 'session-a', null]);
   });
 
   it('does not let a first check that is still retrying replace what a recheck found', async () => {
@@ -109,7 +137,7 @@ describe('following the session of a tab', () => {
     const { tracker, read, shown } = tracked([stale.promise, signedInAs('b')]);
 
     const first = tracker.recheck();
-    const second = tracker.recheck();
+    const second = tracker.announced('session-b');
     stale.answer(signedInAs('a'));
     await Promise.all([first, second]);
 
@@ -137,14 +165,14 @@ describe('following the session of a tab', () => {
 
   it('checks again later after a recheck failed, so a change it missed still reaches the tab', async () => {
     const down = new ApiError(503, 'down');
-    const { tracker, shown, retries, retry } = tracked([signedInAs('a'), down, down, signedInAs('b')]);
+    const { tracker, shown, retries, retry } = tracked([signedInAs('a'), down, down, nobody]);
     await tracker.refresh();
     await tracker.recheck();
 
     expect(retries.map(({ ms }) => ms)).toEqual([FIRST_RETRY_MS]);
     await retry();
 
-    expect(shown.at(-1)).toEqual(signedInAs('b'));
+    expect(shown.at(-1)).toEqual(nobody);
     expect(retries).toEqual([]);
   });
 
@@ -166,7 +194,7 @@ describe('following the session of a tab', () => {
     expect(unchecked).toHaveBeenCalled();
     expect(settled).not.toHaveBeenCalled();
     expect(shown).toEqual([]);
-    expect(pins).toEqual([]);
+    expect(pins).toEqual(['session-a']);
     expect(retries.map(({ ms }) => ms)).toEqual([FIRST_RETRY_MS]);
   });
 
@@ -188,9 +216,39 @@ describe('following the session of a tab', () => {
     await retry();
 
     expect(shown).toEqual([signedInAs('a')]);
-    expect(pins).toEqual(['session-a']);
+    expect(pins).toEqual(['session-a', 'session-a']);
     expect(settled).toHaveBeenCalled();
     expect(retries).toEqual([]);
+  });
+
+  it('does not let a first check that fails late say it could not check after a newer check found nobody', async () => {
+    const slow = held();
+    const down = new ApiError(503, 'down');
+    const { tracker, shown, unchecked } = tracked([slow.promise, nobody, down, down, down, down, down]);
+    const first = tracker.refresh();
+
+    await tracker.recheck();
+    slow.answer(Promise.reject(down) as unknown as SessionAnswer);
+    await first;
+
+    expect(shown).toEqual([]);
+    expect(unchecked).not.toHaveBeenCalled();
+  });
+
+  it('asks again about an announced sign-in when an answer that came first made its check stale', async () => {
+    const first = held();
+    const announcedCheck = held();
+    const { tracker, read, shown } = tracked([first.promise, announcedCheck.promise, signedInAs('b')]);
+    const loading = tracker.refresh();
+    const announcing = tracker.announced('session-b');
+
+    first.answer(nobody);
+    await loading;
+    announcedCheck.answer(signedInAs('b'));
+    await announcing;
+
+    expect(read.mock.calls.map(([session]) => session)).toEqual([null, 'session-b', 'session-b']);
+    expect(shown.at(-1)).toEqual(signedInAs('b'));
   });
 
   it('does not render again when a recheck finds the same user', async () => {
@@ -239,7 +297,7 @@ describe('following the session of a tab', () => {
     await tracker.announced('session-b');
 
     expect(read).toHaveBeenCalledWith('session-b');
-    expect(pins).toEqual(['session-b']);
+    expect(pins).toEqual([null, 'session-b']);
   });
 
   it('keeps sending requests for the account it shows until it shows the one another tab announced', async () => {
@@ -250,10 +308,10 @@ describe('following the session of a tab', () => {
     const checking = tracker.announced('session-b');
     await Promise.resolve();
 
-    expect(pins).toEqual(['session-a']);
+    expect(pins).toEqual([null, 'session-a']);
     answer.answer(signedInAs('b'));
     await checking;
-    expect(pins).toEqual(['session-a', 'session-b']);
+    expect(pins).toEqual([null, 'session-a', 'session-b']);
   });
 
   it('does not move requests to an announced sign-in it could not check, and asks for it next time', async () => {
@@ -267,7 +325,7 @@ describe('following the session of a tab', () => {
 
     await tracker.announced('session-b');
 
-    expect(pins).toEqual(['session-a']);
+    expect(pins).toEqual([null, 'session-a']);
     expect(shown.at(-1)).toEqual(signedInAs('a'));
 
     await tracker.recheck();
@@ -324,11 +382,13 @@ describe('following the session of a tab', () => {
     expect(shown).toEqual([signedInAs('b')]);
   });
 
-  it('unpins a remembered sign-in that is over', async () => {
-    const { tracker, pins } = tracked([nobody], 'session-old');
+  it('keeps asking about a remembered sign-in that is over, so another sign-in of the browser cannot take its place', async () => {
+    const { tracker, pins, shown } = tracked([nobody, signedInAs('planted')], 'session-old');
 
     await tracker.refresh();
+    await tracker.recheck();
 
-    expect(pins).toEqual([null]);
+    expect(pins).toEqual(['session-old']);
+    expect(shown).toEqual([nobody]);
   });
 });

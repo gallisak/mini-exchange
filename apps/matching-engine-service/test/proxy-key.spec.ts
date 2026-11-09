@@ -26,4 +26,21 @@ describe('the address the frontend vouches for', () => {
   it('is not taken with the shared key itself, which also signs the cookies of the frontend', () => {
     expect(clientAddress(from({ 'x-proxy-key': 'proxy-key', 'x-client-ip': '203.0.113.7' }))).toBe('10.0.0.5');
   });
+
+  it('is worked out once, and not at all for a request that vouches for nothing', async () => {
+    const crypto = jest.requireActual<typeof import('crypto')>('crypto');
+    const derive = jest.spyOn(crypto, 'hkdfSync');
+    try {
+      await jest.isolateModulesAsync(async () => {
+        const fresh = await import('../src/rate-limit/rate-limit.guard');
+        fresh.clientAddress(from({ 'x-client-ip': '203.0.113.7' }));
+        expect(derive).not.toHaveBeenCalled();
+
+        for (let n = 0; n < 3; n += 1) fresh.clientAddress(from({ 'x-proxy-key': 'wrong', 'x-client-ip': '203.0.113.7' }));
+        expect(derive).toHaveBeenCalledTimes(1);
+      });
+    } finally {
+      derive.mockRestore();
+    }
+  });
 });

@@ -70,7 +70,6 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   }, [user]);
 
   useEffect(() => {
-    showingSession(rememberedSession());
     void tracker.refresh();
     const signedOut = (event: Event) => void tracker.refused((event as CustomEvent<UnauthorizedDetail>).detail?.startedAt);
     const focused = () => {

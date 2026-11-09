@@ -74,7 +74,7 @@ describe('signing in through the frontend', () => {
         .filter((cookie) => /Max-Age=0/.test(cookie) === cleared)
         .map((cookie) => cookie.split('=')[0]);
     const kept = named(login, false);
-    expect(kept).toHaveLength(2);
+    expect(kept.filter((name) => name !== 'mx_ending')).toHaveLength(2);
     expect(lateAnswer.status).toBe(401);
     expect(named(lateAnswer, true).sort()).toEqual(oldNames);
     expect(named(lateAnswer, true).some((name) => kept.includes(name))).toBe(false);
@@ -124,7 +124,7 @@ describe('signing in through the frontend', () => {
 
     const request = carrying(`${moved}; ${cookieName(REFRESH_COOKIE, session)}=${movedRefresh}`);
 
-    expect(sessionsIn(request)).toEqual([]);
+    expect(sessionsIn(request)).toEqual(new Map());
   });
 
   it('uses the sign-in the page shows rather than the newest one', () => {
@@ -219,7 +219,7 @@ describe('signing in through the frontend', () => {
     expect(clearedNames(response)).toEqual([]);
   });
 
-  it('notes which session it could not end, and drops the note once the next sign-in ended it', async () => {
+  it('notes which session it could not end, and keeps it noted once the next sign-in ended it', async () => {
     engineEnding(503);
     const old = newSession();
     const cookie = sessionCookies('old-access', 'old-refresh', old);
@@ -229,7 +229,27 @@ describe('signing in through the frontend', () => {
     expect(noted).toContain(`mx_ending=${old}~`);
     engineEnding(204);
     const after = await signInOver(`${cookie}; ${noted?.split(';')[0]}`);
-    expect(clearedNames(after)).toEqual([cookieName(ACCESS_COOKIE, old), 'mx_ending', cookieName(REFRESH_COOKIE, old)].sort());
+    expect(clearedNames(after)).toEqual([cookieName(ACCESS_COOKIE, old), cookieName(REFRESH_COOKIE, old)].sort());
+    expect(after.headers.getSetCookie().find((line) => line.startsWith('mx_ending='))).toContain(`mx_ending=${old}~`);
+  });
+
+  it('notes every session it made the browser forget, ended or not, so a late answer cannot bring one back', async () => {
+    const tokens = { accessToken: 'a.e30.s', refreshToken: 'refresh' };
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init: RequestInit) => {
+        if (!String(url).endsWith('/auth/end-session')) return new Response(JSON.stringify(tokens), { status: 200 });
+        return new Response(null, { status: JSON.parse(String(init.body)).refreshToken === 'ended-refresh' ? 204 : 503 });
+      }),
+    );
+    const { older, newer } = signInTwice();
+    vi.useRealTimers();
+
+    const response = await signInOver(`${sessionCookies('a', 'ended-refresh', older)}; ${sessionCookies('a', 'kept-refresh', newer)}`);
+
+    const note = response.headers.getSetCookie().find((line) => line.startsWith('mx_ending='));
+    expect(note?.split(';')[0].split('=')[1].split('~')[0].split('.')).toEqual([older, newer]);
+    expect(clearedNames(response)).toEqual([cookieName(ACCESS_COOKIE, older), cookieName(REFRESH_COOKIE, older)].sort());
   });
 
   it('keeps the cookies of a session whose end the engine never answered', async () => {
@@ -303,7 +323,9 @@ describe('signing in through the frontend', () => {
       expect(cleared.filter((cookie) => cookie.startsWith(`${name}=`) && /Path=\/api(;|$)/.test(cookie))).toHaveLength(1);
       expect(cleared.filter((cookie) => cookie.startsWith(`${name}=`) && /Path=\/(;|$)/.test(cookie))).toHaveLength(1);
     }
-    expect(response.headers.getSetCookie().filter((cookie) => !/Max-Age=0/.test(cookie))).toHaveLength(2);
+    const kept = response.headers.getSetCookie().filter((cookie) => !/Max-Age=0/.test(cookie));
+    expect(kept.filter((cookie) => /^mx_(access|refresh)_/.test(cookie))).toHaveLength(2);
+    expect(kept.filter((cookie) => cookie.startsWith('mx_legacy_done='))).toHaveLength(1);
   });
 
   it('ends a forgotten session and an old cookie side by side, and keeps every cookie it clears', async () => {

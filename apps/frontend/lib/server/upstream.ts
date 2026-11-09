@@ -3,20 +3,25 @@ import { SESSION_CHANGED, SESSION_ENDED } from '@/lib/session-id';
 import { END_SESSION_TIMEOUT_MS, UPSTREAM_TIMEOUT_MS } from '@/lib/timeouts';
 import { NextRequest, NextResponse } from 'next/server';
 import {
+  LegacySession,
   Rotation,
   SessionTokens,
+  Sessions,
   TokenPair,
   askedForAnother,
+  clearLegacyCookies,
   clearTokens,
-  derivedKey,
   endingIn,
   isFresh,
   legacySessions,
+  noteEnding,
+  noteRotated,
+  proxyKey,
   readTokens,
   refreshOnce,
+  rememberLegacyDone,
   sessionsIn,
   storeTokens,
-  tokensOf,
 } from './session';
 
 const SERVICES = {
@@ -39,10 +44,9 @@ export function forwardedHeaders(request: NextRequest, service: Service): Record
   const headers: Record<string, string> = {
     'x-request-id': request.headers.get('x-request-id') ?? randomUUID(),
   };
-  const proxyKey = process.env.FRONTEND_PROXY_KEY;
   const address = clientAddress(request);
-  if (service === 'engine' && proxyKey && address) {
-    headers['x-proxy-key'] = derivedKey(proxyKey, 'mx-proxy').toString('hex');
+  if (service === 'engine' && process.env.FRONTEND_PROXY_KEY && address) {
+    headers['x-proxy-key'] = proxyKey();
     headers['x-client-ip'] = address;
   }
   return headers;
@@ -132,33 +136,58 @@ export async function endTokens(
 
 export async function endSessions(
   request: NextRequest,
-  sessions: string[],
+  sessions: Sessions,
+  ids: string[],
   timeoutMs = END_SESSION_TIMEOUT_MS,
 ): Promise<string[]> {
-  const ended = await Promise.all(sessions.map((session) => endTokens(request, tokensOf(request, session), timeoutMs)));
-  return sessions.filter((_, index) => ended[index]);
+  const over = await Promise.all(ids.map((id) => endTokens(request, sessions.get(id) ?? {}, timeoutMs)));
+  const ended = ids.filter((_, index) => over[index]);
+  noteEnding(ended);
+  return ended;
 }
 
 export interface LegacyEnding {
   names: string[];
+  marks: string[];
   complete: boolean;
 }
 
 export async function endLegacySessions(
   request: NextRequest,
-  sessions: string[],
+  sessions: Sessions,
   timeoutMs = END_SESSION_TIMEOUT_MS,
 ): Promise<LegacyEnding> {
+  const found = legacySessions(request, sessions);
   const ended = await Promise.all(
-    legacySessions(request, sessions).map(async ({ names, ...tokens }) =>
-      (await endTokens(request, tokens, timeoutMs)) ? names : null,
-    ),
+    found.sessions.map(async (legacy) => ((await endTokens(request, legacy, timeoutMs)) ? legacy : null)),
   );
-  return { names: ended.flatMap((names) => names ?? []), complete: !ended.includes(null) };
+  const over = [...found.tokenless, ...ended.filter((legacy): legacy is LegacySession => legacy !== null)];
+  return {
+    names: over.flatMap(({ names }) => names),
+    marks: over.flatMap(({ marks }) => marks),
+    complete: !found.more && !ended.includes(null),
+  };
 }
 
-export function endListed(request: NextRequest, sessions: string[]): Promise<string[]> {
-  return endSessions(request, endingIn(request, sessions));
+export interface Remainder {
+  left: string[];
+  oldLeft: boolean;
+}
+
+export async function endAndForget(
+  request: NextRequest,
+  response: NextResponse,
+  sessions: Sessions,
+  { end, timeout = END_SESSION_TIMEOUT_MS }: { end: string[]; timeout?: number },
+): Promise<Remainder> {
+  const [ended, legacy] = await Promise.all([
+    endSessions(request, sessions, end, timeout),
+    endLegacySessions(request, sessions, timeout),
+  ]);
+  clearTokens(response, ended);
+  rememberLegacyDone(request, response, legacy.marks, sessions);
+  clearLegacyCookies(response, legacy.names);
+  return { left: end.filter((id) => !ended.includes(id)), oldLeft: !legacy.complete };
 }
 
 export function sessionChanged(): NextResponse {
@@ -173,9 +202,10 @@ export async function withSession(
   call: (accessToken: string) => Promise<UpstreamResult>,
 ): Promise<NextResponse> {
   const sessions = sessionsIn(request);
-  const tokens = readTokens(request, sessions);
-  if (askedForAnother(request, tokens.session)) return sessionChanged();
-  const [response, ended] = await Promise.all([callWith(request, tokens, call), endListed(request, sessions)]);
+  const ending = endingIn(request, sessions);
+  const tokens = readTokens(request, sessions, ending);
+  if (askedForAnother(request, sessions, ending)) return sessionChanged();
+  const [response, ended] = await Promise.all([callWith(request, tokens, call), endSessions(request, sessions, ending)]);
   clearTokens(response, ended);
   return response;
 }
@@ -230,7 +260,10 @@ async function callWith(
   if (outcome.kind === 'over') return unauthorized(tokens.session);
   const response =
     outcome.kind === 'answered' ? NextResponse.json(outcome.result.body, { status: outcome.result.status }) : unavailable();
-  if (outcome.rotated) storeTokens(response, outcome.rotated, tokens.session);
+  if (outcome.rotated) {
+    storeTokens(response, outcome.rotated, tokens.session);
+    noteRotated(outcome.rotated);
+  }
   return response;
 }
 

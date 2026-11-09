@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { TokenPair, claimsOf, clearLegacyCookies, clearTokens, newSession, rememberEnding, sessionsIn, storeTokens } from './session';
-import { endLegacySessions, endSessions, upstream } from './upstream';
+import { TokenPair, claimsOf, newSession, rememberEnding, sessionsIn, storeTokens } from './session';
+import { endAndForget, upstream } from './upstream';
 
 const JSON_BODY = /^application\/json(\s*;|$)/i;
 
@@ -22,10 +22,9 @@ export async function signIn(request: NextRequest, path: '/auth/login' | '/auth/
     session,
   });
   storeTokens(response, tokens, session);
-  const forgotten = sessionsIn(request);
-  const [ended, legacy] = await Promise.all([endSessions(request, forgotten), endLegacySessions(request, forgotten)]);
-  clearTokens(response, ended);
-  rememberEnding(request, response, forgotten.filter((id) => !ended.includes(id)));
-  clearLegacyCookies(response, legacy.names);
+  const sessions = sessionsIn(request);
+  const forgotten = [...sessions.keys()];
+  rememberEnding(request, response, forgotten);
+  await endAndForget(request, response, sessions, { end: forgotten });
   return response;
 }

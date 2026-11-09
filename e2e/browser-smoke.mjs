@@ -333,7 +333,11 @@ try {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ email, password: 'password123' }),
-      }).then((response) => response.status),
+      }).then(async (response) => {
+        const answer = await response.json().catch(() => ({}));
+        if (response.ok) new BroadcastChannel('mx:session').postMessage(answer.session);
+        return response.status;
+      }),
     `browser-tab-a-${run}@example.com`,
   );
   if (switched !== 200) throw new Error(`the other account could not sign in: ${switched}`);
@@ -377,8 +381,11 @@ try {
   await staleTab.waitForTimeout(300);
   await staleTab.unroute('**/api/auth/session');
   await staleTab.evaluate(() => window.dispatchEvent(new Event('focus')));
-  await staleTab.getByRole('button', { name: /browser-stale-b/ }).waitFor({ timeout: 5_000 });
-  log('a tab that did not hear of the new sign-in cannot trade on it, and catches up');
+  await staleTab.getByRole('link', { name: 'Sign in' }).last().waitFor({ timeout: 10_000 });
+  if (await staleTab.getByRole('button', { name: /browser-stale-b/ }).count()) {
+    throw new Error('a tab whose sign-in was replaced without its knowing took over the other sign-in of the browser');
+  }
+  log('a tab that did not hear of the new sign-in cannot trade on it, and asks to sign in instead of taking it');
 
   await buyer.goto(`${BASE}/ops`);
   await buyer.getByText('Admins only').waitFor();

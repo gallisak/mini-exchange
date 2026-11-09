@@ -8,6 +8,11 @@ export function refuseUnsafeSecrets(): void {
   if (PLACEHOLDER.test(process.env.FRONTEND_PROXY_KEY)) {
     throw new Error('FRONTEND_PROXY_KEY still has the placeholder value from .env.example, set a real secret');
   }
+  if (process.env.COOKIE_SECURE !== 'true' && process.env.ALLOW_INSECURE_COOKIES !== 'true') {
+    throw new Error(
+      'COOKIE_SECURE must be true, or a neighbouring subdomain can plant session cookies; set ALLOW_INSECURE_COOKIES=true only for a stack over plain HTTP',
+    );
+  }
 }
 
 export function warnAboutPlainCookies(warn: (message: string) => void = console.warn): void {

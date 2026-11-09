@@ -126,24 +126,34 @@ cookie; settlement, which has no rate limits, gets neither. With `COOKIE_SECURE=
 set, the names start with `__Host-` and the cookies live on `/`, so a browser takes them only from
 this host over HTTPS and a neighbouring subdomain or a plain HTTP response cannot plant one. Plain
 HTTP cannot have that guarantee, so the default for `http://localhost` is the signed names alone, on
-`/api`, and a production start without `COOKIE_SECURE=true` warns: a whole pair from another sign-in
-could still be planted there. Such a pair cannot take a session over: the page keeps the id of its own
-sign-in, given at sign-in and by `/api/auth/session` and remembered for the next page load, sends it
-with every request as `x-session-id`, and the frontend uses exactly that pair of cookies instead of
-the newest. Only `/api/auth/session` tells a page the newest, when the page knows no sign-in yet or
-its own is gone; every other route answers 409 to a page whose own sign-in is gone while the browser
-holds another, and 401 once it holds none. A sign-out ends every session the browser holds, newer
-ones included, so none is left to take over the page after it.
+`/api`, and a production start without `COOKIE_SECURE=true` refuses to run unless
+`ALLOW_INSECURE_COOKIES=true` says the stack is on plain HTTP on purpose, as the compose stack on
+`localhost` does: a whole pair from another sign-in could still be planted there. Such a pair cannot
+take a session over: the page keeps the id of its own sign-in, given at sign-in and by
+`/api/auth/session` and remembered for the next page load, sends it with every request as
+`x-session-id`, and the frontend uses exactly that pair of cookies instead of the newest. A page
+whose own sign-in is gone is told it is signed out, by `/api/auth/session` too, and keeps asking about
+that sign-in, so it shows the sign-in card and moves to another sign-in only when the user signs in or
+a tab of this browser announces one; only a page that knows no sign-in yet is given the newest. Every
+other route answers 409 to a page whose own sign-in is gone while the browser holds another, and 401
+once it holds none. A sign-out ends every session the browser holds, newer ones included, so none is
+left to take over the page after it.
 
 A sign-in ends on the engine every session the browser forgets, and a sign-out every other one, by its
 refresh token, or by its access token when only that cookie is left. Their cookies go only after the
 engine answered that the session is over, within 2 s (6 s for a sign-out,
-whose answer the user waits for and which the engine may take 5 s to give); otherwise they stay, a
-sign-in lists them in `mx_ending`, a cookie signed with the frontend's key, and the next request tries
-again alongside its own call, so no session is left for its 7 days. A listed session is no longer
-used, whether or not the engine has ended it yet: a request for it is answered 409 while the sign-in
-that listed it is there, so a page that missed the sign-in moves to it instead of trading on in the
-old account. That request only clears the
+whose answer the user waits for and which the engine may take 5 s to give); otherwise they stay. A
+sign-in or a sign-out lists every session it made the browser forget, ended or not, in `mx_ending`, a
+cookie signed with the frontend's key, and the next request tries again alongside its own call to end
+those still there, so no session is left for its 7 days. A listed session is never used again,
+whether or not the engine has ended it yet: a request for it is answered 409 while the browser holds
+another sign-in, so a page that missed the sign-in stops trading on the old account, and a late answer
+that brings back the cookies of a listed session only gets them ended and cleared once more. The
+frontend also remembers which sessions it ended or listed and never stores a pair for one of them, so
+a request that rotated one meanwhile cannot bring it back. Nor does `/api/auth/session` take a fresh
+access cookie on trust when another request just rotated that pair: it asks the engine
+(`GET /auth/session`) whether the session still lasts, and rotates or signs the page out if not. Both
+memories are per process; the list in the cookie holds across processes. That request only clears the
 cookies of what it ended: only a sign-in or a sign-out writes the list, so a request that crosses a
 sign-in cannot drop what the sign-in listed. A sign-out that cannot end another session answers 503,
 or that session would take over. Apart from that list `/api/auth/session` and the other routes never
@@ -151,19 +161,27 @@ end a session, and only the frontend can sign the list, so a planted cookie cann
 through a page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
 once `COOKIE_SECURE=true` is on) are never used; sign-in, sign-out and `/api/auth/session` end their
 sessions by the same rule and clear them on `/` and `/api`, and a sign-out waits 6 s for them too and
-answers 503 while one of them is not ended. Only the exact names older versions gave
-count, four sessions at most per request, and a value that is not a token is cleared without asking
-the engine, so planted cookies cannot turn a page load into a flood of requests to the engine. A
-sign-in, a sign-out and `/api/auth/session` end those sessions and old cookies side by side, then set the cookies
-in an order that keeps every one of them, since Next.js rewrites all `Set-Cookie` headers whenever it
-sets a cookie.
+answers 503 while one of them is not ended. Only the exact names older versions gave count. A cookie
+whose value is not a token is cleared without asking the engine and takes no place; of the rest, four
+sessions at most are ended per request, and a sign-out answers 503 while more are left. Every old
+cookie dealt with is noted by a hash of its name and value in `mx_legacy_done`, another signed
+cookie, so one that cannot be cleared, planted for a parent domain or on another path, is not sent to
+the engine again on every check, and planted cookies cannot turn page loads into a flood of requests
+to the engine. A sign-in, a sign-out and `/api/auth/session` end those sessions and old cookies side
+by side through one helper, `endAndForget`, which clears what it ended and returns what is left, and
+each route decides what to do with that. Every cookie is written as a `Set-Cookie` header of its own,
+never through `response.cookies`, since Next.js rewrites all `Set-Cookie` headers whenever it sets a
+cookie that way, so no write can drop another, whatever their order.
 
 All tabs share the cookies, so a sign-in or sign-out reaches the other tabs through a
 `BroadcastChannel`, and a tab checks its session when it gets focus, at most every 30 s. In case a
 tab hears neither, the frontend answers 409 to a request for a sign-in the browser no longer has (401
 when it holds no sign-in at all), so a stale tab cannot trade, cancel or read on an account it does not show. The page then checks at once
-and moves to the newest sign-in, and a socket asking for a ticket stops asking. A check that fails is
-repeated once, and a signal that arrives during a check causes one more check, so news is not lost. A
+and, with its own sign-in gone, shows the sign-in card rather than another account, and a socket
+asking for a ticket stops asking. A check that fails is repeated once, and a signal that arrives
+during a check causes one more check, so news is not lost; an announced sign-in whose check an earlier
+answer made stale is asked about again. Any answer, even one that changes nothing, stops a check still
+retrying from before, so that check cannot say later that it could not check. A
 check that still fails is tried again after 5 s, then after pauses that double up to 30 s, until it
 gets an answer. A first check that gets none keeps the remembered sign-in and says the page could not
 check it, instead of showing the user as signed out and making them sign in again.
@@ -175,9 +193,11 @@ A page keeps nothing of the account before it, and `/login` sends someone signed
 request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
 while a dead session is still forgotten at once; the page also ignores refusals of requests sent
 before the latest change of session. A refusal of the session the page shows sends it to the sign-in
-card at once, and the page then checks whether the browser holds another sign-in, so a tab refused
-in the middle of a sign-in elsewhere moves to it, even when the refusal overtook a check already on
-its way. A service that refuses an access token just rotated means the
+card at once, and the page keeps asking about that session: it does not take another sign-in the
+browser holds, which a neighbouring subdomain could have planted, but it follows one another tab
+announces, so a tab refused in the middle of a sign-in elsewhere still moves to it. The tracker pins
+the remembered session itself when it starts, so requests and checks never ask about different ones.
+A service that refuses an access token just rotated means the
 session is over: its cookies are cleared and the new pair is ended, not stored; if the engine cannot
 end it yet, the new pair is stored and the answer is 503, so the next request ends it. The attempt id of a rotation is
 an HMAC of the cookies and the browser, so a retry always repeats it, whatever happened in between,
@@ -481,7 +501,7 @@ Redis Streams is the order log and Redis is the coordinator.
 | `DELETE /orders/:id?instrument=` → 200 | `DELETE /orders/:id` → 202; another user's order 404, a filled one 409 | IDOR and ghost orders |
 | `GET /orders/book` with a token, raw orders | Public, aggregated levels with `seq`, no owners | Public depth, no data leak |
 | WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, and private `order` and `wallet` | Sequence numbers and resync |
-| `POST /auth/login` → 201 | 200, plus `/auth/refresh` and `/auth/logout` | Sessions |
+| `POST /auth/login` → 201 | 200, plus `/auth/refresh`, `/auth/logout` and `GET /auth/session`, which answers whose access token it is while its session lasts | Sessions |
 | WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token. To roll out, update the engines first with `WS_ACCEPT_ACCESS_TOKENS=true` so pages already open still connect, then the frontend (until its engine issues tickets it keeps retrying rather than hand out the access token), then drop the setting |
 | `GET /metrics` open | Needs the internal key of the service | Metrics show traffic and internals |
 | `GET /orders` returned every order | Every active order and the latest 100 finished ones | Bounded response |
@@ -493,6 +513,8 @@ Redis Streams is the order log and Redis is the coordinator.
 | Tokens told apart by which claims they lack | `typ` claim: `access`, `refresh` or `ws`, required by whoever takes the token | A new kind of token cannot pass as an old one. Tokens without `typ` are still taken until the last of them expires, 7 days after this change; then drop `issuedBeforeTypes` in both `token-claims.ts` and the `undefined` case of `isTokenOfType` |
 | `POST /auth/register` of a taken email → 409 | 409 only with another password; the same password signs in | A registration whose answer was lost can be repeated |
 | `x-proxy-key` carried `FRONTEND_PROXY_KEY`, which also signed the cookies | Two keys derived from it with HKDF, one for the header and one for the cookies | A header that leaks cannot sign cookies. Update the engines and the frontend together, or the engines count the frontend's address instead of the user's for a while; everyone signs in once more, and the old sessions are ended |
+| A production frontend with `COOKIE_SECURE=false` warned | It refuses to start, unless `ALLOW_INSECURE_COOKIES=true` | Plain cookies can be planted from a neighbouring subdomain. Set `COOKIE_SECURE=true` behind HTTPS; the compose stack on `http://localhost` sets `ALLOW_INSECURE_COOKIES=true` |
+| A page whose sign-in was gone moved to the newest one in the browser | It is told it is signed out, and moves only on a sign-in or an announcement from another tab | A planted pair must not take the page over. A tab that missed the announcement of a sign-in elsewhere shows the sign-in card |
 | `ledger.assetsNotBalanced` in a reconciliation report | `assetsNotBalanced` next to `ledger`, only when something is off | It describes the whole ledger, not the period |
 
 ## Not done, or done differently next time

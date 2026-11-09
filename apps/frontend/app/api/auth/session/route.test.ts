@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { newSession } from '@/lib/server/session';
 import { endingNote, sessionCookies } from '@/lib/server/test-session';
+import { withSession } from '@/lib/server/upstream';
 import { GET } from './route';
 
 const access = (sub: string) =>
@@ -62,13 +63,55 @@ describe('asking who is signed in', () => {
     expect(await response.json()).toMatchObject({ user: { id: 'victim' }, session: older });
   });
 
-  it('moves to the newest sign-in when the one the page shows is gone', async () => {
-    vi.stubGlobal('fetch', vi.fn());
+  it('tells a page whose own sign-in is gone that it is signed out, instead of giving it another one', async () => {
+    const engine = vi.fn();
+    vi.stubGlobal('fetch', engine);
     const session = newSession();
 
-    const response = await GET(asking(sessionCookies(access('next'), 'refresh', session), { 'x-session-id': newSession() }));
+    const response = await GET(asking(sessionCookies(access('planted'), 'refresh', session), { 'x-session-id': newSession() }));
 
-    expect(await response.json()).toMatchObject({ user: { id: 'next' }, session });
+    expect(await response.json()).toEqual({ user: null, session: null });
+    expect(response.headers.getSetCookie()).toEqual([]);
+    expect(engine).not.toHaveBeenCalled();
+  });
+
+  it('asks the engine about a session another request just rotated, instead of trusting its fresh access cookie', async () => {
+    let sessionCheck = 200;
+    const paths: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string, init?: RequestInit) => {
+        const path = new URL(url).pathname;
+        paths.push(path);
+        if (path === '/auth/session') return new Response('{}', { status: sessionCheck });
+        if (path !== '/auth/refresh') return new Response(null, { status: 204 });
+        return JSON.parse(String(init?.body)).refreshToken === 'refresh'
+          ? Response.json({ accessToken: access('u'), refreshToken: 'rotated-refresh' })
+          : Response.json({ message: 'over' }, { status: 401 });
+      }),
+    );
+    const session = newSession();
+    const stale = ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: 1 })).toString('base64url'), 's'].join('.');
+    const rotating = await withSession(
+      new NextRequest('http://exchange.test/api/wallet', {
+        headers: { cookie: sessionCookies(stale, 'refresh', session), 'x-session-id': session },
+      }),
+      async () => ({ status: 200, body: {} }),
+    );
+    const rotated = rotating.headers
+      .getSetCookie()
+      .map((line) => line.split(';')[0])
+      .join('; ');
+
+    const alive = await GET(asking(rotated, { 'x-session-id': session }));
+    expect(await alive.json()).toMatchObject({ user: { id: 'u' }, session });
+    expect(paths.at(-1)).toBe('/auth/session');
+
+    sessionCheck = 401;
+    const over = await GET(asking(rotated, { 'x-session-id': session }));
+    expect(await over.json()).toEqual({ user: null, session: null });
+    expect(paths.slice(-2)).toEqual(['/auth/session', '/auth/refresh']);
+    expect(over.headers.getSetCookie().filter((cookie) => /Max-Age=0/.test(cookie))).toHaveLength(2);
   });
 
   it('answers nobody without a session, and asks the engine nothing', async () => {
@@ -94,9 +137,21 @@ describe('asking who is signed in', () => {
     const response = await GET(asking('mx_refresh=old.refresh.token'));
 
     expect(ended).toEqual([{ refreshToken: 'old.refresh.token' }]);
-    const cleared = response.headers.getSetCookie();
+    const cleared = response.headers.getSetCookie().filter((cookie) => cookie.startsWith('mx_refresh='));
     expect(cleared.map((cookie) => /Path=([^;]*)/.exec(cookie)?.[1])).toEqual(['/', '/api']);
     for (const cookie of cleared) expect(cookie).toMatch(/^mx_refresh=; Max-Age=0/);
+  });
+
+  it('does not end an old cookie again once it did, when the cookie could not be cleared', async () => {
+    const engine = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', engine);
+    const first = await GET(asking('mx_refresh=old.refresh.token'));
+    const done = first.headers.getSetCookie().find((cookie) => cookie.startsWith('mx_legacy_done='))?.split(';')[0];
+
+    const again = await GET(asking(`mx_refresh=old.refresh.token; ${done}`));
+
+    expect(engine).toHaveBeenCalledOnce();
+    expect(again.headers.getSetCookie()).toEqual([]);
   });
 
   it('ends the session of an old cookie with its access token when its refresh cookie is gone', async () => {
@@ -130,7 +185,7 @@ describe('asking who is signed in', () => {
     const response = await GET(asking('mx_refresh=planted'));
 
     expect(engine).not.toHaveBeenCalled();
-    expect(response.headers.getSetCookie()).toHaveLength(2);
+    expect(response.headers.getSetCookie().filter((cookie) => /^mx_refresh=; Max-Age=0/.test(cookie))).toHaveLength(2);
   });
 
   it('asks the engine to end only a few old sessions per request, however many cookies were planted', async () => {
@@ -143,14 +198,14 @@ describe('asking who is signed in', () => {
     expect(engine).toHaveBeenCalledTimes(4);
   });
 
-  it('moves a page off a session a sign-in is ending, to that sign-in, and ends the old one', async () => {
+  it('tells a page on a session a sign-in is ending that it is signed out, rather than moving it, and ends the old one', async () => {
     const engine = vi.fn(async (_url: string, _init?: RequestInit) => new Response(null, { status: 204 }));
     vi.stubGlobal('fetch', engine);
-    const { cookie, older, newer } = twoSignIns();
+    const { cookie, older } = twoSignIns();
 
     const response = await GET(asking(`${cookie}; ${endingNote([older])}`, { 'x-session-id': older }));
 
-    expect(await response.json()).toMatchObject({ user: { id: 'attacker' }, session: newer });
+    expect(await response.json()).toEqual({ user: null, session: null });
     expect(JSON.parse(String(engine.mock.calls[0][1]?.body))).toEqual({ refreshToken: 'victim-refresh' });
   });
 
@@ -171,7 +226,10 @@ describe('asking who is signed in', () => {
 
     const response = await GET(asking(`${cookie}; ${endingNote([older])}; mx_refresh=old.refresh.token`, { 'x-session-id': newer }));
 
-    const cleared = response.headers.getSetCookie().map((line) => line.split('=')[0]);
+    const cleared = response.headers
+      .getSetCookie()
+      .filter((line) => /Max-Age=0/.test(line))
+      .map((line) => line.split('=')[0]);
     expect(cleared.sort()).toEqual([`mx_access_${older}`, `mx_refresh_${older}`, 'mx_refresh', 'mx_refresh'].sort());
   });
 

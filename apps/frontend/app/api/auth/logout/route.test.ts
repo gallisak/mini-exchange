@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { NextRequest } from 'next/server';
 import { newSession } from '@/lib/server/session';
 import { endingNote, sessionCookies } from '@/lib/server/test-session';
+import { withSession } from '@/lib/server/upstream';
 import { END_SESSION_TIMEOUT_MS, SIGN_OUT_END_TIMEOUT_MS } from '@/lib/timeouts';
 import { POST } from './route';
 
@@ -111,7 +112,7 @@ describe('signing out through the frontend', () => {
 
     expect(response.status).toBe(204);
     expect(cleared(response)).toBe(2);
-    expect(response.headers.getSetCookie().filter((cookie) => !/Max-Age=0/.test(cookie))).toEqual([]);
+    expect(response.headers.getSetCookie().filter((cookie) => !/Max-Age=0/.test(cookie) && !cookie.startsWith('mx_ending='))).toEqual([]);
     expect(paths.at(-1)).toBe('/auth/end-session');
   });
 
@@ -124,14 +125,62 @@ describe('signing out through the frontend', () => {
     return `${sessionCookies(access, 'older-refresh', older)}; ${sessionCookies(access, 'newer-refresh', newer)}`;
   };
 
-  it('drops the note about a session once that session is signed out', async () => {
+  it('notes every session it ended, so a late answer that brings one back cannot make it used again', async () => {
     vi.stubGlobal('fetch', vi.fn(async () => new Response(null, { status: 204 })));
-    const session = newSession();
+    const cookie = signedInTwice();
+    const sessions = [...cookie.matchAll(/mx_refresh_([0-9a-z]{36})=/g)].map(([, session]) => session);
 
-    const response = await POST(carrying(`${sessionCookies(access, 'refresh', session)}; ${endingNote([session])}`));
+    const response = await POST(carrying(cookie));
 
     expect(response.status).toBe(204);
-    expect(response.headers.getSetCookie().some((cookie) => /^mx_ending=;.*Max-Age=0/.test(cookie))).toBe(true);
+    const note = response.headers.getSetCookie().find((line) => line.startsWith('mx_ending='));
+    expect(note?.split(';')[0].split('=')[1].split('~')[0].split('.')).toEqual(sessions);
+  });
+
+  it('keeps a request that rotated the session from storing the new pair once a sign-out ended that session', async () => {
+    let answerWallet!: () => void;
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (url: string) => {
+        const path = new URL(url).pathname;
+        if (path === '/auth/refresh') return Response.json({ accessToken: 'new-access', refreshToken: 'new-refresh' });
+        if (path === '/wallet') {
+          await new Promise<void>((resolve) => (answerWallet = resolve));
+          return Response.json({ balances: [] });
+        }
+        return new Response(null, { status: 204 });
+      }),
+    );
+    const session = newSession();
+    const stale = ['e30', Buffer.from(JSON.stringify({ sub: 'u', exp: 1 })).toString('base64url'), 's'].join('.');
+    const cookie = sessionCookies(stale, 'refresh', session);
+    const request = (path: string, method = 'GET') =>
+      new NextRequest(`http://exchange.test${path}`, { method, headers: { cookie, 'x-session-id': session } });
+
+    const reading = withSession(request('/api/wallet'), async (token) => {
+      const answer = await fetch('http://engine.test/wallet', { headers: { authorization: `Bearer ${token}` } });
+      return { status: answer.status, body: await answer.json() };
+    });
+    await vi.waitFor(() => expect(answerWallet).toBeDefined());
+    const signedOut = await POST(request('/api/auth/logout', 'POST'));
+    answerWallet();
+    const read = await reading;
+
+    expect(signedOut.status).toBe(204);
+    expect(read.status).toBe(200);
+    expect(read.headers.getSetCookie().filter((line) => line.includes(session))).toEqual([]);
+  });
+
+  it('does not sign out while more old cookies are left than one request ends', async () => {
+    const engine = vi.fn(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal('fetch', engine);
+    const planted = Array.from({ length: 6 }, (_, n) => `mx_refresh_${String(n).padStart(20, '0')}=a.b.c`).join('; ');
+
+    const response = await POST(carrying(`${sessionCookies(access, 'refresh')}; ${planted}`));
+
+    expect(response.status).toBe(503);
+    expect(engine).toHaveBeenCalledTimes(4);
+    expect(response.headers.getSetCookie().filter((cookie) => /^mx_(access|refresh)_[0-9a-z]{36}=;/.test(cookie))).toEqual([]);
   });
 
   it('ends an older session too, and forgets every cookie once it did', async () => {

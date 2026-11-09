@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { createHash, createHmac, hkdfSync } from 'crypto';
 import { NextRequest, NextResponse } from 'next/server';
 import {
   ACCESS_COOKIE,
@@ -9,10 +10,10 @@ import {
   OLD_SESSIONS_PER_REQUEST,
   clearLegacyCookies,
   cookieName,
-  derivedKey,
   legacySessions,
   newSession,
   refreshOnce,
+  rememberLegacyDone,
   sessionsIn,
   storeTokens,
 } from './session';
@@ -178,13 +179,37 @@ describe('the key that signs session cookies', () => {
 });
 
 describe('the keys made from FRONTEND_PROXY_KEY', () => {
-  it('give cookies and the services keys of their own, neither of them the key itself', () => {
-    const cookies = derivedKey('proxy-key', 'mx-cookie-signing');
-    const proxy = derivedKey('proxy-key', 'mx-proxy');
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
 
-    expect(cookies.equals(proxy)).toBe(false);
-    expect(cookies.equals(Buffer.from('proxy-key'))).toBe(false);
-    expect(proxy.toString('hex')).toBe('45b3e07d034673b9e8bfa1e6e415e26a669844bdce1b7493ebe33c82d094cc76');
+  const madeFrom = async (key: string) => {
+    vi.stubEnv('FRONTEND_PROXY_KEY', key);
+    vi.resetModules();
+    return import('./session');
+  };
+
+  it('give the services a key of their own, not the key itself', async () => {
+    const { proxyKey } = await madeFrom('proxy-key');
+
+    expect(proxyKey()).toBe('45b3e07d034673b9e8bfa1e6e415e26a669844bdce1b7493ebe33c82d094cc76');
+    expect(proxyKey()).not.toBe(Buffer.from('proxy-key').toString('hex'));
+  });
+
+  it('sign cookies with a key made for them, neither the key itself nor the one the services get', async () => {
+    const { newSession: signed, proxyKey, signedValue } = await madeFrom('proxy-key');
+    const session = signed();
+    const token = 'a.b.c';
+    const signedWith = (key: string | Buffer) =>
+      `${token}~${createHmac('sha256', key)
+        .update(`session:${session}:${createHash('sha256').update(token).digest('hex')}`)
+        .digest('hex')
+        .slice(0, 32)}`;
+
+    expect(signedValue(session, token)).toBe(signedWith(Buffer.from(hkdfSync('sha256', 'proxy-key', '', 'mx-cookie-signing', 32))));
+    expect(signedValue(session, token)).not.toBe(signedWith('proxy-key'));
+    expect(signedValue(session, token)).not.toBe(signedWith(Buffer.from(proxyKey(), 'hex')));
   });
 });
 
@@ -198,7 +223,9 @@ describe('reading the cookies of a request', () => {
   it('accepts a session whose values were signed for its name', () => {
     const session = newSession();
 
-    expect(sessionsIn(carrying(sessionCookies('access', 'refresh', session)))).toEqual([session]);
+    expect(sessionsIn(carrying(sessionCookies('access', 'refresh', session)))).toEqual(
+      new Map([[session, { accessToken: 'access', refreshToken: 'refresh' }]]),
+    );
   });
 
   it('ignores a cookie with a genuine id but a value of someone else', () => {
@@ -210,13 +237,13 @@ describe('reading the cookies of a request', () => {
 
     const cookie = `${cookieName(ACCESS_COOKIE, session)}=${access}; ${cookieName(REFRESH_COOKIE, session)}=${refresh}`;
 
-    expect(sessionsIn(carrying(cookie))).toEqual([]);
+    expect(sessionsIn(carrying(cookie))).toEqual(new Map());
   });
 
   it('ignores a cookie with a genuine id but an unsigned value', () => {
     const session = newSession();
 
-    expect(sessionsIn(carrying(`${cookieName(ACCESS_COOKIE, session)}=unsigned`))).toEqual([]);
+    expect(sessionsIn(carrying(`${cookieName(ACCESS_COOKIE, session)}=unsigned`))).toEqual(new Map());
   });
 
   it('finds cookies of every older format, and leaves the current ones alone', () => {
@@ -230,7 +257,7 @@ describe('reading the cookies of a request', () => {
       `${cookieName(REFRESH_COOKIE, before)}=unsigned.refresh.token`,
     ].join('; ');
 
-    const found = legacySessions(carrying(cookie));
+    const found = legacySessions(carrying(cookie)).sessions;
 
     expect(found.map(({ refreshToken }) => refreshToken).sort()).toEqual([
       'bare.refresh.token',
@@ -248,9 +275,10 @@ describe('reading the cookies of a request', () => {
     const cookie = sessionCookies('old.access.token', 'old.refresh.token', plain);
     vi.stubEnv('COOKIE_SECURE', 'true');
 
-    expect(legacySessions(carrying(cookie))).toEqual([
+    expect(legacySessions(carrying(cookie)).sessions).toEqual([
       {
         names: expect.arrayContaining([`mx_refresh_${plain}`, `mx_access_${plain}`]),
+        marks: [expect.any(String), expect.any(String)],
         refreshToken: 'old.refresh.token',
         accessToken: 'old.access.token',
       },
@@ -258,25 +286,87 @@ describe('reading the cookies of a request', () => {
   });
 
   it('keeps the access token of an old session whose refresh cookie is gone, so that session can still be ended', () => {
-    expect(legacySessions(carrying('mx_access=bare.access.token'))).toEqual([
-      { names: ['mx_access'], accessToken: 'bare.access.token' },
+    expect(legacySessions(carrying('mx_access=bare.access.token')).sessions).toEqual([
+      { names: ['mx_access'], marks: [expect.any(String)], accessToken: 'bare.access.token' },
     ]);
   });
 
   it('takes only the exact names older versions used, not any name that starts the same way', () => {
     const cookie = ['mx_refresh_x=a.b.c', 'mx_refresh_ABCDEFGHIJ0123456789=a.b.c', `mx_refresh_${'a'.repeat(21)}=a.b.c`, 'mx_refreshes=a.b.c'].join('; ');
 
-    expect(legacySessions(carrying(cookie))).toEqual([]);
+    expect(legacySessions(carrying(cookie))).toEqual({ sessions: [], tokenless: [], more: false });
   });
 
-  it('takes a few old sessions per request, however many cookies were planted', () => {
+  it('takes a few old sessions per request, however many cookies were planted, and says more are left', () => {
     const cookie = Array.from({ length: 12 }, (_, n) => `mx_refresh_${String(n).padStart(20, '0')}=a.b.c`).join('; ');
 
-    expect(legacySessions(carrying(cookie))).toHaveLength(OLD_SESSIONS_PER_REQUEST);
+    const found = legacySessions(carrying(cookie));
+
+    expect(found.sessions).toHaveLength(OLD_SESSIONS_PER_REQUEST);
+    expect(found.more).toBe(true);
+  });
+
+  it('does not let cookies without a token take the places of old sessions that have one', () => {
+    const planted = Array.from({ length: 6 }, (_, n) => `mx_refresh_${String(n).padStart(20, '0')}=not-a-token`);
+    const cookie = [...planted, 'mx_refresh=real.refresh.token'].join('; ');
+
+    const found = legacySessions(carrying(cookie));
+
+    expect(found.sessions.map(({ refreshToken }) => refreshToken)).toEqual(['real.refresh.token']);
+    expect(found.tokenless).toHaveLength(6);
+    expect(found.more).toBe(false);
   });
 
   it('sends no value that is not a token, and still lets its cookie be cleared', () => {
-    expect(legacySessions(carrying('mx_refresh=not-a-token'))).toEqual([{ names: ['mx_refresh'] }]);
+    expect(legacySessions(carrying('mx_refresh=not-a-token'))).toEqual({
+      sessions: [],
+      tokenless: [{ names: ['mx_refresh'], marks: [expect.any(String)] }],
+      more: false,
+    });
+  });
+
+  it('remembers old cookies it already dealt with, so a cookie that cannot be cleared is not ended on every check', () => {
+    const cookie = 'mx_refresh=old.refresh.token; mx_access_abcdefghij0123456789=not-a-token';
+    const first = legacySessions(carrying(cookie));
+    const response = NextResponse.json({});
+
+    rememberLegacyDone(carrying(cookie), response, [...first.sessions, ...first.tokenless].flatMap(({ marks }) => marks), new Map());
+    const done = response.headers.getSetCookie()[0].split(';')[0];
+
+    expect(legacySessions(carrying(`${cookie}; ${done}`))).toEqual({ sessions: [], tokenless: [], more: false });
+    expect(legacySessions(carrying(`mx_refresh=another.refresh.token; ${done}`)).sessions).toHaveLength(1);
+  });
+
+  it('takes no note it did not sign, so a planted note cannot hide an old session', () => {
+    const cookie = 'mx_refresh=old.refresh.token';
+    const response = NextResponse.json({});
+    rememberLegacyDone(carrying(cookie), response, legacySessions(carrying(cookie)).sessions[0].marks, new Map());
+    const [list] = response.headers.getSetCookie()[0].split(';')[0].split('=')[1].split('~');
+
+    expect(legacySessions(carrying(`${cookie}; mx_legacy_done=${list}~${'0'.repeat(32)}`)).sessions).toHaveLength(1);
+  });
+
+  it('forgets a note about an old cookie the browser no longer sends', () => {
+    const cookie = 'mx_refresh=old.refresh.token';
+    const noted = NextResponse.json({});
+    rememberLegacyDone(carrying(cookie), noted, legacySessions(carrying(cookie)).sessions[0].marks, new Map());
+    const done = noted.headers.getSetCookie()[0].split(';')[0];
+    const response = NextResponse.json({});
+
+    rememberLegacyDone(carrying(done), response, [], new Map());
+
+    expect(response.headers.getSetCookie()).toEqual([expect.stringMatching(/^mx_legacy_done=;.*Max-Age=0/)]);
+  });
+
+  it('keeps the old cookies it cleared when a session cookie is written after them, whatever the order', () => {
+    const response = NextResponse.json({});
+
+    clearLegacyCookies(response, ['mx_refresh']);
+    storeTokens(response, { accessToken: 'a', refreshToken: 'r' }, newSession());
+
+    const cookies = response.headers.getSetCookie();
+    expect(cookies.filter((cookie) => cookie.startsWith('mx_refresh='))).toHaveLength(2);
+    expect(cookies.filter((cookie) => /^mx_(access|refresh)_/.test(cookie))).toHaveLength(2);
   });
 
   it('clears an old cookie on both paths, and one with the prefix the only way a browser accepts', () => {

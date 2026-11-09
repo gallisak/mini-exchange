@@ -2,14 +2,15 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   TokenPair,
   claimsOf,
-  clearLegacyCookies,
   clearTokens,
+  endingIn,
   isFresh,
   readTokens,
+  rotatedElsewhere,
   sessionsIn,
   storeTokens,
 } from '@/lib/server/session';
-import { endLegacySessions, endListed, rotateTokens, unavailable } from '@/lib/server/upstream';
+import { endAndForget, rotateTokens, unavailable, upstream } from '@/lib/server/upstream';
 
 export const dynamic = 'force-dynamic';
 
@@ -20,17 +21,21 @@ const userOf = (token: string) => {
 
 export async function GET(request: NextRequest) {
   const sessions = sessionsIn(request);
-  const { accessToken, refreshToken, session } = readTokens(request, sessions);
+  const ending = endingIn(request, sessions);
+  const { accessToken, refreshToken, session } = readTokens(request, sessions, ending);
   const answer = async (user: ReturnType<typeof userOf>, tokens?: TokenPair) => {
     const response = NextResponse.json({ user, session: user ? session : null });
     if (tokens) storeTokens(response, tokens, session);
     if (!user) clearTokens(response, [session]);
-    const [ended, legacy] = await Promise.all([endListed(request, sessions), endLegacySessions(request, sessions)]);
-    clearTokens(response, ended);
-    clearLegacyCookies(response, legacy.names);
+    await endAndForget(request, response, sessions, { end: ending });
     return response;
   };
-  if (isFresh(accessToken)) return answer(userOf(accessToken));
+  if (isFresh(accessToken)) {
+    if (!rotatedElsewhere(accessToken)) return answer(userOf(accessToken));
+    const check = await upstream(request, 'engine', '/auth/session', {}, accessToken);
+    if (check.status === 200) return answer(userOf(accessToken));
+    if (check.status !== 401) return unavailable();
+  }
   if (!refreshToken) return answer(null);
 
   const outcome = await rotateTokens(request, { refreshToken, accessToken });

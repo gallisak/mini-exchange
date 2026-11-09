@@ -212,6 +212,17 @@ describe('authentication sessions', () => {
     await refresh(session.accessToken).expect(401);
   });
 
+  it('tells who holds an access token while its session lasts, and refuses it once the session ended', async () => {
+    const session = await signUp();
+    const asking = () => http().get('/auth/session').set('authorization', `Bearer ${session.accessToken}`);
+
+    expect((await asking().expect(200)).body).toEqual({ userId: claims(session.accessToken).sub });
+    await http().post('/auth/logout').set('authorization', `Bearer ${session.accessToken}`).expect(204);
+
+    await asking().expect(401);
+    await http().get('/auth/session').expect(401);
+  });
+
   it('revokes the refresh token on logout', async () => {
     const session = await signUp();
 

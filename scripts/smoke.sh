@@ -128,10 +128,10 @@ register_through_frontend() {
     -d "{\"email\":\"frontend-$(date +%s)@example.com\",\"password\":\"password123\"}"
 }
 deadline=$(($(date +%s) + 70))
-status=$(register_through_frontend)
-while [ "$status" = 429 ] && [ "$(date +%s)" -lt "$deadline" ]; do
+status=$(register_through_frontend) || status=000
+while { [ "$status" = 429 ] || [ "$status" = 000 ]; } && [ "$(date +%s)" -lt "$deadline" ]; do
   sleep 5
-  status=$(register_through_frontend)
+  status=$(register_through_frontend) || status=000
 done
 [ "$status" = 200 ] || { echo "FAIL: signing up through the frontend answered $status"; exit 1; }
 grep -q 'HttpOnly_.*mx_refresh' "$jar" || { echo "FAIL: the frontend did not keep the session in an httpOnly cookie"; exit 1; }

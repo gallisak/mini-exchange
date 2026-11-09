@@ -52,6 +52,14 @@ export class AuthController {
     return this.auth.endSessionOf(dto.refreshToken);
   }
 
+  @Get('session')
+  @ApiBearerAuth()
+  @RateLimit('PUBLIC')
+  @UseGuards(JwtAuthGuard)
+  session(@Request() req: { user: AuthenticatedUser }) {
+    return { userId: req.user.userId };
+  }
+
   @Post('ws-ticket')
   @ApiBearerAuth()
   @HttpCode(HttpStatus.OK)
