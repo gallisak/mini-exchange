@@ -131,7 +131,7 @@ could still be planted there. Such a pair cannot take a session over: the page k
 sign-in, given at sign-in and by `/api/auth/session` and remembered for the next page load, sends it
 with every request as `x-session-id`, and the frontend uses exactly that pair of cookies instead of
 the newest. Only `/api/auth/session` tells a page the newest, when the page knows no sign-in yet or
-its own is gone; every other route answers such a page 409. A sign-out ends every session the browser
+its own is gone; every other route answers 409 to a page whose own sign-in is gone. A sign-out ends every session the browser
 holds, newer ones included, so none is left to take over the page after it.
 
 A sign-in ends on the engine every session the browser forgets, and a sign-out every other one. Their
@@ -225,7 +225,9 @@ flowchart LR
 4. After the commit it publishes book deltas with a sequence number, trades and order updates
    through Redis pub/sub, and reads the next batch only once they are out; every engine forwards
    them to its own WebSocket clients. An owner that dies between commit and publish loses those
-   messages, so every new owner of a book first tells all clients to reload it and their orders.
+   messages. An owner notes in Redis the last sequence number it got out, so a new owner that finds
+   that note behind the book, or cannot read it, first tells all clients to reload the book and their
+   orders.
 5. The outbox relay moves each trade to `trades:<instrument>`.
 6. Settlement reads that stream through a consumer group and books the trade in one transaction.
 7. It publishes the wallet change of both sides and only then acknowledges the event; each owner
@@ -472,7 +474,7 @@ Redis Streams is the order log and Redis is the coordinator.
 | `POST /orders` → 201 with trades | 202 with `{orderId, status}` | Orders go through the command stream; trades must not leak counterparties |
 | `price`, `quantity` as numbers | Decimal strings, too many decimals gives 400 | No floating-point money |
 | No idempotency | `Idempotency-Key` header required | A retried request must not create a second order |
-| `DELETE /orders/:id?instrument=` → 200 | `DELETE /orders/:id` → 202; another user's order 404, a finished one 409 | IDOR and ghost orders |
+| `DELETE /orders/:id?instrument=` → 200 | `DELETE /orders/:id` → 202; another user's order 404, a filled one 409 | IDOR and ghost orders |
 | `GET /orders/book` with a token, raw orders | Public, aggregated levels with `seq`, no owners | Public depth, no data leak |
 | WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, and private `order` and `wallet` | Sequence numbers and resync |
 | `POST /auth/login` → 201 | 200, plus `/auth/refresh` and `/auth/logout` | Sessions |
