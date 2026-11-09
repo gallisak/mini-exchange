@@ -9,6 +9,9 @@ ledger, a live order book with sequence numbers and client resync, and a chaos t
 - [Order book consistency](#order-book-consistency)
 - [Failover](#failover)
 - [Exactly-once settlement](#exactly-once-settlement)
+- [Real-time book and resync](#real-time-book-and-resync)
+- [Security](#security)
+- [Observability](#observability)
 - [Problems found in the starter](#problems-found-in-the-starter)
 - [Chaos test](#chaos-test)
 - [Why Redis](#why-redis)
@@ -18,7 +21,7 @@ ledger, a live order book with sequence numbers and client resync, and a chaos t
 ## Run it
 
 ```bash
-docker compose up -d --build        # or docker-compose up --build with the standalone Compose
+docker compose up -d --build        # or docker-compose up --build
 ```
 
 | What | URL |
@@ -29,199 +32,30 @@ docker compose up -d --build        # or docker-compose up --build with the stan
 
 Ports 3000, 3001 and 3002 must be free. Register on http://localhost:3000/login; a new account
 starts with 100,000 USD and 1,000 of each instrument (`ABC`, `DEF`, `XYZ`). The operations panel
-(order books and the settlement queue) is for admins: register, then run the command below and sign
-in again.
+(order books, the settlement queue, reconciliation) is for admins: register, run the command below
+and sign in again.
 
 ```bash
 docker compose exec matching-engine-1 node dist/tools/grant-admin.js you@example.com
 ```
 
 Every service has a `.env.example`, which compose loads. Secrets are not in it: on the first start
-a one-off `secrets` service generates them per installation. Any service, the frontend included,
-started in production with a `change-me-*` placeholder from `.env.example` refuses to start, and so
-does a frontend without `FRONTEND_PROXY_KEY`, which would sign cookies with a key of its own. Every
-Redis command a book, an order submission, the outbox relay or a lease depends on has a timeout, so
-a Redis that stops answering is treated as a failure and retried rather than waited on forever. A
-relay batch whose `EXEC` timed out may still reach the stream later and be published twice;
-settlement books each trade once, so that only costs a duplicate event. Postgres queries in both
-services stop after `DATABASE_STATEMENT_TIMEOUT_MS` (60 s; migrations run without it, however they
-are started, and reconciliation uses its own pool of 8 connections limited by `RECONCILIATION_STATEMENT_TIMEOUT_MS`,
-10 minutes), and lock waits after `DATABASE_LOCK_TIMEOUT_MS` (10 s, the engine's migrations included). A Postgres
-that stops answering altogether, dead or frozen, is given up on 5 s after the statement limit: the
-query fails, its connection is closed and left out of the pool, so a stalled database shows up as a
-stuck book within about 65 s. The gateway does not wait that long: it gives up on an engine after
-4 s (8 s under `/auth/`, 70 s for `/trades/summary`) and answers 503 itself, with the body an engine
-would send, so a client sees 503 whether an engine or the gateway gave up. Timeouts count against an
-engine, so a few within 2 s can take both out of rotation for the API for 2 s; requests are then
-answered 503 at once, also those that need no Postgres. WebSocket connections have their own
-upstream and are not affected. A `COMMIT` is the one statement waited on
-however long it takes (TCP keepalive still finds a dead connection, after the kernel's minutes),
-since giving up on it would not tell whether it happened. A commit can still end unknown: when the
-connection breaks after the `COMMIT` was sent, the book reloads its state from Postgres, an order
-or a rotation is retried under the same key or attempt, and a sign-out is simply sent again.
-Refresh and sign-out wait at most 2 s for the user's session lock and answer 503 after 5 s in all,
-well inside the gateway's 8 s. On sign-in and refresh 503 means nothing changed: a rotation or a
-repeated rotation answered 503 rolls back instead of committing later, so a retry works, and one
-whose `COMMIT` has started is waited for, not answered 503. There are two exceptions. Ending a family
-caught reusing a token always commits, even after the client was answered 503, so slowing the
-database down cannot keep a stolen token alive. A sign-out can answer 503 after the session ended,
-when the note in Redis could not be written yet; the answer then carries `code: SESSION_ENDED`, and the
-frontend counts it as a sign-out: it drops the cookies and answers 204, since the session is over and
-every engine keeps writing the note. If the `COMMIT` of a rotation outlasts the
-gateway the outcome is unknown, so a client that
-retries should send `attempt` to `/auth/refresh`, as the frontend always does: without it the retry
-counts as reuse and ends the session. A book that is stopped waits 15 s for its batch, then lets the fence
-stop it; whatever that batch or a reload still does afterwards no longer touches the book in memory,
-so a newer owner on the same engine is never overwritten. A batch that commits while its book is
-stopping still publishes its trades, order updates and book delta, so a graceful stop under load does
-not make every client reload, and the note of the last published change only ever moves forward.
-Compose gives an engine 25 s to stop, more than that 15 s wait, so it still releases its leases. Reconciliation checks one period at a
-time and lets the next check start only once every query of the previous one finished, which keeps
-three connections free for the rest of a run. A period is moved to the back of the queue before it is
-checked again; a run that cannot note that, or cannot take a period that matches again off the list,
-says so in `recheckError` and is `incomplete`. `replay-check` runs without a statement limit. A
-command stream that fails three reads in a row also marks its book stuck, counted in
-`book_read_failures_total`. nginx passes a request on to the other engine only when the first one
-never received it, or for reads and cancels (`DELETE` is idempotent to nginx), so an order is never
-sent twice by the gateway; a cancel may be, which is harmless, since a cancel of an order that is
-already cancelled answers 202. A trade summary is never passed on to the other engine, whatever went
-wrong: it is the heaviest query of a reconciliation, and open-source nginx cannot tell a connection
-that never opened from one that broke halfway. A run that meets a dead engine is `incomplete` and the
-next run repeats the period. Only the last index migration, on `refresh_sessions`, builds its
-index concurrently. Such a build waits for every older transaction of the database, which blocks no
-reads or writes, so it may wait `DATABASE_INDEX_LOCK_TIMEOUT_MS` (10 minutes) instead of the usual
-lock limit. A settlement migration that waits for a table lock holds up every read and write of that
-table behind it, so it waits only `MIGRATION_LOCK_TIMEOUT_MS` (1.5 s). A lock timeout (`55P03`) is
-retried for `MIGRATION_LOCK_RETRY_MS` (10 minutes), with the last attempt when that time is up rather
-than after it, and pauses of 2.5–5 s, 5–10 s and 10–20 s, then 15–30 s each. A migration behind a long
-reconciliation so stops writes for 1.5 s at a time, with gaps of at least 2.5 s at first and 15 s
-from about the first half minute on, not all the time. One that a failed build left invalid is dropped and built again on the next run, and a
-follow-up migration does the same for an install that had already recorded the first one as done.
-The earlier ones took a write lock on their table while it was small.
+a one-off `secrets` service generates them per installation, and a service started in production
+with a `change-me-*` placeholder refuses to start.
 
-`/metrics` of each service needs its internal key, as `x-internal-key` or `Authorization: Bearer`:
+**Tests.** Unit tests need nothing; integration tests need Postgres on port 55432 and Redis on 56379:
 
 ```bash
-docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget -qO- --header "x-internal-key: $SETTLEMENT_INTERNAL_KEY" localhost:3002/metrics'
+docker run -d --name mx-int-pg -p 127.0.0.1:55432:5432 -e POSTGRES_USER=exchange -e POSTGRES_PASSWORD=exchange -e POSTGRES_DB=exchange postgres:16-alpine
+docker run -d --name mx-int-redis -p 127.0.0.1:56379:6379 redis:7-alpine
+
+cd apps/matching-engine-service && npm ci && npm test && npm run test:int
+cd apps/settlement-service && npm ci && npm test && npm run test:int
+cd apps/frontend && npm ci && npm test
 ```
 
-**Sessions.** Signing out, or reusing a refresh token, ends the refresh session, refuses its access
-token at once (a note in Redis for 30 minutes, twice the life of an access token, checked by both
-services and by every WebSocket connection) and closes its WebSocket connections. The ended session
-is recorded in Postgres in the same transaction, and every engine retries the Redis note until it is
-written. The engine answers a sign-out 503 with `code: SESSION_ENDED` until the note is written, since
-an access token is refused only through that note (a Redis that refuses writes but still answers reads
-would otherwise let it work for up to 15 minutes); a client of the API can sign out again to finish
-it, while the frontend counts the session as signed out and leaves the note to the engines. Expired refresh sessions are deleted when an engine starts and hourly after that, skipping rows another engine is deleting; a stopping engine cancels a cleanup still running instead of waiting for it, and the cleanup keeps its connection until the cancel went through, so the cancel cannot reach a request that got that connection next. After its Redis subscription comes back an engine checks which
-connected sessions ended, and keeps checking until Redis answers instead of closing every connection. A rotation and a sign-out of the same user take one
-Postgres advisory lock, so a sign-out never misses a refresh token that a parallel rotation is
-saving. Refresh and sign-out are not counted against the sign-in limit, and the page reports a
-sign-out that did not go through instead of pretending it did; if the engine refuses an access
-token that looked valid, the frontend rotates it and signs out with the new one, so the refresh
-session ends too, and if the engine cannot end that new session yet, the frontend keeps its cookies
-and reports the sign-out as failed, so signing out again ends it. Each sign-in gets its own pair of
-cookie names (`mx_access_<id>`, `mx_refresh_<id>`). The id is signed with a key the frontend derives
-from `FRONTEND_PROXY_KEY` with HKDF, so a cookie with a made-up name is ignored, however it sorts, and
-every value carries a signature over the id and its token, so a name cannot be moved onto another
-token. The client address the frontend vouches for to the engine (`x-client-ip`) goes with another key
-derived from it (`x-proxy-key`), never the key itself, so a header that leaks into a log cannot sign a
-cookie; settlement, which has no rate limits, gets neither. With `COOKIE_SECURE=true`, which any deployment over HTTPS should
-set, the names start with `__Host-` and the cookies live on `/`, so a browser takes them only from
-this host over HTTPS and a neighbouring subdomain or a plain HTTP response cannot plant one. Plain
-HTTP cannot have that guarantee, so the default for `http://localhost` is the signed names alone, on
-`/api`, and a production start without `COOKIE_SECURE=true` refuses to run unless
-`ALLOW_INSECURE_COOKIES=true` says the stack is on plain HTTP on purpose, as the compose stack on
-`localhost` does: a whole pair from another sign-in could still be planted there. Such a pair cannot
-take a session over: the page keeps the id of its own sign-in, given at sign-in and by
-`/api/auth/session` and remembered for the next page load, sends it with every request as
-`x-session-id`, and the frontend uses exactly that pair of cookies instead of the newest. A page
-whose own sign-in is gone is told it is signed out, by `/api/auth/session` too, and keeps asking about
-that sign-in, so it shows the sign-in card and moves to another sign-in only when the user signs in or
-a tab of this browser announces one; only a page that knows no sign-in yet is given the newest. Every
-other route answers 409 to a page whose own sign-in is gone while the browser holds another, and 401
-once it holds none. A sign-out ends every session the browser holds, newer ones included, so none is
-left to take over the page after it.
-
-A sign-in ends on the engine every session the browser forgets, and a sign-out every other one, by its
-refresh token, or by its access token when only that cookie is left. Their cookies go only after the
-engine answered that the session is over, within 2 s (6 s for a sign-out,
-whose answer the user waits for and which the engine may take 5 s to give); otherwise they stay. A
-sign-in or a sign-out lists every session it made the browser forget, ended or not, in `mx_ending`, a
-cookie signed with the frontend's key, and the next request tries again alongside its own call to end
-those still there, so no session is left for its 7 days. A listed session is never used again,
-whether or not the engine has ended it yet: a request for it is answered 409 while the browser holds
-another sign-in, so a page that missed the sign-in stops trading on the old account, and a late answer
-that brings back the cookies of a listed session only gets them ended and cleared once more. The
-frontend also remembers which sessions it ended or listed and never stores a pair for one of them, so
-a request that rotated one meanwhile cannot bring it back. Nor does `/api/auth/session` take a fresh
-access cookie on trust when another request just rotated that pair: it asks the engine
-(`GET /auth/session`) whether the session still lasts, and rotates or signs the page out if not. Both
-memories are per process; the list in the cookie holds across processes. That request only clears the
-cookies of what it ended: only a sign-in or a sign-out writes the list, so a request that crosses a
-sign-in cannot drop what the sign-in listed. A sign-out that cannot end another session answers 503,
-or that session would take over. Apart from that list `/api/auth/session` and the other routes never
-end a session, and only the frontend can sign the list, so a planted cookie cannot end a real session
-through a page load. Cookies of older formats (without an id, with an unsigned id or value, without the prefix
-once `COOKIE_SECURE=true` is on) are never used; sign-in, sign-out and `/api/auth/session` end their
-sessions by the same rule and clear them on `/` and `/api`, and a sign-out waits 6 s for them too and
-answers 503 while one of them is not ended. Only the exact names older versions gave count. A cookie
-whose value is not a token is cleared without asking the engine and takes no place; of the rest, four
-sessions at most are ended per request, and a sign-out answers 503 while more are left. Every old
-cookie dealt with is noted by a hash of its name and value in `mx_legacy_done`, another signed
-cookie, so one that cannot be cleared, planted for a parent domain or on another path, is not sent to
-the engine again on every check, and planted cookies cannot turn page loads into a flood of requests
-to the engine. A sign-in, a sign-out and `/api/auth/session` end those sessions and old cookies side
-by side through one helper, `endAndForget`, which clears what it ended and returns what is left, and
-each route decides what to do with that. Every cookie is written as a `Set-Cookie` header of its own,
-never through `response.cookies`, since Next.js rewrites all `Set-Cookie` headers whenever it sets a
-cookie that way, so no write can drop another, whatever their order.
-
-All tabs share the cookies, so a sign-in or sign-out reaches the other tabs through a
-`BroadcastChannel`, and a tab checks its session when it gets focus, at most every 30 s. In case a
-tab hears neither, the frontend answers 409 to a request for a sign-in the browser no longer has (401
-when it holds no sign-in at all), so a stale tab cannot trade, cancel or read on an account it does not show. The page then checks at once
-and, with its own sign-in gone, shows the sign-in card rather than another account, and a socket
-asking for a ticket stops asking. A check that fails is repeated once, and a signal that arrives
-during a check causes one more check, so news is not lost; an announced sign-in whose check an earlier
-answer made stale is asked about again. Any answer, even one that changes nothing, stops a check still
-retrying from before, so that check cannot say later that it could not check. A
-check that still fails is tried again after 5 s, then after pauses that double up to 30 s, until it
-gets an answer. A first check that gets none keeps the remembered sign-in and says the page could not
-check it, instead of showing the user as signed out and making them sign in again.
-A tab asks about a sign-in another tab announced, but its requests keep the id of the account it shows
-until the answer is on screen, so nothing is sent for an account the page does not show yet. Once
-that question is answered, even with another sign-in because the announced one is already over, the
-tab stops asking about it, unless a newer announcement came in meanwhile.
-A page keeps nothing of the account before it, and `/login` sends someone signed in onward. A session that turns out to be over is cleared only under the names the
-request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
-while a dead session is still forgotten at once; the page also ignores refusals of requests sent
-before the latest change of session. A refusal of the session the page shows sends it to the sign-in
-card at once, and the page keeps asking about that session: it does not take another sign-in the
-browser holds, which a neighbouring subdomain could have planted, but it follows one another tab
-announces, so a tab refused in the middle of a sign-in elsewhere still moves to it. The tracker pins
-the remembered session itself when it starts, so requests and checks never ask about different ones.
-A service that refuses an access token just rotated means the
-session is over: its cookies are cleared and the new pair is ended, not stored; if the engine cannot
-end it yet, the new pair is stored and the answer is 503, so the next request ends it. The attempt id of a rotation is
-an HMAC of the cookies and the browser, so a retry always repeats it, whatever happened in between,
-without keeping anything in memory that other sessions could push out. An order
-answer only changes the stored attempt of the same send, and while an order is still on its way
-any other form for it can neither discard nor resend it. Every form of a tab shares one copy of
-the attempt in memory, which `sessionStorage` only mirrors for a reload, so a browser that refuses
-to store it still keeps the warning and the key. A refresh token a newer rotation already replaced
-is answered 409, and the frontend keeps the cookies and answers 503, so a late request cannot sign
-out a session that moved on. A wrong password on `/login` does not sign out the session already open,
-a sign-in ends the loading state of a session check still retrying, and orders and balances that
-loaded stay shown when reloading them fails. A successful answer is shown unless a newer one already
-was, even while a newer reload is running, and only the latest reload sets or clears the error, so a
-late failure cannot hang an error over fresh data. A quantity typed while an order is on its way
-stays when that order is accepted, even the same number typed again. The answer to an order or a cancel is shown only to the user who
-sent it, toasts on screen go away when the signed-in user changes, and a session that ended goes
-straight to the sign-in card without a toast. Recent trades stay shown when reloading them fails too,
-and the wallet's "Updated" time is when the request started, since the balances are no newer. A
-Cancel button comes back after 5 s if the order is still open. The frontend's API refuses any
-request another site makes the browser send, reads included, since a read may rotate the session;
-every page forbids being framed.
+CI (`.github/workflows/ci.yml`) runs lint, typecheck, unit and integration tests of every service,
+a browser smoke test against the compose stack and the chaos test on every push and pull request.
 
 ## Architecture and data path
 
@@ -243,64 +77,45 @@ flowchart LR
   S -- PUBLISH wallet change --> PS
 ```
 
-1. `POST /orders` on any engine validates the order, checks the `Idempotency-Key`, appends a
-   command to `orders:commands:<instrument>` and answers `202 {orderId}`. Redis runs with
+1. `POST /orders` on any engine validates the order, checks the `Idempotency-Key`, appends a command
+   to `orders:commands:<instrument>` and answers `202 {orderId}`. Redis runs with
    `appendfsync always`, so a 202 means the command is on disk.
 2. The owner of the instrument reads the stream in order and matches each batch in memory.
 3. It commits the batch in one Postgres transaction: changed orders, trades, outbox rows and the id
-   of the last applied command. The first statement checks its fencing token.
-4. After the commit it publishes book deltas with a sequence number, trades and order updates
-   through Redis pub/sub, and reads the next batch only once they are out; every engine forwards
-   them to its own WebSocket clients. An owner that dies between commit and publish loses those
-   messages. An owner notes in Redis the last sequence number it got out, so a new owner that finds
-   that note behind the book, or cannot read it, first tells all clients to reload the book and their
-   orders.
+   of the last applied command. Before it writes anything it checks its fencing token.
+4. After the commit it publishes book deltas with a sequence number, trades and order updates through
+   Redis pub/sub; every engine forwards them to its own WebSocket clients.
 5. The outbox relay moves each trade to `trades:<instrument>`.
 6. Settlement reads that stream through a consumer group and books the trade in one transaction.
-7. It publishes the wallet change of both sides and only then acknowledges the event; each owner
-   gets a `wallet` event over WebSocket.
+7. It publishes the wallet change of both sides and only then acknowledges the event; each owner gets
+   a `wallet` event over WebSocket.
 
 ## Order book consistency
 
-**Single writer per instrument.** All orders of an instrument go through one Redis stream, and only
-the instance that holds the instrument's lease reads it. Matching therefore happens in one place, in
-the order the commands sit in the stream, with no lock around matching that would only "mostly"
-serialise concurrent requests.
-
-**What the broker guarantees.** A Redis stream gives every entry a strictly increasing id at
-`XADD`, so the order of entries is the order in which Redis accepted the commands. That is the
-arrival order the exchange commits to, and every replay sees the same order. Before `XADD` there is
-no order: two requests still travelling through nginx and two engines can reach Redis either way
-round. The `202` is sent only after `XADD`, so a client that waits for it gets its own orders
-matched in its own order.
-
-**Order of trade events.** Each instrument's trades go to its own stream in commit order: the
-outbox relay runs on one instance at a time and publishes in id order. Settlement does not depend on
-that order, since postings only add to or subtract from balances.
-
-**Determinism.** Time priority uses a per-instrument `seq`, not wall clocks; an order's time and a
-trade's time come from the stream id, and trade ids are derived from the order id. Replaying a
-stream gives the same trades, ids and book, and the tests compare the stored state with a replay.
-
-**Exactly-once application.** The stream position is committed in the same transaction as the
-orders and trades it produced, so a new owner resumes after the last committed command. After any
-failed batch the owner reloads its state from Postgres and matches nothing until that succeeds.
-
-**Self-trade prevention.** An order that reaches a resting order of its own owner on the other side
-stops there: whatever it traded with better-priced counterparties before stays, and the rest of it
-is cancelled. It never trades with itself, and it never rests across its owner's order, so the book
-is never crossed, which the reference tests check for every pair of orders, of one owner or two.
-
-**Cancels.** A cancel goes through the stream of the order it names, so it is applied after that
-order, in arrival order. An order that got its 202 may still wait in the stream when its cancel
-comes, for a few milliseconds or through a whole takeover, and Postgres does not know it yet. Its
-instrument is noted in the same Redis transaction as its `XADD` and kept for 24 hours, so such a
-cancel still goes to the right stream and the order is cancelled as soon as it is applied, instead of
-the cancel answering 404 while the order goes on to trade. Another user's order and an order that
-was never accepted still get 404.
-
-**Persistence.** Every batch is committed, which is stricter than periodic persistence: the book in
-memory always equals the open orders in Postgres, and any instance can rebuild it.
+- **Single writer per instrument.** All commands of an instrument go through one Redis stream, and
+  only the instance holding the instrument's lease reads it. Matching happens in one place, in stream
+  order, with no lock around request handlers that would only "mostly" serialise them.
+- **What the broker guarantees.** `XADD` gives every entry a strictly increasing id, so the order of
+  entries is the order in which Redis accepted the commands. That is the arrival order the exchange
+  commits to, and every replay sees the same order. Before `XADD` there is no order: two requests
+  still travelling through nginx can reach Redis either way round. A client that waits for its 202
+  gets its own orders matched in the order it sent them.
+- **Determinism.** Time priority uses a per-instrument `seq`, not wall clocks; trade ids are derived
+  from the order id. Replaying a stream gives the same trades, ids and book, and the tests compare
+  the stored state with a replay.
+- **Exactly-once application.** The stream position is committed in the same transaction as the
+  orders and trades it produced, so a new owner resumes after the last committed command. After a
+  failed batch the owner reloads its state from Postgres before matching anything.
+- **Persistence.** Every batch is committed, which is stricter than periodic persistence: the book in
+  memory always equals the open orders in Postgres, and any instance can rebuild it.
+- **Self-trade prevention.** An order that reaches a resting order of its own owner stops there: what
+  it traded with better-priced counterparties stays, and the rest is cancelled. It never trades with
+  itself and never rests across its owner's order, so the book is never crossed.
+- **Cancels.** A cancel goes through the stream of the order it names and is applied after that
+  order. An order that got its 202 may still wait in the stream when its cancel arrives; its
+  instrument is noted in the same Redis transaction as its `XADD` (kept 24 h), so the cancel still
+  reaches the right stream. A filled order answers 409, a partly filled one is cancelled in the
+  rest and keeps its filled part, and another user's order answers 404.
 
 ## Failover
 
@@ -310,101 +125,63 @@ memory always equals the open orders in Postgres, and any instance can rebuild i
 | Renewal (`LOCK_RENEW_INTERVAL_MS`) | every 1.5 s |
 | Acquisition attempts (`LOCK_ACQUIRE_INTERVAL_MS`) | every 1 s |
 
-**Who detects a dead owner.** No one has to: the owner keeps its lease alive by renewing it, each
-lease on its own so that one slow renewal holds up no other, a lease that is not renewed expires on
-its own, and every instance tries to acquire free instruments every
-second, each instrument on its own and side by side, so an instrument that cannot start or loads
-slowly keeps none of the others waiting. Acquire, renew and release are atomic Lua scripts.
+**Who detects a dead owner.** No one has to: an owner keeps its leases alive by renewing them, a
+lease that is not renewed expires on its own, and every instance tries to acquire free instruments
+every second. Each lease is renewed and acquired on its own, so one slow instrument holds up no
+other. Acquire, renew and release are atomic Lua scripts.
 
 **Split brain.** A TTL alone does not stop an owner that froze and wakes up after someone else took
-over. Two mechanisms do:
+over:
 
 - **Fencing token.** Acquiring increments a counter in Redis. The new owner raises
-  `instrument_state.fence` to its token before it reads the book, and every commit starts with
-  `UPDATE instrument_state … WHERE fence = <my token>`. A stale owner updates zero rows, rolls back
-  and steps down, so nothing it computed reaches the database.
-- **Local deadline.** Before each commit an owner checks that its monotonic clock still leaves the
-  lease a margin of `max(TTL / 5, 200 ms)`, and stops if not. A commit that runs past the lease is
-  still stopped by the fencing token.
-- **A batch cannot outwait the lease.** The first statement of a batch locks the instrument's row in
-  `instrument_state` until the commit, and the batch may sit idle in its transaction no longer than
-  the lease (`idle_in_transaction_session_timeout`). An owner frozen in the middle of a batch
-  therefore loses its transaction, its lock and that batch by the time its lease runs out, so the
-  new owner's claim of the fence is not held up, and the zombie's batch fails when it wakes.
+  `instrument_state.fence` to its token before it reads the book, and every batch runs
+  `UPDATE instrument_state … WHERE fence = <my token>` before it writes anything. A stale owner
+  updates zero rows, rolls back and steps down, so nothing it computed reaches the database.
+- **Local deadline.** Before each commit an owner checks on its monotonic clock that the lease still
+  has a margin of `max(TTL / 5, 200 ms)`, and stops if not.
+- **No batch outlives the lease.** A batch may sit idle in its transaction no longer than the lease
+  TTL, so an owner frozen mid-batch loses its transaction and its row lock, and the new owner is not
+  held up.
 
 **Expected downtime of an instrument.**
 
-| Event | Expected maximum | Measured by the chaos test |
+| Event | Expected maximum | Measured by the chaos test, locally and in CI |
 |---|---|---|
-| Owner killed (`kill -9`) | ~7 s: lease expiry ≤ 5 s, acquisition ≤ 1 s, loading the book | 5.0–5.8 s |
-| Owner frozen past its lease | the same; the zombie is rejected when it wakes | 6.1–6.8 s |
-| Owner stopped (`SIGTERM`) | ~1 s: it finishes its batch, then releases the lease | 1.3–1.5 s |
+| Owner killed (`kill -9`) | ~7 s: lease expiry ≤ 5 s, acquisition ≤ 1 s, loading the book | 5.2–5.5 s |
+| Owner frozen past its lease | the same; the zombie is rejected when it wakes | 6.2–6.6 s |
+| Owner stopped (`SIGTERM`) | ~1.5 s: it finishes its batch, then releases its leases | 1.2–1.5 s |
 
-During the downtime the API keeps accepting orders. They wait in the stream and the new owner
-applies them in order, so no accepted order is lost or applied twice.
+During the downtime the API keeps accepting orders. They wait in the stream and the new owner applies
+them in order, so no accepted order is lost or applied twice.
 
 ## Exactly-once settlement
 
-The engine writes each trade to an outbox in the same transaction as the trade; a relay copies it
-to `trades:<instrument>`. A crash between the two steps publishes it again, so delivery is at least
-once. Settlement books a trade in one transaction:
+The engine writes each trade to an outbox in the same transaction as the trade; a relay copies it to
+`trades:<instrument>`. A crash between the two steps publishes it again, so delivery is at least once.
+Settlement makes it exactly once by booking a trade in one transaction:
 
 1. Insert `ledger_transactions(reference = 'trade:<tradeId>')`, which has a unique index, with
-   `ON CONFLICT DO NOTHING`. If the row exists, this is a redelivery: the stored trade is compared
-   with the event, which is acknowledged as a duplicate, or dead-lettered if the details differ.
+   `ON CONFLICT DO NOTHING`. If the row exists, this is a redelivery: it is acknowledged as a
+   duplicate, or dead-lettered if its details differ from the settled trade.
 2. Record the trade in `settled_trades`.
 3. Post four double-entry lines: the buyer pays USD and receives the asset, the seller the opposite.
 4. Update the balances in sorted account order, so concurrent trades cannot deadlock.
 
-The event is acknowledged only after the commit and the wallet announcement. If settlement dies in
-between, another consumer reclaims the event, step 1 finds the reference, and the money does not
-move again. A trade that keeps failing is retried until it was delivered `CONSUMER_MAX_DELIVERIES`
-times and is older than `CONSUMER_GIVE_UP_AFTER_MS` (an hour), then dead-lettered with the last
-error; reconciliation shows it as unsettled. Once the cause is fixed, put those dead letters back on
-their streams; settling twice is impossible, so replaying is safe. Malformed events and trades that
-conflict with a settled one stay dead-lettered unless named with `--id`, since replaying them changes
-nothing:
+The event is acknowledged only after the commit. If settlement dies in between, another consumer
+reclaims the event, step 1 finds the reference, and the money does not move again. A trade that keeps
+failing is retried until it was delivered 20 times and is an hour old (`CONSUMER_MAX_DELIVERIES`,
+`CONSUMER_GIVE_UP_AFTER_MS`), then dead-lettered; once the cause is fixed it can be put back safely:
 
 ```bash
 docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/consumer/replay-dead-letters.js [--id <dead-letter id>]
 ```
 
-**Reconciliation** checks that every ledger transaction balances, every balance touched in the
-period equals its entries, every trade has the right four entries, and that the engine's trade count, quantity and
-`Σ price × quantity` per instrument equal the ledger's count, quantity and USD moved. It looks at
-one period: the trades executed in it, the ledger transactions created in it, and the accounts
-they touched. A run without `from` checks at most one day (`RECONCILIATION_STEP_HOURS`), starting
-where the last run ended, or at the first trade either service knows of. No period ends later than
-a minute ago or than the oldest trade that is not settled yet: a command a book has not applied, a
-trade still in the engine's outbox, or one waiting in settlement's consumer group (only its
-undelivered and unacknowledged trades are read, at most `RECONCILIATION_BACKLOG_LIMIT`, 10 000 by
-default, per stream; past that the run is `incomplete`). A trade carries
-the time its order entered the stream, so a book or a queue that lags behind could still add trades
-to a period checked earlier. The engine is asked first and settlement's queue after it, so a trade that leaves the outbox
-meanwhile is still seen, and the end of the period is fixed before either is asked. If either cannot
-say what it has not finished, the run is `incomplete` and does not move on; while something the
-checkpoint is already past is unfinished, a run says there is nothing new to check and names what it
-waits for (the engine, settlement, or the error it got) instead of checking anything again. A period
-cut short of the `to` it was asked for says why in `endedEarly`, and a `from` past that point is
-answered as `incomplete` with the reason. Settlement waits for the engine's totals for
-`ENGINE_TIMEOUT_MS` (75 s), longer than the gateway (70 s), and the gateway longer than the engine
-lets a query run, so a slow period gets its answer instead of ending `incomplete`. A period that does not match is saved in the same
-transaction as the checkpoint and checked again, ten per run within a minute, those checked longest
-ago first, until it matches; the report lists them under `unresolved` with their count in
-`unresolvedTotal` and stays `mismatch` meanwhile; a period that matches again is left out of both
-even if its removal failed or its answer was lost. That every asset adds up to zero over all accounts
-is a check of the whole ledger, not of a period: a run that finds it broken is `mismatch` and lists
-it under `assetsNotBalanced`, but no period is blamed or kept for it, so an old error does not pile
-up, and a run is clean again once the ledger is. An account with an old error in it is still found
-by every period that touches that account, since a balance has no history to compare a period with.
-A saved checkpoint does not lose the report: if the unresolved periods or the totals cannot be read
-afterwards, the run says so and is `incomplete`. A run with nothing new to check still adds up the
-whole ledger. The operations panel keeps the last result next to a refresh that failed and marks its
-badge stale. Pages that ask for a run while one is going get its
-report instead of starting another. The operations panel waits up to five minutes for a run and gives
-up on an answer that does not come. So a
-trade that never got settled keeps showing up, the next days are still checked, a clean history is
-not checked again, and no run scans everything. Pass `from` and `to` for any other period. Run it as `GET /admin/reconciliation` (admins) or:
+**Reconciliation** checks, for one period at a time, that every ledger transaction balances, every
+touched balance equals its entries, every trade has its four entries, and that the engine's trade
+count, quantity and `Σ price × quantity` per instrument equal the ledger's. A run without `from`
+checks up to a day after the last checked period and never past a trade that is not settled yet. A
+period that does not match is kept and checked again until it does. Run it from the operations
+panel, as `GET /admin/reconciliation?from=&to=` (admins) or:
 
 ```bash
 docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist/reconciliation/reconcile.js
@@ -415,15 +192,53 @@ docker compose exec settlement-service sh /opt/secrets/with-secrets.sh node dist
 | Table | Index | Used by |
 |---|---|---|
 | `orders` | primary key `id` | cancel, which looks an order up by id and owner |
-| `orders` | `(ownerId, createdAt)`, and the same where active | a user's finished and active orders |
+| `orders` | `(ownerId, createdAt)`, and the same where active | a user's active and finished orders |
 | `orders` | `(instrument, seq)` where open | loading a book, snapshots |
 | `trades` | unique `(instrument, seq)`, `(executedAt)` | trade feed, engine totals |
-| `outbox` | `(id)` where unpublished, `(publishedAt)` where published | the relay, purging old messages |
-| `users` | unique `(email)`, `(lower(email))` | sign-in |
 | `accounts` | unique `(ownerId, asset)` | a user's wallet, posting |
 | `ledger_transactions` | unique `(reference)`, `(createdAt)` | idempotent settlement, reconciliation by period |
 | `ledger_entries` | `(transactionId)`, `(accountId)` | reconciliation of transactions and balances |
 | `settled_trades` | primary key `tradeId`, `(executedAt)`, `(instrument, executedAt)` | redelivery check, reconciliation by period |
+
+## Real-time book and resync
+
+- A subscriber gets a `book_snapshot` with the book's `seq`, then a `book_delta` for every change with
+  the next `seq`, and a `book_heartbeat` with the current `seq` every 2 s. Trades and the user's own
+  order and wallet changes come as `trade`, `order` and `wallet` events.
+- The client applies a delta only if its `seq` is exactly the next one. A gap, a heartbeat ahead of
+  its `seq`, or silence marks the book `stale`, and the client fetches a new snapshot instead of going
+  on with old data. After a reconnect it always starts from a snapshot.
+- The page shows the state of the connection: `live`, `reconnecting` or `stale`.
+- A new owner that cannot be sure every change was published tells all clients to resync.
+
+## Security
+
+- **Authentication.** JWT access tokens (15 min) and refresh tokens (7 days) with rotation; reusing a
+  refresh token or signing out ends the session, and its access token and WebSockets are refused at
+  once. The frontend keeps tokens in httpOnly cookies, and the page never sees them; WebSockets
+  connect with a 30-second ticket.
+- **IDOR.** Orders and wallets are read and changed only for the owner of the token; another user's
+  order answers 404, as if it did not exist.
+- **Validation.** DTOs with whitelisting on every endpoint; prices and quantities are decimal strings
+  with a fixed number of decimals, and one order is worth at most 10^15 USD.
+- **Rate limits** in Redis, shared by all instances: orders and cancels 20/s per user, sign-in and
+  registration 10/min per IP, public reads 100/s per IP.
+- **Browser.** CORS allow-list, cross-site requests to the frontend's API refused, a content security
+  policy and no framing.
+
+## Observability
+
+- **Trace ID.** Every request gets an `x-request-id`. It travels with the command through the stream,
+  into the trade, the outbox event and settlement, and the engine and settlement log JSON lines with
+  it.
+- **Metrics.** `/metrics` of each service needs its internal key:
+
+  ```bash
+  docker compose exec settlement-service sh -c '. /run/exchange/secrets.env; wget -qO- --header "x-internal-key: $SETTLEMENT_INTERNAL_KEY" localhost:3002/metrics'
+  ```
+
+- **Operations panel** (`/ops`, admins): the owner and state of every book, the settlement queue
+  (lag, pending, retries, dead letters) and the last reconciliation.
 
 ## Problems found in the starter
 
@@ -432,24 +247,22 @@ it. The `proof/*` branches keep those commits with their CI runs.
 
 | # | Problem | How it was confirmed | Fix | Proof |
 |---|---|---|---|---|
-| 1 | **Fake test.** `self-trade.spec.ts` only checked `expect(result).toBeTruthy()`, which passes whatever the matcher does. | The rewritten test fails against a matcher that lets an owner trade with itself | The tests check that no trade happens, that better-priced counterparties before the owner's order still trade, and that the rest of the new order is cancelled there instead of resting across it | `proof/matcher-core` |
+| 1 | **Fake test.** `self-trade.spec.ts` only checked `expect(result).toBeTruthy()`, which passes whatever the matcher does. | The rewritten test fails against a matcher that lets an owner trade with itself | The test checks that no trade happens, better-priced counterparties still trade, and the rest of the order is cancelled | `proof/matcher-core` |
 | 2 | **Concurrent orders on one book.** Matching ran in request handlers on a shared in-memory book: orders arriving together were lost or double-filled, cancelled orders came back, a cancel naming another instrument left the order matchable, filled orders stayed open in the database, the book was lost on restart, and a retried request created a second order. | `starter-bugs.int-spec.ts`: one test per symptom, all failing before the fix | Command stream per instrument with a single writer, batch commits, required `Idempotency-Key` | `proof/command-log` |
 | 3 | **IDOR on cancel.** `DELETE /orders/:id` cancelled any user's order. | "does not let a user cancel someone else's order" | Only the owner can cancel; another user's order gives 404 | `proof/command-log` |
 | 4 | **The lock.** It was not wired into order processing, had no TTL, so a killed owner held its instrument forever, released with a non-atomic `GET` then `DEL`, and every replica got the same `INSTANCE_ID`. | `failover.int-spec.ts`, `ownership-identity.spec.ts` | Lease with TTL and renewal in Lua, per-process identity, shutdown hooks, fencing token | `proof/ownership` |
-| 5 | **Silent stale client.** Book messages had no sequence number and `broadcastDepth` was never called, so a subscriber never saw updates and could not tell. | `realtime.int-spec.ts` | A snapshot and numbered deltas plus a heartbeat with the current `seq`. The client marks the book `stale` on a gap, a heartbeat ahead of it or silence, and fetches a new snapshot; the page shows `live`, `reconnecting` or `stale` | `proof/realtime` |
+| 5 | **Silent stale client.** Book messages had no sequence number and `broadcastDepth` was never called, so a subscriber never saw updates and could not tell. | `realtime.int-spec.ts` | Snapshot, numbered deltas and heartbeats; the client resyncs on a gap ([details](#real-time-book-and-resync)) | `proof/realtime` |
 | 6 | **Floating-point money.** `0.001` became zero and large values lost digits. | `matcher-precision.spec.ts`, `order-validation.spec.ts` | Decimal strings in the API, BigInt fixed-point matching | `proof/matcher-core` |
-| 7 | **Counterparty leak.** `POST /orders` returned trades with both user ids. | "returns only the order id and status" | Returns `{orderId, status}` | `proof/matcher-core` |
-| 8 | **Did not start cleanly.** A lint error broke the frontend build, `dist/main` was missing, an entity column had no type, and `synchronize: true` fails when two engines start together. | Compose smoke in CI | Fixes plus migrations run by a one-off `migrate` service | `proof/startup` |
+| 7 | **Counterparty leak.** `POST /orders` returned trades with both user ids. | `orders-response.spec.ts` | Returns `{orderId, status}` | `proof/matcher-core` |
+| 8 | **Did not start cleanly.** A lint error broke the frontend build, `dist/main` was missing, an entity column had no type, and `synchronize: true` fails when two engines start together. | Compose smoke in CI | Fixes, plus migrations run by a one-off `migrate` service | `proof/startup` |
 | 9 | **Settlement not implemented.** | `settlement.int-spec.ts` | See [Exactly-once settlement](#exactly-once-settlement) | `proof/settlement` |
-| 10 | **No rate limit, default secrets, open CORS.** | `platform.int-spec.ts` | Rate limits in Redis shared by instances, required secrets, CORS allow-list | `proof/platform` |
-| 11 | **Cancel.** The starter's cancel set any order to `cancelled` with nothing left: a filled order looked cancelled after it had traded, and a partially filled one lost how much of it was filled. Once orders went through the command stream, a cancel sent right after the 202 found nothing in Postgres yet and answered 404, while the order went on to rest and trade. | `cancel.int-spec.ts`: "refuses it with 409 and keeps the order filled", "keeps how much of it was filled", "cancels it once it is applied, instead of answering 404 and letting it trade" | A filled order answers 409 and stays filled; a cancel keeps the filled part; a cancel of an order still in the stream goes to that order's stream and is applied after it | `cancel.int-spec.ts` |
+| 10 | **No rate limit, default secrets, open CORS.** | `platform.int-spec.ts` | Shared rate limits in Redis, generated secrets, CORS allow-list | `proof/platform` |
+| 11 | **Cancel.** The starter's cancel set any order to `cancelled` with nothing left: a filled order looked cancelled after it had traded, and a partly filled one lost how much of it was filled. Once orders went through the command stream, a cancel sent right after the 202 found nothing in Postgres yet and answered 404, while the order went on to rest and trade. | `cancel.int-spec.ts` | A filled order answers 409, a cancel keeps the filled part, and a cancel of an order still in the stream is applied right after it | `cancel.int-spec.ts` |
 
-The starter came with two tests: `matcher.spec.ts` keeps its tests unchanged and green, and `self-trade.spec.ts`
-was rewritten because it tested nothing (problem 1).
+The starter came with two tests: `matcher.spec.ts` keeps its tests unchanged and green, and
+`self-trade.spec.ts` was rewritten because it tested nothing (problem 1).
 
 ## Chaos test
-
-To reproduce it:
 
 ```bash
 docker compose down -v
@@ -457,9 +270,9 @@ docker compose -f docker-compose.yml -f docker-compose.chaos.yml up -d --build
 node scripts/chaos/run.mjs              # writes chaos-report.md
 ```
 
-`docker-compose.chaos.yml` only raises the rate limits. It also runs in CI as the `chaos` job.
+`docker-compose.chaos.yml` only raises the rate limits. The test also runs in CI as the `chaos` job.
 
-Eight workers place orders for ten traders on all three instruments, about 150 a second, and retry
+Eight workers place orders for ten traders on all three instruments, 100–150 a second, and retry
 with the same `Idempotency-Key` on a timeout, a 5xx or a 429. While the load runs:
 
 | | Scenario |
@@ -469,28 +282,16 @@ with the same `Idempotency-Key` on a timeout, a 5xx or a 429. While the load run
 | C | `SIGTERM` the owner of `XYZ` |
 | D | `kill -9` settlement for 5 s while trades keep coming |
 
-After the load stops and the queues drain, it checks that:
-
-- every order that got a 202 is stored exactly once, and nothing else is stored;
-- the engines applied every command in the streams;
-- a replay of every stream gives the same trades and the same outcome for every order;
-- reconciliation is `ok` and every trade was settled once;
-- each takeover finished within 10 s, 10 s and 3 s, measured by a probe order sent straight to the
-  new owner;
-- the resumed zombie in B stepped down and committed nothing after waking: an owner logs the
-  commands of a batch right after its commit, and the zombie's log since it resumed holds none for
-  `DEF`.
+After the load stops and the queues drain, it checks that every order that got a 202 is stored
+exactly once and nothing else is; the engines applied every command; a replay of every stream gives
+the same trades and order outcomes; reconciliation is `ok` and every trade was settled once; each
+takeover finished within 10 s (A, B) and 3 s (C); and the resumed zombie in B committed nothing.
 
 **Before the fixes** the starter could not run the test at all: settlement was not implemented and
-concurrent orders were lost. Scenario A was reproduced on its own with the starter lock wired in
-(`a376930` in `proof/ownership`):
-
-| | Observed |
-|---|---|
-| Owner `engine-a` running | `lock:instrument:ABC = engine-a`, `PTTL -1`: the lock never expires |
-| 30 s after `kill -9 engine-a` | Still `engine-a`, `PTTL -1`; `engine-b` never took `ABC` over |
-| A buy against a resting sell after the kill | Accepted but never matched within 15 s |
-| `SIGTERM` instead of `kill -9` | The same: the order sent after the stop was never stored |
+concurrent orders were lost. Scenario A on its own, with the starter lock wired in (`a376930` in
+`proof/ownership`): the lock had no TTL (`PTTL -1`), 30 s after `kill -9` it still named the dead
+engine, the other engine never took `ABC` over, and an order sent after the kill was accepted but
+never matched. `SIGTERM` gave the same result.
 
 **After the fixes**, three local runs:
 
@@ -513,8 +314,8 @@ Redis Streams is the order log and Redis is the coordinator.
 - **Replay.** A stream keeps its entries, so a new owner resumes from a committed position and a
   checker can replay everything.
 - **Consumer groups** give settlement at-least-once delivery with acknowledgements and reclaiming.
-- **Atomic locks.** Lua scripts make the lease atomic. etcd or ZooKeeper would add consensus, but
-  the fencing check in Postgres makes correctness independent of it.
+- **Atomic locks.** Lua scripts make the lease atomic. etcd or ZooKeeper would add consensus, but the
+  fencing check in Postgres keeps correctness independent of the lock.
 - **One dependency.** The same Redis carries pub/sub for the book and the shared rate limits.
 
 ## Breaking changes
@@ -522,40 +323,25 @@ Redis Streams is the order log and Redis is the coordinator.
 | Before | After | Why |
 |---|---|---|
 | `POST /orders` → 201 with trades | 202 with `{orderId, status}` | Orders go through the command stream; trades must not leak counterparties |
-| `price`, `quantity` as numbers | Decimal strings, too many decimals gives 400 | No floating-point money |
-| Any price × quantity | At most 1,000,000,000,000,000 USD per order, checked by the order form, the API and the owner before it applies a command | Balances live in `numeric(38,10)`. At the old maximum about 100 trades between two accounts overflow a balance and break the settlement of every later trade of those accounts; with the limit that takes 10^13 trades |
+| `price`, `quantity` as numbers | Decimal strings; too many decimals gives 400; at most 10^15 USD per order | No floating-point money; balances must not overflow |
 | No idempotency | `Idempotency-Key` header required | A retried request must not create a second order |
-| `DELETE /orders/:id?instrument=` → 200 | `DELETE /orders/:id` → 202, also for an order still waiting in the stream; another user's order 404, a filled one 409 | IDOR and ghost orders |
+| `DELETE /orders/:id?instrument=` → 200 | `DELETE /orders/:id` → 202; another user's order 404, a filled one 409 | IDOR and ghost orders |
+| `GET /orders` returned every order | Every active order and the latest 100 finished ones; older ones through `GET /orders/history` | Bounded response |
 | `GET /orders/book` with a token, raw orders | Public, aggregated levels with `seq`, no owners | Public depth, no data leak |
-| WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, and private `order` and `wallet` | Sequence numbers and resync |
-| `POST /auth/login` → 201 | 200, plus `/auth/refresh`, `/auth/logout` and `GET /auth/session`, which answers whose access token it is while its session lasts | Sessions |
-| WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token. To roll out, update the engines first with `WS_ACCEPT_ACCESS_TOKENS=true` so pages already open still connect, then the frontend (until its engine issues tickets it keeps retrying rather than hand out the access token), then drop the setting |
-| `GET /metrics` open | Needs the internal key of the service | Metrics show traffic and internals |
-| `GET /orders` returned every order | Every active order and the latest 100 finished ones; older ones page by page through `GET /orders/history?before=&beforeId=`, which the orders page asks for with "Show older" | Bounded response |
-| Any password length | At most 72 bytes | bcrypt compares only 72 bytes |
+| WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, private `order` and `wallet` | Sequence numbers and resync |
+| `POST /auth/login` → 201 | 200, plus `/auth/refresh`, `/auth/logout`, `GET /auth/session` | Sessions |
+| WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket` | The page never holds an access token |
+| `GET /metrics` open | Needs the internal key of the service | Metrics show internals |
+| Frontend on port 3000 directly, Postgres and Redis published | nginx in front of the frontend; Postgres and Redis not published | Trustworthy client address; the command stream trusts its writers |
 | Messages in Ukrainian | English | Language of the project |
-| Frontend on port 3000 directly | nginx in front of it on port 3000 | Trustworthy client address |
-| Postgres on host port 5433, Redis on 6379 | Not published | No passwords, and the command stream trusts its writers |
-| Session cookies `mx_access`, `mx_refresh` on `/api` | Signed names and values on `/api`, on `/` with `__Host-` when `COOKIE_SECURE=true` | Everyone signs in once more after this change, and the old sessions are ended; a planted cookie must not pick the session |
-| Tokens told apart by which claims they lack | `typ` claim: `access`, `refresh` or `ws`, required by whoever takes the token | A new kind of token cannot pass as an old one. Tokens without `typ` are still taken until the last of them expires, 7 days after this change; then drop `issuedBeforeTypes` in both `token-claims.ts` and the `undefined` case of `isTokenOfType` |
-| `POST /auth/register` of a taken email → 409 | 409 only with another password; the same password signs in | A registration whose answer was lost can be repeated |
-| `x-proxy-key` carried `FRONTEND_PROXY_KEY`, which also signed the cookies | Two keys derived from it with HKDF, one for the header and one for the cookies | A header that leaks cannot sign cookies. Update the engines and the frontend together, or the engines count the frontend's address instead of the user's for a while; everyone signs in once more, and the old sessions are ended |
-| A production frontend with `COOKIE_SECURE=false` warned | It refuses to start, unless `ALLOW_INSECURE_COOKIES=true` | Plain cookies can be planted from a neighbouring subdomain. Set `COOKIE_SECURE=true` behind HTTPS; the compose stack on `http://localhost` sets `ALLOW_INSECURE_COOKIES=true` |
-| A page whose sign-in was gone moved to the newest one in the browser | It is told it is signed out, and moves only on a sign-in or an announcement from another tab | A planted pair must not take the page over. A tab that missed the announcement of a sign-in elsewhere shows the sign-in card |
-| `ledger.assetsNotBalanced` in a reconciliation report | `assetsNotBalanced` next to `ledger`, only when something is off | It describes the whole ledger, not the period |
 
 ## Not done, or done differently next time
 
-- **Redis is a single point of failure.** Losing its disk loses commands accepted but not yet
-  applied. A replicated log (Redis with a replica and `WAIT`, or Kafka) would close that.
+- **Redis is a single point of failure.** Losing its disk loses commands accepted but not yet applied.
+  A replicated log (Redis with a replica and `WAIT`, or Kafka) would close that.
 - **No load balancing of instruments.** One instance can end up owning all of them.
 - **Streams are never trimmed**, to keep a full replay possible; production would trim them after a
   snapshot.
 - **No balance reservation.** Balances can go negative.
-- **A blocking failure stops its instrument.** A batch that can never commit, or a command stream
-  that fails three reads in a row, is retried and shown as stuck on the operations panel rather than
-  skipped. A trade that can never be booked is retried for
-  an hour, then dead-lettered and shown as unsettled by reconciliation until it is replayed.
-- **Registration shows that an email is taken.** Someone trying a taken email with a wrong password
-  gets 409. Hiding that takes a confirmation sent by email, which this exchange does not have; signing
-  in gives nothing away, and both are held to the sign-in rate limit.
+- **A blocking failure stops its instrument.** A batch that can never commit is retried and shown as
+  stuck on the operations panel rather than skipped.
