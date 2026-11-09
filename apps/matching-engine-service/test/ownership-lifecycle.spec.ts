@@ -11,9 +11,12 @@ const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 interface Setup {
   acquire: (key: string) => Promise<bigint | null>;
   startDelayMs: number;
+  start?: (instrument: string) => Promise<unknown>;
+  renew?: (key: string) => Promise<boolean>;
 }
 
-function ownership({ acquire, startDelayMs }: Setup) {
+function ownership({ acquire, startDelayMs, start, renew }: Setup) {
+  const leases = new Map<string, InstrumentLease>();
   const calls = {
     renewed: [] as string[],
     started: [] as string[],
@@ -24,7 +27,7 @@ function ownership({ acquire, startDelayMs }: Setup) {
     acquire,
     renew: async (key: string) => {
       calls.renewed.push(key);
-      return true;
+      return renew ? renew(key) : true;
     },
     release: async (key: string) => {
       calls.released.push(key);
@@ -34,15 +37,16 @@ function ownership({ acquire, startDelayMs }: Setup) {
   } as unknown as RedisLockService;
   const engine = {
     isStopping: () => false,
-    startInstrument: async (instrument: string) => {
-      await sleep(startDelayMs);
+    startInstrument: async (instrument: string, lease: InstrumentLease) => {
+      leases.set(instrument, lease);
+      await (start ? start(instrument) : sleep(startDelayMs));
       calls.started.push(instrument);
     },
     stopInstrument: async (instrument: string) => {
       calls.stopped.push(instrument);
     },
   } as unknown as MatchingEngineService;
-  return { service: new InstrumentOwnershipService(lock, engine), calls };
+  return { service: new InstrumentOwnershipService(lock, engine), calls, leases };
 }
 
 describe('instrument ownership lifecycle', () => {
@@ -59,7 +63,7 @@ describe('instrument ownership lifecycle', () => {
   });
 
   it('keeps renewing leases while slow instruments are still starting', async () => {
-    const { service, calls } = ownership({ acquire: async () => 1n, startDelayMs: 300 });
+    const { service, calls } = ownership({ acquire: async () => 1n, startDelayMs: 500 });
 
     await service.onApplicationBootstrap();
     const renewedBeforeLastStart = calls.renewed.filter((key) => key.endsWith(':ABC')).length;
@@ -68,6 +72,60 @@ describe('instrument ownership lifecycle', () => {
     expect(calls.started).toEqual(['ABC', 'DEF', 'XYZ']);
     expect(renewedBeforeLastStart).toBeGreaterThanOrEqual(3);
     expect(calls.stopped.sort()).toEqual(['ABC', 'DEF', 'XYZ']);
+  });
+
+  it('takes the other instruments over when one of them cannot start', async () => {
+    const { service, calls } = ownership({
+      acquire: async () => 1n,
+      startDelayMs: 0,
+      start: async (instrument) => {
+        if (instrument === 'ABC') throw new Error('claiming the fence timed out');
+      },
+    });
+
+    await service.onApplicationBootstrap();
+    await service.onModuleDestroy();
+
+    expect(calls.started.sort()).toEqual(['DEF', 'XYZ']);
+    expect(calls.released).toContain('lock:instrument:ABC');
+  });
+
+  it('does not make the other instruments wait for one whose start is slow', async () => {
+    const { service, calls } = ownership({
+      acquire: async () => 1n,
+      startDelayMs: 0,
+      start: (instrument) => sleep(instrument === 'ABC' ? 1_500 : 0),
+    });
+
+    const booting = service.onApplicationBootstrap();
+    await sleep(100);
+    const startedMeanwhile = [...calls.started].sort();
+    await booting;
+    await service.onModuleDestroy();
+
+    expect(startedMeanwhile).toEqual(['DEF', 'XYZ']);
+    expect(calls.started.sort()).toEqual(['ABC', 'DEF', 'XYZ']);
+  });
+
+  it('renews each lease on its own, so a slow renewal of one instrument lets no other lease lapse', async () => {
+    const { service, leases } = ownership({
+      acquire: async () => 1n,
+      startDelayMs: 0,
+      renew: async (key) => {
+        if (key.endsWith(':ABC')) await sleep(450);
+        return true;
+      },
+    });
+    await service.onApplicationBootstrap();
+
+    const lapsed = new Set<string>();
+    for (let n = 0; n < 50; n += 1) {
+      for (const instrument of ['DEF', 'XYZ']) if (!leases.get(instrument)?.isValid()) lapsed.add(instrument);
+      await sleep(20);
+    }
+    await service.onModuleDestroy();
+
+    expect([...lapsed]).toEqual([]);
   });
 
   it('stops and releases an instrument whose start was still running at shutdown', async () => {

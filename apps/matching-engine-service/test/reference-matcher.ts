@@ -76,13 +76,15 @@ export function referenceMatch(commands: StreamCommand[]): ReferenceResult {
       arrival: arrival++,
     };
     const opposite = incoming.side === 'buy' ? 'sell' : 'buy';
+    let reachedOwnOrder = false;
     while (incoming.remaining > 0n) {
-      const candidates = book.filter(
-        (order) =>
-          order.side === opposite && order.ownerId !== incoming.ownerId && crosses(incoming, order),
-      );
+      const candidates = book.filter((order) => order.side === opposite && crosses(incoming, order));
       if (candidates.length === 0) break;
       const resting = candidates.reduce((a, b) => better(opposite, a, b));
+      if (resting.ownerId === incoming.ownerId) {
+        reachedOwnOrder = true;
+        break;
+      }
       const quantity = resting.remaining < incoming.remaining ? resting.remaining : incoming.remaining;
       trades.push({
         buyOrderId: incoming.side === 'buy' ? incoming.id : resting.id,
@@ -94,7 +96,7 @@ export function referenceMatch(commands: StreamCommand[]): ReferenceResult {
       incoming.remaining -= quantity;
       if (resting.remaining === 0n) book.splice(book.indexOf(resting), 1);
     }
-    if (incoming.remaining > 0n) book.push(incoming);
+    if (incoming.remaining > 0n && !reachedOwnOrder) book.push(incoming);
   }
 
   return {
@@ -110,11 +112,11 @@ export function referenceMatch(commands: StreamCommand[]): ReferenceResult {
   };
 }
 
-export function crossedPairsBetweenOwners(result: ReferenceResult): [string, string][] {
+export function crossedPairs(result: ReferenceResult): [string, string][] {
   const pairs: [string, string][] = [];
   for (const bid of result.bids) {
     for (const ask of result.asks) {
-      if (bid.price >= ask.price && bid.ownerId !== ask.ownerId) pairs.push([bid.id, ask.id]);
+      if (bid.price >= ask.price) pairs.push([bid.id, ask.id]);
     }
   }
   return pairs;

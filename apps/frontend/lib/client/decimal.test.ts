@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest';
-import { subtractDecimals } from './decimal';
+import { notionalAbove, subtractDecimals } from './decimal';
+
+describe('the limit on what one order may be worth', () => {
+  it('lets an order up to it through and stops one above it', () => {
+    expect(notionalAbove('1000000.00', '1000000000')).toBe(false);
+    expect(notionalAbove('1000000.01', '1000000000')).toBe(true);
+    expect(notionalAbove('9999999999999999.99', '0.00000001')).toBe(false);
+    expect(notionalAbove('9999999999999999.99', '9999999999')).toBe(true);
+  });
+});
 
 describe('decimal arithmetic for display', () => {
   it('subtracts exactly where floating point would not', () => {

@@ -41,6 +41,7 @@ export interface BookRunnerOptions {
   blockMs: number;
   retryDelayMs: number;
   fence: bigint;
+  transactionIdleMs?: number;
   leaseValid: () => boolean;
   onFenced: (error: FencedOutError) => void;
   publish?: (event: MarketEvent) => Promise<boolean | void>;
@@ -56,7 +57,7 @@ const ROWS_PER_INSERT = 1_000;
 const MARKER_TIMEOUT_MS = 1_000;
 const READ_TIMEOUT_MARGIN_MS = 2_000;
 const READ_FAILURES_BEFORE_STUCK = 3;
-const STOP_WAIT_MS = 15_000;
+export const STOP_WAIT_MS = 15_000;
 
 function chunks<T>(rows: T[]): T[][] {
   const result: T[][] = [];
@@ -68,6 +69,13 @@ function chunks<T>(rows: T[]): T[][] {
 export function stuckKey(instrument: string): string {
   return `book:stuck:${instrument}`;
 }
+
+const RAISE_PUBLISHED = `
+if (tonumber(redis.call('GET', KEYS[1]) or '') or -1) < tonumber(ARGV[1]) then
+  redis.call('SET', KEYS[1], ARGV[1])
+end
+return 1
+`;
 
 export function publishedKey(instrument: string): string {
   return `book:published:${instrument}`;
@@ -295,10 +303,7 @@ export class BookRunner {
 
   private async markPublished(bookSeq: bigint): Promise<void> {
     await withTimeout(
-      this.options.redis.client.set(
-        publishedKey(this.instrument),
-        bookSeq.toString(),
-      ),
+      this.options.redis.client.eval(RAISE_PUBLISHED, 1, publishedKey(this.instrument), bookSeq.toString()),
       MARKER_TIMEOUT_MS,
       "Redis",
     ).catch(() => undefined);
@@ -457,6 +462,9 @@ export class BookRunner {
     }
 
     await dataSource.transaction(async (manager) => {
+      if (this.options.transactionIdleMs) {
+        await manager.query(`SET LOCAL idle_in_transaction_session_timeout = ${Math.ceil(this.options.transactionIdleMs)}`);
+      }
       const fenced = await manager.update(
         InstrumentState,
         { instrument: this.instrument, fence: this.options.fence.toString() },
@@ -482,11 +490,11 @@ export class BookRunner {
         await manager.insert(OutboxMessage, trades.map(tradeExecutedMessage));
       }
     });
+    this.logApplied(commands, result.orders, result.trades);
 
     const previousSeq = this.state.bookSeq;
-    this.replaceBook(result.book);
+    if (!this.stopped) this.replaceBook(result.book);
     this.state = result.state;
-    this.logApplied(commands, result.orders, result.trades);
     tradesExecuted.inc({ instrument: this.instrument }, result.trades.length);
 
     const updates: Promise<boolean>[] = [];

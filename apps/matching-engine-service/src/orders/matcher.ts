@@ -12,12 +12,6 @@ function compareUnits(a: bigint, b: bigint): number {
   return a === b ? 0 : a < b ? -1 : 1;
 }
 
-/**
- * Чиста функція зіставлення заявки з наявною книгою (price-time priority).
- * Не звертається до жодного зовнішнього стану — приймає знімок книги,
- * повертає результат. Побічні ефекти (запис у реальну книгу, персистенція)
- * — відповідальність викликача.
- */
 export function matchOrder(
   book: BookSnapshot,
   incoming: Order,
@@ -27,15 +21,13 @@ export function matchOrder(
   const touchedOrders: Order[] = [];
   const rawOpposite = incoming.side === 'buy' ? book.asks : book.bids;
   const oppositeSide: Order['side'] = incoming.side === 'buy' ? 'sell' : 'buy';
-  // Явно впорядковуємо протилежну сторону за price-time priority перед
-  // матчингом — не покладаємось на те, що виклик передав уже відсортований
-  // знімок книги.
   const opposite = inPriceTimePriority(rawOpposite, oppositeSide);
   const remainingOpposite: Order[] = [];
 
   const incomingPrice = toUnits(incoming.price, PRICE_SCALE);
   let remainingQty = toUnits(incoming.remainingQuantity, QUANTITY_SCALE);
 
+  let reachedOwnOrder = false;
   let index = 0;
   for (; index < opposite.length && remainingQty > 0n; index++) {
     const resting = opposite[index];
@@ -43,42 +35,38 @@ export function matchOrder(
     const priceCrosses =
       incoming.side === 'buy' ? incomingPrice >= restingPrice : incomingPrice <= restingPrice;
     if (!priceCrosses) break;
+    if (resting.ownerId === incoming.ownerId) {
+      reachedOwnOrder = true;
+      break;
+    }
 
-    // Self-trade prevention: заявки одного власника не зіставляються.
-    const sameOwner = resting.ownerId === incoming.ownerId;
+    const restingQty = toUnits(resting.remainingQuantity, QUANTITY_SCALE);
+    const tradeQty = remainingQty < restingQty ? remainingQty : restingQty;
+    const buyer = incoming.side === 'buy' ? incoming : resting;
+    const seller = incoming.side === 'buy' ? resting : incoming;
+    trades.push({
+      id: context.nextTradeId(),
+      instrument: incoming.instrument,
+      buyOrderId: buyer.id,
+      sellOrderId: seller.id,
+      buyerId: buyer.ownerId,
+      sellerId: seller.ownerId,
+      price: fromUnits(restingPrice, PRICE_SCALE),
+      quantity: fromUnits(tradeQty, QUANTITY_SCALE),
+      executedAt: context.now(),
+    });
 
-    if (!sameOwner) {
-      const restingQty = toUnits(resting.remainingQuantity, QUANTITY_SCALE);
-      const tradeQty = remainingQty < restingQty ? remainingQty : restingQty;
-      const buyer = incoming.side === 'buy' ? incoming : resting;
-      const seller = incoming.side === 'buy' ? resting : incoming;
-      trades.push({
-        id: context.nextTradeId(),
-        instrument: incoming.instrument,
-        buyOrderId: buyer.id,
-        sellOrderId: seller.id,
-        buyerId: buyer.ownerId,
-        sellerId: seller.ownerId,
-        price: fromUnits(restingPrice, PRICE_SCALE), // виконання за ціною заявки, що вже стояла в книзі
-        quantity: fromUnits(tradeQty, QUANTITY_SCALE),
-        executedAt: context.now(),
-      });
+    remainingQty -= tradeQty;
+    const restingRemainder = restingQty - tradeQty;
+    const touched: Order = {
+      ...resting,
+      remainingQuantity: fromUnits(restingRemainder, QUANTITY_SCALE),
+      status: restingRemainder > 0n ? 'partially_filled' : 'filled',
+    };
+    touchedOrders.push(touched);
 
-      remainingQty -= tradeQty;
-      const restingRemainder = restingQty - tradeQty;
-      const touched: Order = {
-        ...resting,
-        remainingQuantity: fromUnits(restingRemainder, QUANTITY_SCALE),
-        status: restingRemainder > 0n ? 'partially_filled' : 'filled',
-      };
-      touchedOrders.push(touched);
-
-      if (restingRemainder > 0n) {
-        remainingOpposite.push(touched);
-      }
-      // якщо restingRemainder === 0 — заявка повністю виконана, у книгу не повертається
-    } else {
-      remainingOpposite.push(resting);
+    if (restingRemainder > 0n) {
+      remainingOpposite.push(touched);
     }
   }
 
@@ -88,11 +76,13 @@ export function matchOrder(
     status:
       remainingQty === 0n
         ? 'filled'
-        : remainingQty < toUnits(incoming.quantity, QUANTITY_SCALE)
-          ? 'partially_filled'
-          : 'open',
+        : reachedOwnOrder
+          ? 'cancelled'
+          : remainingQty < toUnits(incoming.quantity, QUANTITY_SCALE)
+            ? 'partially_filled'
+            : 'open',
   };
-  const restingOrder: Order | null = remainingQty > 0n ? incomingOrder : null;
+  const restingOrder: Order | null = remainingQty > 0n && !reachedOwnOrder ? incomingOrder : null;
 
   const restOfOpposite = index === 0 ? opposite : remainingOpposite.concat(opposite.slice(index));
   sorted.add(restOfOpposite);
@@ -127,8 +117,8 @@ type PriorityKey = ReturnType<typeof priorityKey>;
 function comparePriority(side: Order['side'], a: PriorityKey, b: PriorityKey): number {
   const priceDiff =
     side === 'buy'
-      ? compareUnits(b.price, a.price) // bids: спадання ціни
-      : compareUnits(a.price, b.price); // asks: зростання ціни
+      ? compareUnits(b.price, a.price)
+      : compareUnits(a.price, b.price);
   if (priceDiff !== 0) return priceDiff;
   if (a.seq !== null && b.seq !== null) return compareUnits(a.seq, b.seq);
   return a.order.createdAt.getTime() - b.order.createdAt.getTime();

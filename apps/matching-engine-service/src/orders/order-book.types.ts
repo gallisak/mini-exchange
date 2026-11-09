@@ -13,8 +13,8 @@ export interface Trade {
 }
 
 export interface BookSnapshot {
-  bids: Order[]; // сортовані: ціна спадає, за рівної ціни — час зростає
-  asks: Order[]; // сортовані: ціна зростає, за рівної ціни — час зростає
+  bids: Order[];
+  asks: Order[];
 }
 
 export interface MatchContext {
@@ -24,7 +24,7 @@ export interface MatchContext {
 
 export interface MatchResult {
   trades: Trade[];
-  restingOrder: Order | null; // залишок заявки, що лягає в книгу (якщо є)
+  restingOrder: Order | null;
   incomingOrder: Order;
   touchedOrders: Order[];
   updatedBids: Order[];

@@ -102,14 +102,15 @@ export class OrdersService {
   async cancelOrder(orderId: string, ownerId: string): Promise<CancelAccepted> {
     this.assertQueueAvailable();
     const order = await this.orders.findOne({ where: { id: orderId, ownerId } });
-    if (!order) {
-      throw new NotFoundException('Order not found');
-    }
-    if (order.status === 'cancelled') return { orderId, status: 'cancel_requested' };
-    if (order.status === 'filled') {
+    if (order?.status === 'cancelled') return { orderId, status: 'cancel_requested' };
+    if (order?.status === 'filled') {
       throw new ConflictException('Order is already filled');
     }
-    await this.commands.append(order.instrument, {
+    const instrument = order?.instrument ?? (await this.commands.acceptedInstrument(ownerId, orderId));
+    if (!instrument) {
+      throw new NotFoundException('Order not found');
+    }
+    await this.commands.append(instrument, {
       type: 'cancel',
       orderId,
       ownerId,
@@ -138,11 +139,23 @@ export class OrdersService {
       }),
       this.orders.find({
         where: { ownerId, status: Not(In(ACTIVE_STATUSES)) },
-        order: { createdAt: 'DESC' },
+        order: { createdAt: 'DESC', id: 'DESC' },
         take: this.historyLimit,
       }),
     ]);
     return [...active, ...finished].sort((x, y) => y.createdAt.getTime() - x.createdAt.getTime());
+  }
+
+  listHistory(ownerId: string, before: Date, beforeId: string): Promise<Order[]> {
+    return this.orders
+      .createQueryBuilder('o')
+      .where('o.ownerId = :ownerId', { ownerId })
+      .andWhere('o.status NOT IN (:...active)', { active: ACTIVE_STATUSES })
+      .andWhere('(o.createdAt < :before OR (o.createdAt = :before AND o.id < :beforeId))', { before, beforeId })
+      .orderBy('o.createdAt', 'DESC')
+      .addOrderBy('o.id', 'DESC')
+      .limit(this.historyLimit)
+      .getMany();
   }
 
   async getDepth(instrument: string): Promise<BookView> {

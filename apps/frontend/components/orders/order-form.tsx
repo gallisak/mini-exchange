@@ -14,6 +14,7 @@ import { Attempt, afterFailure, attemptFor, sentAgain } from '@/lib/client/order
 import { orderAttempts } from '@/lib/client/attempt-store';
 import { isSending, onSendingChange, startSending } from '@/lib/client/sending';
 import { useSession } from '@/lib/client/session';
+import { notionalAbove } from '@/lib/client/decimal';
 import { cn } from '@/lib/utils';
 
 const PRICE = /^\d{1,16}(\.\d{1,2})?$/;
@@ -39,7 +40,9 @@ export function OrderForm({ instrument }: { instrument: string }) {
   const quantityError =
     quantity && !(QUANTITY.test(quantity) && positive(quantity))
       ? 'Up to 8 decimals, above zero'
-      : null;
+      : price && !priceError && notionalAbove(price, quantity)
+        ? 'Price × quantity can be at most 1,000,000,000,000,000 USD'
+        : null;
   const stillSending = useSyncExternalStore(
     onSendingChange,
     () => isSending(attempt?.key),

@@ -144,6 +144,19 @@ describe('applyCommands', () => {
     expect(result.orders.find((o) => o.id === oid('sell-1'))?.status).toBe('filled');
   });
 
+  it('skips a submit whose price × quantity is above the limit, even one that never went through the API', () => {
+    const result = applyCommands(
+      'ABC',
+      empty,
+      initial,
+      [submit('1-0', 'huge', 'A', 'buy', '9999999999999999.99', '9999999999.00000000'), submit('2-0', 'fine', 'A', 'buy', '1.00')],
+      new Set(),
+    );
+
+    expect(result.orders.map((order) => order.id)).toEqual([oid('fine')]);
+    expect(result.state.lastCommandId).toBe('2-0');
+  });
+
   it('skips malformed commands without stopping the stream', () => {
     const malformed = {
       type: 'submit',

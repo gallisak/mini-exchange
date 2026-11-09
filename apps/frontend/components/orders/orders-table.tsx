@@ -37,13 +37,18 @@ export function OrdersTable({
   orders,
   error,
   reload,
+  loadOlder,
+  olderDone,
 }: {
   orders: Order[] | null;
   error: string | null;
   reload: () => void;
+  loadOlder?: () => Promise<void>;
+  olderDone?: boolean;
 }) {
   const [view, setView] = useState<'active' | 'history'>('active');
   const [cancelling, setCancelling] = useState<Set<string>>(new Set());
+  const [loadingOlder, setLoadingOlder] = useState(false);
   const { user, isSignedIn } = useSession();
 
   async function cancel(order: Order) {
@@ -64,6 +69,17 @@ export function OrdersTable({
     } catch (failure) {
       if (isSignedIn(sentBy) && !endsSession(failure)) toast.error((failure as Error).message);
       enable();
+    }
+  }
+
+  async function showOlder() {
+    setLoadingOlder(true);
+    try {
+      await loadOlder?.();
+    } catch (failure) {
+      if (!endsSession(failure)) toast.error((failure as Error).message);
+    } finally {
+      setLoadingOlder(false);
     }
   }
 
@@ -150,6 +166,13 @@ export function OrdersTable({
               })}
             </TableBody>
           </Table>
+        )}
+        {view === 'history' && loadOlder && !olderDone && shown.length > 0 && (
+          <div className="flex justify-center">
+            <Button variant="outline" size="sm" onClick={showOlder} disabled={loadingOlder}>
+              Show older
+            </Button>
+          </div>
         )}
       </CardContent>
     </Card>

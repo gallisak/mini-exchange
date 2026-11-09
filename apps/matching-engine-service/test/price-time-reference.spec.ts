@@ -2,7 +2,7 @@ import { applyCommands, EngineState } from '../src/orders/engine/apply-commands'
 import { StreamCommand } from '../src/orders/engine/order-command';
 import { BookSnapshot } from '../src/orders/order-book.types';
 import { uuidV5 } from '../src/common/uuid';
-import { asReference, crossedPairsBetweenOwners, referenceMatch } from './reference-matcher';
+import { asReference, crossedPairs, referenceMatch } from './reference-matcher';
 
 function seededRandom(seed: number) {
   let state = seed;
@@ -90,7 +90,7 @@ describe('matching against an independent reference implementation', () => {
       expect(actual.asks.map((o) => [o.id, o.remaining])).toEqual(
         expected.asks.map((o) => [o.id, o.remaining]),
       );
-      expect(crossedPairsBetweenOwners(actual)).toEqual([]);
+      expect(crossedPairs(actual)).toEqual([]);
     },
   );
 });

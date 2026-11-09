@@ -46,6 +46,13 @@ describe('order validation', () => {
     },
   );
 
+  it('rejects an order whose price × quantity is above the limit that keeps ledger balances far from overflowing', async () => {
+    await expect(invalidFields({ ...valid, price: '9999999999999999.99', quantity: '9999999999' })).resolves.toEqual(['quantity']);
+    await expect(invalidFields({ ...valid, price: '1000000.01', quantity: '1000000000' })).resolves.toEqual(['quantity']);
+    await expect(invalidFields({ ...valid, price: '1000000.00', quantity: '1000000000' })).resolves.toEqual([]);
+    await expect(invalidFields({ ...valid, price: '9999999999999999.99', quantity: '0.00000001' })).resolves.toEqual([]);
+  });
+
   it('rejects an instrument that is not listed', async () => {
     await expect(invalidFields({ ...valid, instrument: 'NOPE' })).resolves.toEqual(['instrument']);
   });

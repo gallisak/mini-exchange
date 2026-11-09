@@ -1,5 +1,6 @@
 import { INestApplication } from '@nestjs/common';
 import Redis from 'ioredis';
+import { AddressInfo, Server, Socket, connect, createServer } from 'net';
 import { LedgerService } from '../../src/ledger/ledger.service';
 import { WALLET_CHANNEL, WalletNotifier } from '../../src/notifications/wallet-notifier.service';
 import {
@@ -16,6 +17,38 @@ import {
   settle,
   trade,
 } from './harness';
+
+async function silencingProxy() {
+  const redisPort = Number(process.env.REDIS_PORT);
+  const redisHost = process.env.REDIS_HOST;
+  const open = new Set<{ client: Socket; upstream: Socket; silent: boolean }>();
+  const server: Server = createServer((client) => {
+    const upstream = connect(redisPort, redisHost);
+    const pair = { client, upstream, silent: false };
+    open.add(pair);
+    client.on('data', (data) => pair.silent || upstream.write(data));
+    upstream.on('data', (data) => pair.silent || client.write(data));
+    const close = () => {
+      open.delete(pair);
+      client.destroy();
+      upstream.destroy();
+    };
+    client.on('error', close).on('close', close);
+    upstream.on('error', close).on('close', close);
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  return {
+    port: (server.address() as AddressInfo).port,
+    silenceOpenConnections: () => open.forEach((pair) => (pair.silent = true)),
+    close: async () => {
+      open.forEach((pair) => {
+        pair.client.destroy();
+        pair.upstream.destroy();
+      });
+      await new Promise((resolve) => server.close(resolve));
+    },
+  };
+}
 
 describe('trade stream consumer', () => {
   let app: INestApplication | undefined;
@@ -193,6 +226,39 @@ describe('trade stream consumer', () => {
     app = undefined;
 
     expect(await groupState(redis)).toEqual({ pending: 0, read: 3 });
+  });
+
+  it('connects again and keeps settling when its Redis connections go silent without closing', async () => {
+    const proxy = await silencingProxy();
+    const saved = { ...process.env };
+    Object.assign(process.env, {
+      REDIS_HOST: '127.0.0.1',
+      REDIS_PORT: String(proxy.port),
+      REDIS_COMMAND_TIMEOUT_MS: '500',
+      CONSUMER_BLOCK_MS: '200',
+      CONSUMER_RETRY_IDLE_MS: '500',
+      CONSUMER_RECLAIM_INTERVAL_MS: '500',
+    });
+    try {
+      app = await createApp();
+    } finally {
+      process.env = saved;
+    }
+    try {
+      await publishTrade(redis, trade());
+      await settledAll(1);
+
+      proxy.silenceOpenConnections();
+      await publishTrade(redis, trade());
+
+      await eventually(async () => {
+        expect(await groupState(redis)).toEqual({ pending: 0, read: 2 });
+      }, 15000);
+    } finally {
+      await app.close();
+      app = undefined;
+      await proxy.close();
+    }
   });
 
   it('dead-letters a trade the ledger keeps failing to settle once it has been retried long enough', async () => {

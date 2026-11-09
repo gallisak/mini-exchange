@@ -72,7 +72,10 @@ gateway the outcome is unknown, so a client that
 retries should send `attempt` to `/auth/refresh`, as the frontend always does: without it the retry
 counts as reuse and ends the session. A book that is stopped waits 15 s for its batch, then lets the fence
 stop it; whatever that batch or a reload still does afterwards no longer touches the book in memory,
-so a newer owner on the same engine is never overwritten. Reconciliation checks one period at a
+so a newer owner on the same engine is never overwritten. A batch that commits while its book is
+stopping still publishes its trades, order updates and book delta, so a graceful stop under load does
+not make every client reload, and the note of the last published change only ever moves forward.
+Compose gives an engine 25 s to stop, more than that 15 s wait, so it still releases its leases. Reconciliation checks one period at a
 time and lets the next check start only once every query of the previous one finished, which keeps
 three connections free for the rest of a run. A period is moved to the back of the queue before it is
 checked again; a run that cannot note that, or cannot take a period that matches again off the list,
@@ -283,6 +286,19 @@ stream gives the same trades, ids and book, and the tests compare the stored sta
 orders and trades it produced, so a new owner resumes after the last committed command. After any
 failed batch the owner reloads its state from Postgres and matches nothing until that succeeds.
 
+**Self-trade prevention.** An order that reaches a resting order of its own owner on the other side
+stops there: whatever it traded with better-priced counterparties before stays, and the rest of it
+is cancelled. It never trades with itself, and it never rests across its owner's order, so the book
+is never crossed, which the reference tests check for every pair of orders, of one owner or two.
+
+**Cancels.** A cancel goes through the stream of the order it names, so it is applied after that
+order, in arrival order. An order that got its 202 may still wait in the stream when its cancel
+comes, for a few milliseconds or through a whole takeover, and Postgres does not know it yet. Its
+instrument is noted in the same Redis transaction as its `XADD` and kept for 24 hours, so such a
+cancel still goes to the right stream and the order is cancelled as soon as it is applied, instead of
+the cancel answering 404 while the order goes on to trade. Another user's order and an order that
+was never accepted still get 404.
+
 **Persistence.** Every batch is committed, which is stricter than periodic persistence: the book in
 memory always equals the open orders in Postgres, and any instance can rebuild it.
 
@@ -294,9 +310,11 @@ memory always equals the open orders in Postgres, and any instance can rebuild i
 | Renewal (`LOCK_RENEW_INTERVAL_MS`) | every 1.5 s |
 | Acquisition attempts (`LOCK_ACQUIRE_INTERVAL_MS`) | every 1 s |
 
-**Who detects a dead owner.** No one has to: the owner keeps its lease alive by renewing it, a lease
-that is not renewed expires on its own, and every instance tries to acquire free instruments every
-second. Acquire, renew and release are atomic Lua scripts.
+**Who detects a dead owner.** No one has to: the owner keeps its lease alive by renewing it, each
+lease on its own so that one slow renewal holds up no other, a lease that is not renewed expires on
+its own, and every instance tries to acquire free instruments every
+second, each instrument on its own and side by side, so an instrument that cannot start or loads
+slowly keeps none of the others waiting. Acquire, renew and release are atomic Lua scripts.
 
 **Split brain.** A TTL alone does not stop an owner that froze and wakes up after someone else took
 over. Two mechanisms do:
@@ -308,6 +326,11 @@ over. Two mechanisms do:
 - **Local deadline.** Before each commit an owner checks that its monotonic clock still leaves the
   lease a margin of `max(TTL / 5, 200 ms)`, and stops if not. A commit that runs past the lease is
   still stopped by the fencing token.
+- **A batch cannot outwait the lease.** The first statement of a batch locks the instrument's row in
+  `instrument_state` until the commit, and the batch may sit idle in its transaction no longer than
+  the lease (`idle_in_transaction_session_timeout`). An owner frozen in the middle of a batch
+  therefore loses its transaction, its lock and that batch by the time its lease runs out, so the
+  new owner's claim of the fence is not held up, and the zombie's batch fails when it wakes.
 
 **Expected downtime of an instrument.**
 
@@ -409,7 +432,7 @@ it. The `proof/*` branches keep those commits with their CI runs.
 
 | # | Problem | How it was confirmed | Fix | Proof |
 |---|---|---|---|---|
-| 1 | **Fake test.** `self-trade.spec.ts` only checked `expect(result).toBeTruthy()`, which passes whatever the matcher does. | The rewritten test fails against a matcher that lets an owner trade with itself | The test checks that no trade happens and that the next counterparty still trades | `proof/matcher-core` |
+| 1 | **Fake test.** `self-trade.spec.ts` only checked `expect(result).toBeTruthy()`, which passes whatever the matcher does. | The rewritten test fails against a matcher that lets an owner trade with itself | The tests check that no trade happens, that better-priced counterparties before the owner's order still trade, and that the rest of the new order is cancelled there instead of resting across it | `proof/matcher-core` |
 | 2 | **Concurrent orders on one book.** Matching ran in request handlers on a shared in-memory book: orders arriving together were lost or double-filled, cancelled orders came back, a cancel naming another instrument left the order matchable, filled orders stayed open in the database, the book was lost on restart, and a retried request created a second order. | `starter-bugs.int-spec.ts`: one test per symptom, all failing before the fix | Command stream per instrument with a single writer, batch commits, required `Idempotency-Key` | `proof/command-log` |
 | 3 | **IDOR on cancel.** `DELETE /orders/:id` cancelled any user's order. | "does not let a user cancel someone else's order" | Only the owner can cancel; another user's order gives 404 | `proof/command-log` |
 | 4 | **The lock.** It was not wired into order processing, had no TTL, so a killed owner held its instrument forever, released with a non-atomic `GET` then `DEL`, and every replica got the same `INSTANCE_ID`. | `failover.int-spec.ts`, `ownership-identity.spec.ts` | Lease with TTL and renewal in Lua, per-process identity, shutdown hooks, fencing token | `proof/ownership` |
@@ -419,8 +442,9 @@ it. The `proof/*` branches keep those commits with their CI runs.
 | 8 | **Did not start cleanly.** A lint error broke the frontend build, `dist/main` was missing, an entity column had no type, and `synchronize: true` fails when two engines start together. | Compose smoke in CI | Fixes plus migrations run by a one-off `migrate` service | `proof/startup` |
 | 9 | **Settlement not implemented.** | `settlement.int-spec.ts` | See [Exactly-once settlement](#exactly-once-settlement) | `proof/settlement` |
 | 10 | **No rate limit, default secrets, open CORS.** | `platform.int-spec.ts` | Rate limits in Redis shared by instances, required secrets, CORS allow-list | `proof/platform` |
+| 11 | **Cancel.** The starter's cancel set any order to `cancelled` with nothing left: a filled order looked cancelled after it had traded, and a partially filled one lost how much of it was filled. Once orders went through the command stream, a cancel sent right after the 202 found nothing in Postgres yet and answered 404, while the order went on to rest and trade. | `cancel.int-spec.ts`: "refuses it with 409 and keeps the order filled", "keeps how much of it was filled", "cancels it once it is applied, instead of answering 404 and letting it trade" | A filled order answers 409 and stays filled; a cancel keeps the filled part; a cancel of an order still in the stream goes to that order's stream and is applied after it | `cancel.int-spec.ts` |
 
-The starter came with two tests: `matcher.spec.ts` is unchanged and green, and `self-trade.spec.ts`
+The starter came with two tests: `matcher.spec.ts` keeps its tests unchanged and green, and `self-trade.spec.ts`
 was rewritten because it tested nothing (problem 1).
 
 ## Chaos test
@@ -453,7 +477,9 @@ After the load stops and the queues drain, it checks that:
 - reconciliation is `ok` and every trade was settled once;
 - each takeover finished within 10 s, 10 s and 3 s, measured by a probe order sent straight to the
   new owner;
-- the resumed zombie in B stepped down instead of writing.
+- the resumed zombie in B stepped down and committed nothing after waking: an owner logs the
+  commands of a batch right after its commit, and the zombie's log since it resumed holds none for
+  `DEF`.
 
 **Before the fixes** the starter could not run the test at all: settlement was not implemented and
 concurrent orders were lost. Scenario A was reproduced on its own with the starter lock wired in
@@ -497,14 +523,15 @@ Redis Streams is the order log and Redis is the coordinator.
 |---|---|---|
 | `POST /orders` → 201 with trades | 202 with `{orderId, status}` | Orders go through the command stream; trades must not leak counterparties |
 | `price`, `quantity` as numbers | Decimal strings, too many decimals gives 400 | No floating-point money |
+| Any price × quantity | At most 1,000,000,000,000,000 USD per order, checked by the order form, the API and the owner before it applies a command | Balances live in `numeric(38,10)`. At the old maximum about 100 trades between two accounts overflow a balance and break the settlement of every later trade of those accounts; with the limit that takes 10^13 trades |
 | No idempotency | `Idempotency-Key` header required | A retried request must not create a second order |
-| `DELETE /orders/:id?instrument=` → 200 | `DELETE /orders/:id` → 202; another user's order 404, a filled one 409 | IDOR and ghost orders |
+| `DELETE /orders/:id?instrument=` → 200 | `DELETE /orders/:id` → 202, also for an order still waiting in the stream; another user's order 404, a filled one 409 | IDOR and ghost orders |
 | `GET /orders/book` with a token, raw orders | Public, aggregated levels with `seq`, no owners | Public depth, no data leak |
 | WebSocket `book` event | `book_snapshot`, `book_delta`, `book_heartbeat`, `trade`, `resync`, and private `order` and `wallet` | Sequence numbers and resync |
 | `POST /auth/login` → 201 | 200, plus `/auth/refresh`, `/auth/logout` and `GET /auth/session`, which answers whose access token it is while its session lasts | Sessions |
 | WebSocket handshake with the access token | A 30-second ticket from `POST /auth/ws-ticket`; access tokens are refused | The page never holds a 15-minute access token. To roll out, update the engines first with `WS_ACCEPT_ACCESS_TOKENS=true` so pages already open still connect, then the frontend (until its engine issues tickets it keeps retrying rather than hand out the access token), then drop the setting |
 | `GET /metrics` open | Needs the internal key of the service | Metrics show traffic and internals |
-| `GET /orders` returned every order | Every active order and the latest 100 finished ones | Bounded response |
+| `GET /orders` returned every order | Every active order and the latest 100 finished ones; older ones page by page through `GET /orders/history?before=&beforeId=`, which the orders page asks for with "Show older" | Bounded response |
 | Any password length | At most 72 bytes | bcrypt compares only 72 bytes |
 | Messages in Ukrainian | English | Language of the project |
 | Frontend on port 3000 directly | nginx in front of it on port 3000 | Trustworthy client address |
@@ -525,13 +552,10 @@ Redis Streams is the order log and Redis is the coordinator.
 - **Streams are never trimmed**, to keep a full replay possible; production would trim them after a
   snapshot.
 - **No balance reservation.** Balances can go negative.
-- **Crossed books within one user.** Self-trade prevention skips the user's own order, so a user's
-  buy can rest above their own sell.
 - **A blocking failure stops its instrument.** A batch that can never commit, or a command stream
   that fails three reads in a row, is retried and shown as stuck on the operations panel rather than
   skipped. A trade that can never be booked is retried for
   an hour, then dead-lettered and shown as unsettled by reconciliation until it is replayed.
-- **Order history** returns the latest 100 finished orders; paging is not built.
 - **Registration shows that an email is taken.** Someone trying a taken email with a wrong password
   gets 409. Hiding that takes a confirmation sent by email, which this exchange does not have; signing
   in gives nothing away, and both are held to the sign-in rate limit.

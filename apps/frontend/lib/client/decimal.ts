@@ -16,6 +16,14 @@ function format(units: bigint, scale: number): string {
   return `${negative ? '-' : ''}${whole}${fraction}`;
 }
 
+export const MAX_ORDER_NOTIONAL = 10n ** 15n;
+
+export function notionalAbove(price: string, quantity: string, limit = MAX_ORDER_NOTIONAL): boolean {
+  const left = parse(price);
+  const right = parse(quantity);
+  return left.units * right.units > limit * 10n ** BigInt(left.scale + right.scale);
+}
+
 export function subtractDecimals(a: string, b: string): string {
   const left = parse(a);
   const right = parse(b);

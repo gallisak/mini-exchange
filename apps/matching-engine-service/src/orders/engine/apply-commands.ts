@@ -8,6 +8,7 @@ import {
   QUANTITY_INTEGER_DIGITS,
   QUANTITY_SCALE,
   isPositiveDecimal,
+  notionalFits,
 } from '../../common/decimal';
 import { OrderCommand, StreamCommand, streamTimestamp } from './order-command';
 
@@ -111,6 +112,7 @@ export function isValidSubmit(command: OrderCommand | null): boolean {
     command.ownerId.length > 0 &&
     (command.side === 'buy' || command.side === 'sell') &&
     isPositiveDecimal(command.price, PRICE_INTEGER_DIGITS, PRICE_SCALE) &&
-    isPositiveDecimal(command.quantity, QUANTITY_INTEGER_DIGITS, QUANTITY_SCALE)
+    isPositiveDecimal(command.quantity, QUANTITY_INTEGER_DIGITS, QUANTITY_SCALE) &&
+    notionalFits(command.price, command.quantity)
   );
 }

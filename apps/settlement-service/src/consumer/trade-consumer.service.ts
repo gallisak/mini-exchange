@@ -14,7 +14,7 @@ import {
 } from './trade-event';
 import { runWithTrace } from '../observability/trace-context';
 import { tradeEvents } from '../observability/metrics';
-import { closeRedis, createRedis } from '../common/redis';
+import { READ_TIMEOUT_MARGIN_MS, closeRedis, commandTimeoutMs, createRedis, timedOut } from '../common/redis';
 import { GAVE_UP } from './dead-letters';
 
 const MAX_BACKOFF_MS = 5000;
@@ -44,8 +44,8 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
 
   onApplicationBootstrap(): void {
     if (process.env.CONSUMER_ENABLED === 'false') return;
-    this.client = createRedis();
-    this.reader = createRedis();
+    this.client = createRedis({ commandTimeout: commandTimeoutMs() });
+    this.reader = createRedis({ commandTimeout: this.options.blockMs + READ_TIMEOUT_MARGIN_MS });
     this.running = true;
     this.loop = this.run();
   }
@@ -67,6 +67,7 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
         if (Date.now() - this.lastReclaim >= this.options.reclaimEveryMs) {
           this.lastReclaim = Date.now();
           await this.reclaim().catch((error: Error) => {
+            this.dropSilentConnections(error);
             if (error.message.includes('NOGROUP')) this.groupsReady = false;
             this.logger.warn(`Reclaiming stalled trades failed, polling anyway: ${error.message}`);
           });
@@ -75,12 +76,20 @@ export class TradeConsumerService implements OnApplicationBootstrap, OnModuleDes
         backoff = 100;
       } catch (error) {
         if (!this.running) return;
+        this.dropSilentConnections(error);
         if (String((error as Error).message).includes('NOGROUP')) this.groupsReady = false;
         this.logger.warn(`Trade consumer failed, retrying in ${backoff} ms: ${(error as Error).message}`);
         await new Promise((resolve) => setTimeout(resolve, backoff));
         backoff = Math.min(backoff * 2, MAX_BACKOFF_MS);
       }
     }
+  }
+
+  private dropSilentConnections(error: unknown): void {
+    if (!timedOut(error)) return;
+    this.logger.warn('Redis stopped answering, connecting again');
+    this.client?.disconnect(true);
+    this.reader?.disconnect(true);
   }
 
   private async ensureGroups(): Promise<void> {

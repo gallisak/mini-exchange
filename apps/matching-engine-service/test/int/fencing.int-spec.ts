@@ -1,7 +1,8 @@
+import { Logger } from '@nestjs/common';
 import Redis from 'ioredis';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 import { buildDataSourceOptions } from '../../src/database/data-source';
-import { BookRunner } from '../../src/orders/engine/book-runner';
+import { BookRunner, publishedKey } from '../../src/orders/engine/book-runner';
 import { FencedOutError } from '../../src/orders/engine/fenced-out.error';
 import { commandStreamKey, encodeCommand } from '../../src/orders/engine/order-command';
 import { Order } from '../../src/orders/entities/order.entity';
@@ -27,21 +28,23 @@ describe('fencing of the order book writer', () => {
     await redis.onApplicationShutdown();
   });
 
-  function runner(fence: bigint, leaseValid: () => boolean = () => true) {
+  function runner(fence: bigint, leaseValid: () => boolean = () => true, transactionIdleMs?: number) {
     const fenced: FencedOutError[] = [];
+    const orderBook = new OrderBookService();
     const instance = new BookRunner('ABC', {
       dataSource,
       redis,
-      orderBook: new OrderBookService(),
+      orderBook,
       batchSize: 100,
       blockMs: 200,
       retryDelayMs: 100,
       fence,
+      transactionIdleMs,
       leaseValid,
       onFenced: (error) => fenced.push(error),
     });
     runners.push(instance);
-    return { instance, fenced };
+    return { instance, fenced, orderBook };
   }
 
   async function submitCommand(name: string) {
@@ -88,6 +91,94 @@ describe('fencing of the order book writer', () => {
     await eventually(async () => expect(fenced).toHaveLength(1));
     expect(fenced[0].currentFence).toBe(2n);
     expect(await storedOrders()).toBe(0);
+  });
+
+  it('lets a newer owner take over from one frozen in the middle of a batch, and rejects that batch when it wakes', async () => {
+    const upsert = EntityManager.prototype.upsert;
+    let wake!: () => void;
+    const frozenUpsert = jest
+      .spyOn(EntityManager.prototype, 'upsert')
+      .mockImplementationOnce(function (this: EntityManager, ...args: Parameters<EntityManager['upsert']>) {
+        return new Promise((resolve, reject) => {
+          wake = () => void upsert.apply(this, args).then(resolve, reject);
+        });
+      } as never);
+    const frozen = runner(1n, () => true, 500);
+    await frozen.instance.start();
+    const orderId = await submitCommand('order-1');
+    await eventually(async () => expect(frozenUpsert).toHaveBeenCalled());
+
+    const claimedAt = Date.now();
+    await runner(2n, () => true, 500).instance.start();
+    const tookOverAfterMs = Date.now() - claimedAt;
+    wake();
+
+    expect(tookOverAfterMs).toBeLessThan(3_000);
+    await eventually(async () => expect(frozen.orderBook.snapshot('ABC').bids.map((order) => order.id)).toEqual([orderId]));
+    const next = await submitCommand('order-2');
+    await eventually(async () => expect(frozen.fenced).toHaveLength(1));
+    expect(frozen.fenced[0].currentFence).toBe(2n);
+    await eventually(async () => {
+      expect(await dataSource.getRepository(Order).findOneBy({ id: next })).not.toBeNull();
+    });
+  });
+
+  it('logs the commands of a batch it committed even when it was stopped while committing', async () => {
+    const logged = jest.spyOn(Logger.prototype, 'log');
+    const { instance } = runner(1n);
+    await instance.start();
+    const transaction = dataSource.transaction.bind(dataSource) as (work: unknown) => Promise<unknown>;
+    let commit: (() => void) | undefined;
+    jest.spyOn(dataSource, 'transaction').mockImplementationOnce((async (work: unknown) => {
+      await new Promise<void>((resolve) => (commit = resolve));
+      return transaction(work);
+    }) as never);
+    const orderId = await submitCommand('order-1');
+    await eventually(async () => expect(commit).toBeDefined());
+
+    const stopping = instance.stop();
+    commit?.();
+    await stopping;
+
+    expect(await dataSource.getRepository(Order).findOneBy({ id: orderId })).not.toBeNull();
+    expect(logged.mock.calls.some(([message]) => String(message).startsWith(`Applied submit ${orderId}`))).toBe(true);
+    logged.mockRestore();
+  });
+
+  it('publishes a batch it committed while it was stopping, without moving the note of what was published back', async () => {
+    const published: string[] = [];
+    const instance = new BookRunner('ABC', {
+      dataSource,
+      redis,
+      orderBook: new OrderBookService(),
+      batchSize: 100,
+      blockMs: 200,
+      retryDelayMs: 100,
+      fence: 1n,
+      leaseValid: () => true,
+      onFenced: () => undefined,
+      publish: async (event) => {
+        published.push(event.type);
+      },
+    });
+    runners.push(instance);
+    await instance.start();
+    await redis.client.set(publishedKey('ABC'), '99');
+    const transaction = dataSource.transaction.bind(dataSource) as (work: unknown) => Promise<unknown>;
+    let commit: (() => void) | undefined;
+    jest.spyOn(dataSource, 'transaction').mockImplementationOnce((async (work: unknown) => {
+      await new Promise<void>((resolve) => (commit = resolve));
+      return transaction(work);
+    }) as never);
+    await submitCommand('order-1');
+    await eventually(async () => expect(commit).toBeDefined());
+
+    const stopping = instance.stop();
+    commit?.();
+    await stopping;
+
+    expect(published).toEqual(expect.arrayContaining(['orders', 'book_delta']));
+    expect(await redis.client.get(publishedKey('ABC'))).toBe('99');
   });
 
   it('refuses to start below the current fence', async () => {

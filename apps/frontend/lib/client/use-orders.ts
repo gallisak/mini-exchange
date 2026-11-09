@@ -12,6 +12,7 @@ export function useOrders() {
   const [orders, setOrders] = useState<Order[] | null>(null);
   const [error, setError] = useState<string | null>(null);
   const loaded = useRef(false);
+  const [olderDone, setOlderDone] = useState(false);
   const begin = useMemo(() => latestRequest(), []);
 
   const load = useCallback(async () => {
@@ -55,5 +56,22 @@ export function useOrders() {
     };
   }, [socket, load]);
 
-  return { orders, error, reload: load };
+  const loadOlder = useCallback(async () => {
+    const oldest = (orders ?? [])
+      .filter((order) => order.status !== 'open' && order.status !== 'partially_filled')
+      .reduce<Order | null>(
+        (last, order) =>
+          !last || order.createdAt < last.createdAt || (order.createdAt === last.createdAt && order.id < last.id)
+            ? order
+            : last,
+        null,
+      );
+    if (!oldest) return;
+    const query = new URLSearchParams({ before: oldest.createdAt, beforeId: oldest.id });
+    const older = await api<Order[]>(`/api/orders/history?${query}`);
+    setOrders((current) => mergeOrders(current ?? [], older));
+    if (older.length === 0) setOlderDone(true);
+  }, [orders]);
+
+  return { orders, error, reload: load, loadOlder, olderDone };
 }

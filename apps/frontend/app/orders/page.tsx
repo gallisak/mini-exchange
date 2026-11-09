@@ -9,7 +9,7 @@ import { useOrders } from '@/lib/client/use-orders';
 
 function Orders() {
   const instrument = useInstrument();
-  const { orders, error, reload } = useOrders();
+  const { orders, error, reload, loadOlder, olderDone } = useOrders();
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
@@ -23,7 +23,7 @@ function Orders() {
       </div>
       <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,2fr)]">
         <OrderForm key={instrument} instrument={instrument} />
-        <OrdersTable orders={orders} error={error} reload={reload} />
+        <OrdersTable orders={orders} error={error} reload={reload} loadOlder={loadOlder} olderDone={olderDone} />
       </div>
     </div>
   );

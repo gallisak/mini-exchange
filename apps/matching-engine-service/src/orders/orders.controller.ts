@@ -17,6 +17,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OrdersService } from './orders.service';
 import { SubmitOrderDto } from './dto/submit-order.dto';
 import { InstrumentQueryDto } from './dto/instrument-query.dto';
+import { HistoryQueryDto } from './dto/history-query.dto';
 import { IdempotencyKey } from './idempotency-key.decorator';
 import { RateLimit, RateLimitGuard } from '../rate-limit/rate-limit.guard';
 
@@ -48,6 +49,13 @@ export class OrdersController {
   @UseGuards(JwtAuthGuard)
   listOwn(@Request() req: AuthenticatedRequest) {
     return this.orders.listOwn(req.user.userId);
+  }
+
+  @Get('history')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard)
+  listHistory(@Query() query: HistoryQueryDto, @Request() req: AuthenticatedRequest) {
+    return this.orders.listHistory(req.user.userId, new Date(query.before), query.beforeId);
   }
 
   @Get('book')

@@ -4,6 +4,7 @@ export const PRICE_SCALE = 2;
 export const PRICE_INTEGER_DIGITS = 16;
 export const QUANTITY_SCALE = 8;
 export const QUANTITY_INTEGER_DIGITS = 10;
+export const MAX_ORDER_NOTIONAL = 10n ** 15n;
 
 export function isPositiveDecimal(value: unknown, integerDigits: number, scale: number): boolean {
   if (typeof value !== 'string') return false;
@@ -13,6 +14,17 @@ export function isPositiveDecimal(value: unknown, integerDigits: number, scale: 
   if (whole.replace(/^0+(?=\d)/, '').length > integerDigits) return false;
   if (fraction.length > scale) return false;
   return /[1-9]/.test(whole + fraction);
+}
+
+export function notionalFits(price: unknown, quantity: unknown): boolean {
+  if (
+    !isPositiveDecimal(price, PRICE_INTEGER_DIGITS, PRICE_SCALE) ||
+    !isPositiveDecimal(quantity, QUANTITY_INTEGER_DIGITS, QUANTITY_SCALE)
+  ) {
+    return true;
+  }
+  const notional = toUnits(price as string, PRICE_SCALE) * toUnits(quantity as string, QUANTITY_SCALE);
+  return notional <= MAX_ORDER_NOTIONAL * 10n ** BigInt(PRICE_SCALE + QUANTITY_SCALE);
 }
 
 export function toUnits(value: string, scale: number): bigint {

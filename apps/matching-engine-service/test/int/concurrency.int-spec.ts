@@ -16,7 +16,7 @@ import {
   resetState,
   submit,
 } from './harness';
-import { asReference, crossedPairsBetweenOwners, referenceMatch } from '../reference-matcher';
+import { asReference, crossedPairs, referenceMatch } from '../reference-matcher';
 
 function seededRandom(seed: number) {
   let state = seed;
@@ -101,7 +101,7 @@ describe('concurrent order flow', () => {
     expect(actual.asks.map((o) => [o.id, o.remaining])).toEqual(
       reference.asks.map((o) => [o.id, o.remaining]),
     );
-    expect(crossedPairsBetweenOwners(actual)).toEqual([]);
+    expect(crossedPairs(actual)).toEqual([]);
 
     const acceptedIds = [...responses, marker].map((response) => response.body.orderId);
     expect(new Set(acceptedIds).size).toBe(201);

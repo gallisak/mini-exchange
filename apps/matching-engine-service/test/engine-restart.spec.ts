@@ -31,7 +31,7 @@ describe('starting a book again', () => {
 
     const stopping = engine.stopInstrument('ABC');
     const starting = engine
-      .startInstrument('ABC', { fence: 2n, isValid: () => true, onFenced: () => undefined })
+      .startInstrument('ABC', { fence: 2n, ttlMs: 5000, isValid: () => true, onFenced: () => undefined })
       .catch(() => undefined);
     await Promise.all([stopping, starting]);
 

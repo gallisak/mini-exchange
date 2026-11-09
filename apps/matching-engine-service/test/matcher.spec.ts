@@ -36,7 +36,7 @@ describe('matchOrder', () => {
 
     expect(result.trades).toHaveLength(1);
     expect(result.trades[0].quantity).toBe('1.00000000');
-    expect(result.trades[0].price).toBe('100.00'); // за ціною заявки, що вже стояла в книзі
+    expect(result.trades[0].price).toBe('100.00');
     expect(result.restingOrder).toBeNull();
     expect(result.updatedAsks).toHaveLength(0);
   });

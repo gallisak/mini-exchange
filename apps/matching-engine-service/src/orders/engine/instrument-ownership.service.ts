@@ -28,7 +28,7 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
   private acquireTimer?: NodeJS.Timeout;
   private renewTimer?: NodeJS.Timeout;
   private acquiring?: Promise<void>;
-  private renewing = false;
+  private readonly renewing = new Set<string>();
   private stopped = false;
 
   constructor(
@@ -45,7 +45,7 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
   }
 
   async onApplicationBootstrap(): Promise<void> {
-    this.renewTimer = setInterval(() => void this.renewTick(), this.renewIntervalMs);
+    this.renewTimer = setInterval(() => this.renewTick(), this.renewIntervalMs);
     this.acquireTimer = setInterval(() => void this.acquireTick(), this.acquireIntervalMs);
     await this.acquireTick();
   }
@@ -76,15 +76,12 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
     return this.acquiring;
   }
 
-  private async renewTick(): Promise<void> {
-    if (this.renewing || this.stopped) return;
-    this.renewing = true;
-    try {
-      await this.renewOwned();
-    } catch (error) {
-      this.logger.error(`Renewing leases failed: ${(error as Error).message}`);
-    } finally {
-      this.renewing = false;
+  private renewTick(): void {
+    if (this.stopped) return;
+    for (const [instrument, lease] of [...this.owned]) {
+      if (this.renewing.has(instrument)) continue;
+      this.renewing.add(instrument);
+      void this.renewOne(instrument, lease).finally(() => this.renewing.delete(instrument));
     }
   }
 
@@ -98,59 +95,65 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
   }
 
   private async acquireFree(): Promise<void> {
-    for (const instrument of INSTRUMENTS) {
-      if (this.stopped || this.owned.has(instrument) || this.engine.isStopping(instrument)) continue;
-      const key = instrumentLockKey(instrument);
-      const requestedAt = performance.now();
-      let token: bigint | null;
-      try {
-        token = await this.lock.acquire(key, this.ownerId, this.ttlMs);
-      } catch (error) {
-        await this.lock.release(key, this.ownerId).catch(() => undefined);
-        throw error;
+    await Promise.all(
+      INSTRUMENTS.map((instrument) =>
+        this.acquireOne(instrument).catch((error: Error) =>
+          this.logger.error(`Acquiring ${instrument} failed: ${error.message}`),
+        ),
+      ),
+    );
+  }
+
+  private async acquireOne(instrument: string): Promise<void> {
+    if (this.stopped || this.owned.has(instrument) || this.engine.isStopping(instrument)) return;
+    const key = instrumentLockKey(instrument);
+    const requestedAt = performance.now();
+    let token: bigint | null;
+    try {
+      token = await this.lock.acquire(key, this.ownerId, this.ttlMs);
+    } catch (error) {
+      await this.lock.release(key, this.ownerId).catch(() => undefined);
+      throw error;
+    }
+    if (token === null) return;
+    this.owned.set(instrument, { token, renewedAt: requestedAt });
+    try {
+      await this.engine.startInstrument(instrument, {
+        fence: token,
+        ttlMs: this.ttlMs,
+        isValid: () => this.isLeaseValid(instrument, token),
+        onFenced: (error) => void this.stepDown(instrument, token, error),
+      });
+      if (this.owned.get(instrument)?.token !== token) {
+        await this.engine.stopInstrument(instrument);
+        this.logger.warn(`${this.ownerId} lost ${instrument} while loading its book`);
+        return;
       }
-      if (token === null) continue;
-      this.owned.set(instrument, { token, renewedAt: requestedAt });
-      try {
-        await this.engine.startInstrument(instrument, {
-          fence: token,
-          isValid: () => this.isLeaseValid(instrument, token),
-          onFenced: (error) => void this.stepDown(instrument, token, error),
-        });
-        if (this.owned.get(instrument)?.token !== token) {
-          await this.engine.stopInstrument(instrument);
-          this.logger.warn(`${this.ownerId} lost ${instrument} while loading its book`);
-          continue;
-        }
-        this.logger.log(`${this.ownerId} owns ${instrument} with token ${token}`);
-      } catch (error) {
-        this.owned.delete(instrument);
-        await this.lock.release(key, this.ownerId);
-        if (error instanceof FencedOutError && error.currentFence !== null) {
-          await this.lock.raiseFence(key, error.currentFence);
-          this.logger.warn(error.message);
-          continue;
-        }
-        throw error;
+      this.logger.log(`${this.ownerId} owns ${instrument} with token ${token}`);
+    } catch (error) {
+      if (this.owned.get(instrument)?.token === token) this.owned.delete(instrument);
+      await this.lock.release(key, this.ownerId);
+      if (error instanceof FencedOutError && error.currentFence !== null) {
+        await this.lock.raiseFence(key, error.currentFence);
+        this.logger.warn(error.message);
+        return;
       }
+      throw error;
     }
   }
 
-  private async renewOwned(): Promise<void> {
-    for (const [instrument, lease] of [...this.owned]) {
-      if (this.stopped) return;
-      const requestedAt = performance.now();
-      try {
-        if (await this.lock.renew(instrumentLockKey(instrument), this.ownerId, this.ttlMs)) {
-          lease.renewedAt = requestedAt;
-          continue;
-        }
-        if (this.owned.get(instrument) === lease) this.demote(instrument, 'the lock is held by someone else');
-      } catch (error) {
-        this.logger.error(`Could not renew ${instrument}: ${(error as Error).message}`);
-        if (this.owned.get(instrument) === lease && !this.isLeaseValid(instrument, lease.token)) {
-          this.demote(instrument, 'the lease expired while Redis was unreachable');
-        }
+  private async renewOne(instrument: string, lease: Lease): Promise<void> {
+    const requestedAt = performance.now();
+    try {
+      if (await this.lock.renew(instrumentLockKey(instrument), this.ownerId, this.ttlMs)) {
+        lease.renewedAt = requestedAt;
+        return;
+      }
+      if (this.owned.get(instrument) === lease) this.demote(instrument, 'the lock is held by someone else');
+    } catch (error) {
+      this.logger.error(`Could not renew ${instrument}: ${(error as Error).message}`);
+      if (this.owned.get(instrument) === lease && !this.isLeaseValid(instrument, lease.token)) {
+        this.demote(instrument, 'the lease expired while Redis was unreachable');
       }
     }
   }

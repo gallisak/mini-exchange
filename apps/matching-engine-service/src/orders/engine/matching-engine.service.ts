@@ -9,6 +9,7 @@ import { MarketPublisherService } from '../realtime/market-publisher.service';
 
 export interface InstrumentLease {
   fence: bigint;
+  ttlMs: number;
   isValid: () => boolean;
   onFenced: (error: FencedOutError) => void;
 }
@@ -47,6 +48,7 @@ export class MatchingEngineService implements OnModuleDestroy {
       blockMs: 1000,
       retryDelayMs: 1000,
       fence: lease.fence,
+      transactionIdleMs: lease.ttlMs,
       leaseValid: lease.isValid,
       publish: (event) => this.market.publish(instrument, event),
       resyncPending: () => this.market.resyncPending(),

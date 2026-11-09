@@ -2,13 +2,6 @@ import { Injectable } from '@nestjs/common';
 import { Order } from './entities/order.entity';
 import { BookSnapshot } from './order-book.types';
 
-/**
- * In-memory стан order book по інструменту. У межах одного інстанса
- * matching engine кожен інструмент має рівно один набір bids/asks.
- *
- * NOTE (стартовий код): книга зберігається як звичайні масиви. Персистенція
- * в БД викликається окремо в OrdersService.
- */
 @Injectable()
 export class OrderBookService {
   private books = new Map<string, BookSnapshot>();

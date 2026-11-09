@@ -170,19 +170,43 @@ async function scenarioKill() {
   return { name: 'A. kill -9 the owner under load', ...result };
 }
 
+function appliedSince(service, since, instrument) {
+  return compose('logs', '--no-color', '--since', since, service)
+    .split('\n')
+    .map((line) => {
+      const start = line.indexOf('{');
+      try {
+        return start < 0 ? null : JSON.parse(line.slice(start));
+      } catch {
+        return null;
+      }
+    })
+    .filter((entry) => entry?.context === `BookRunner:${instrument}` && /^Applied /.test(entry.message ?? '')).length;
+}
+
 async function scenarioPause() {
   const row = (await opsStatus()).DEF;
   const victim = serviceOf(row.owner);
   log(`B. pause ${victim}, owner of DEF, for ${LOCK_TTL_MS + 3_000} ms`);
+  const pausedAt = new Date().toISOString();
   const result = await measureTakeover('DEF', row.owner, LIMITS.pause, () => compose('pause', victim));
   const remaining = LOCK_TTL_MS + 3_000 - result.resumedAfterMs;
   if (remaining > 0) await sleep(remaining);
   const resumedAt = new Date().toISOString();
   compose('unpause', victim);
-  const zombie = await until(() => {
+  await until(() => {
     const logs = compose('logs', '--no-color', '--since', resumedAt, victim);
-    return /lost ownership of DEF|Fenced out of DEF/.test(logs) ? 'stepped down' : null;
+    return /lost ownership of DEF|Fenced out of DEF/.test(logs) || null;
   }, 20_000, `${victim} to step down from DEF`);
+  await sleep(2_000);
+  const written = appliedSince(victim, resumedAt, 'DEF');
+  const seenOnNewOwner = appliedSince(serviceOf(result.to), pausedAt, 'DEF');
+  const zombie =
+    seenOnNewOwner === 0
+      ? 'no applied commands of DEF found in the logs of the new owner either, so the logs could not be read'
+      : written === 0
+        ? 'stepped down'
+        : `committed ${written} commands of DEF after waking`;
   return { name: 'B. pause the owner past its lease, then resume it', ...result, zombie };
 }
 

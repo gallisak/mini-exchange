@@ -10,11 +10,29 @@ export function createRedis(options: RedisOptions = {}): Redis {
   });
 }
 
+export const READ_TIMEOUT_MARGIN_MS = 2_000;
+
+export const commandTimeoutMs = () => intEnv('REDIS_COMMAND_TIMEOUT_MS', 5_000);
+
+export function timedOut(error: unknown): boolean {
+  return error instanceof Error && error.message.includes('Command timed out');
+}
+
+const QUIT_TIMEOUT_MS = 1_000;
+
 export async function closeRedis(client: Redis | undefined): Promise<void> {
   if (!client || client.status === 'end') return;
   if (client.status !== 'ready') {
     client.disconnect();
     return;
   }
-  await client.quit().catch(() => client.disconnect());
+  let timer: NodeJS.Timeout | undefined;
+  await Promise.race([
+    client.quit().catch(() => undefined),
+    new Promise<void>((resolve) => {
+      timer = setTimeout(resolve, QUIT_TIMEOUT_MS);
+    }),
+  ]);
+  clearTimeout(timer);
+  client.disconnect();
 }
