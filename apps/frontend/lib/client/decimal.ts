@@ -19,6 +19,7 @@ function format(units: bigint, scale: number): string {
 export const MAX_ORDER_NOTIONAL = 10n ** 15n;
 
 export function notionalAbove(price: string, quantity: string, limit = MAX_ORDER_NOTIONAL): boolean {
+  if (!DECIMAL.test(price.trim()) || !DECIMAL.test(quantity.trim())) return false;
   const left = parse(price);
   const right = parse(quantity);
   return left.units * right.units > limit * 10n ** BigInt(left.scale + right.scale);

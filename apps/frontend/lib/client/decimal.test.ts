@@ -8,6 +8,13 @@ describe('the limit on what one order may be worth', () => {
     expect(notionalAbove('9999999999999999.99', '0.00000001')).toBe(false);
     expect(notionalAbove('9999999999999999.99', '9999999999')).toBe(true);
   });
+
+  it('says nothing about a price or quantity that is not typed in yet or is not a number', () => {
+    expect(notionalAbove('20.00', '')).toBe(false);
+    expect(notionalAbove('', '3')).toBe(false);
+    expect(notionalAbove('20.00', '1.')).toBe(false);
+    expect(notionalAbove('abc', '3')).toBe(false);
+  });
 });
 
 describe('decimal arithmetic for display', () => {

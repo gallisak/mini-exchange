@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { api } from './api';
-import { mergeOrders } from './feeds';
+import { HistoryCursor, mergeOrders, oldestFinished } from './feeds';
 import { latestRequest } from './latest';
 import { useSocket } from './socket';
 import { Order, ResyncScope, resyncsOrders } from './types';
@@ -13,6 +13,7 @@ export function useOrders() {
   const [error, setError] = useState<string | null>(null);
   const loaded = useRef(false);
   const [olderDone, setOlderDone] = useState(false);
+  const [cursor, setCursor] = useState<HistoryCursor | null>(null);
   const begin = useMemo(() => latestRequest(), []);
 
   const load = useCallback(async () => {
@@ -21,6 +22,7 @@ export function useOrders() {
       const fresh = await api<Order[]>('/api/orders');
       if (turn.show()) {
         setOrders((current) => mergeOrders(current ?? [], fresh));
+        setCursor((current) => oldestFinished(fresh, current));
         loaded.current = true;
       }
       if (turn.latest()) setError(null);
@@ -57,21 +59,13 @@ export function useOrders() {
   }, [socket, load]);
 
   const loadOlder = useCallback(async () => {
-    const oldest = (orders ?? [])
-      .filter((order) => order.status !== 'open' && order.status !== 'partially_filled')
-      .reduce<Order | null>(
-        (last, order) =>
-          !last || order.createdAt < last.createdAt || (order.createdAt === last.createdAt && order.id < last.id)
-            ? order
-            : last,
-        null,
-      );
-    if (!oldest) return;
-    const query = new URLSearchParams({ before: oldest.createdAt, beforeId: oldest.id });
+    if (!cursor) return;
+    const query = new URLSearchParams({ before: cursor.createdAt, beforeId: cursor.id });
     const older = await api<Order[]>(`/api/orders/history?${query}`);
     setOrders((current) => mergeOrders(current ?? [], older));
+    setCursor((current) => oldestFinished(older, current));
     if (older.length === 0) setOlderDone(true);
-  }, [orders]);
+  }, [cursor]);
 
-  return { orders, error, reload: load, loadOlder, olderDone };
+  return { orders, error, reload: load, loadOlder, olderDone: olderDone || cursor === null };
 }

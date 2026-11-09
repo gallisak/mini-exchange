@@ -25,6 +25,20 @@ export function laterOrder(a: Order, b: Order): Order {
   return a.status === 'open' && b.status === 'partially_filled' ? b : a;
 }
 
+export interface HistoryCursor {
+  createdAt: string;
+  id: string;
+}
+
+export function oldestFinished(answer: Order[], current: HistoryCursor | null): HistoryCursor | null {
+  return answer.reduce<HistoryCursor | null>((oldest, order) => {
+    if (!FINAL.has(order.status)) return oldest;
+    const older =
+      !oldest || order.createdAt < oldest.createdAt || (order.createdAt === oldest.createdAt && order.id < oldest.id);
+    return older ? { createdAt: order.createdAt, id: order.id } : oldest;
+  }, current);
+}
+
 export function mergeOrders(current: Order[], incoming: Order[]): Order[] {
   const byId = new Map(current.map((order) => [order.id, order]));
   for (const order of incoming) {

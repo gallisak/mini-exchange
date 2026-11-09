@@ -27,7 +27,7 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
   private readonly owned = new Map<string, Lease>();
   private acquireTimer?: NodeJS.Timeout;
   private renewTimer?: NodeJS.Timeout;
-  private acquiring?: Promise<void>;
+  private readonly acquiring = new Map<string, Promise<void>>();
   private readonly renewing = new Set<string>();
   private stopped = false;
 
@@ -54,7 +54,7 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
     this.stopped = true;
     clearInterval(this.acquireTimer);
     clearInterval(this.renewTimer);
-    await this.acquiring;
+    await Promise.all(this.acquiring.values());
     for (const instrument of [...this.owned.keys()]) {
       await this.engine.stopInstrument(instrument);
       this.owned.delete(instrument);
@@ -67,13 +67,8 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
   }
 
   private acquireTick(): Promise<void> {
-    if (this.acquiring || this.stopped) return Promise.resolve();
-    this.acquiring = this.acquireFree()
-      .catch((error: Error) => this.logger.error(`Acquiring instruments failed: ${error.message}`))
-      .finally(() => {
-        this.acquiring = undefined;
-      });
-    return this.acquiring;
+    if (this.stopped) return Promise.resolve();
+    return this.acquireFree();
   }
 
   private renewTick(): void {
@@ -95,13 +90,14 @@ export class InstrumentOwnershipService implements OnApplicationBootstrap, OnMod
   }
 
   private async acquireFree(): Promise<void> {
-    await Promise.all(
-      INSTRUMENTS.map((instrument) =>
-        this.acquireOne(instrument).catch((error: Error) =>
-          this.logger.error(`Acquiring ${instrument} failed: ${error.message}`),
-        ),
-      ),
-    );
+    const started = INSTRUMENTS.filter((instrument) => !this.acquiring.has(instrument)).map((instrument) => {
+      const attempt = this.acquireOne(instrument)
+        .catch((error: Error) => this.logger.error(`Acquiring ${instrument} failed: ${error.message}`))
+        .finally(() => this.acquiring.delete(instrument));
+      this.acquiring.set(instrument, attempt);
+      return attempt;
+    });
+    await Promise.all(started);
   }
 
   private async acquireOne(instrument: string): Promise<void> {

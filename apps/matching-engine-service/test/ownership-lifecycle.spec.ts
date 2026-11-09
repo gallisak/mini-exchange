@@ -107,6 +107,26 @@ describe('instrument ownership lifecycle', () => {
     expect(calls.started.sort()).toEqual(['ABC', 'DEF', 'XYZ']);
   });
 
+  it('takes over an instrument that is freed while another one is still loading', async () => {
+    let defFreed = false;
+    const { service, calls } = ownership({
+      acquire: async (key) => (key.endsWith(':ABC') || (key.endsWith(':DEF') && defFreed) ? 1n : null),
+      startDelayMs: 0,
+      start: (instrument) => sleep(instrument === 'ABC' ? 1_500 : 0),
+    });
+
+    const booting = service.onApplicationBootstrap();
+    await sleep(100);
+    defFreed = true;
+    await sleep(300);
+    const startedMeanwhile = [...calls.started];
+    await booting;
+    await service.onModuleDestroy();
+
+    expect(startedMeanwhile).toEqual(['DEF']);
+    expect(calls.started).toEqual(['DEF', 'ABC']);
+  });
+
   it('renews each lease on its own, so a slow renewal of one instrument lets no other lease lapse', async () => {
     const { service, leases } = ownership({
       acquire: async () => 1n,

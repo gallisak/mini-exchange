@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { laterOrder, mergeOrders, mergeTrades, newestSeq, skipsTrades } from './feeds';
+import { laterOrder, mergeOrders, mergeTrades, newestSeq, oldestFinished, skipsTrades } from './feeds';
 import { Order, Trade } from './types';
 
 const trade = (seq: number): Trade => ({
@@ -21,6 +21,37 @@ const order = (overrides: Partial<Order>): Order => ({
   status: 'open',
   createdAt: '2026-11-05T10:00:00.000Z',
   ...overrides,
+});
+
+describe('where older order history is asked from', () => {
+  const longAgo = '2025-11-01T10:00:00.000Z';
+
+  it('takes the oldest finished order the server sent, never an order that was active then and finished later', () => {
+    const answer = [
+      order({ id: 'old', status: 'open', createdAt: longAgo }),
+      order({ id: 'b', status: 'filled', createdAt: '2026-11-05T10:00:00.000Z' }),
+      order({ id: 'c', status: 'cancelled', createdAt: '2026-11-04T10:00:00.000Z' }),
+    ];
+    const shown = mergeOrders(answer, [order({ id: 'old', status: 'cancelled', createdAt: longAgo })]);
+
+    expect(shown.find((o) => o.id === 'old')?.status).toBe('cancelled');
+    expect(oldestFinished(answer, null)).toEqual({ id: 'c', createdAt: '2026-11-04T10:00:00.000Z' });
+  });
+
+  it('only moves back as older pages arrive, and breaks a tie in time by id as the server does', () => {
+    const cursor = { id: 'c', createdAt: '2026-11-04T10:00:00.000Z' };
+
+    expect(oldestFinished([order({ id: 'd', status: 'filled', createdAt: '2026-11-06T10:00:00.000Z' })], cursor)).toEqual(cursor);
+    expect(oldestFinished([order({ id: 'a', status: 'filled', createdAt: cursor.createdAt })], cursor)).toEqual({
+      id: 'a',
+      createdAt: cursor.createdAt,
+    });
+    expect(oldestFinished([], cursor)).toEqual(cursor);
+  });
+
+  it('knows of no older history when the server sent no finished orders', () => {
+    expect(oldestFinished([order({ status: 'open' }), order({ id: 'o2', status: 'partially_filled' })], null)).toBeNull();
+  });
 });
 
 describe('recent trades feed', () => {
