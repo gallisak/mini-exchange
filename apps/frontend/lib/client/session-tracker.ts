@@ -85,7 +85,9 @@ export function trackSession({ remembered, read, pin, show, settled, now, wait }
       present(NOBODY);
     },
     refused(startedAt: number | undefined) {
-      if (answeredForCurrentSession(startedAt, signedInAt)) apply(NOBODY);
+      if (!answeredForCurrentSession(startedAt, signedInAt)) return Promise.resolve();
+      apply(NOBODY);
+      return recheck();
     },
     focused() {
       if (now() - focusCheckedAt < FOCUS_CHECK_EVERY_MS) return Promise.resolve();

@@ -61,13 +61,30 @@ describe('following the session of a tab', () => {
   });
 
   it('takes a refusal of a request sent after the last change as the end of the session', async () => {
-    const { tracker, shown, pass } = tracked([signedInAs('a')]);
+    const { tracker, shown, pass } = tracked([signedInAs('a'), nobody]);
     await tracker.refresh();
     pass(10);
 
-    tracker.refused(1_010);
+    const checking = tracker.refused(1_010);
+    expect(shown.at(-1)).toEqual(nobody);
+    await checking;
 
     expect(shown.at(-1)).toEqual(nobody);
+  });
+
+  it('moves to another sign-in of the browser after a refusal, even when the refusal overtook a check that found it', async () => {
+    const slow = held();
+    const { tracker, read, shown, pass } = tracked([signedInAs('b'), slow.promise, signedInAs('a')]);
+    await tracker.refresh();
+    pass(10);
+
+    const checking = tracker.recheck();
+    const refusing = tracker.refused(1_005);
+    slow.answer(signedInAs('a'));
+    await Promise.all([checking, refusing]);
+
+    expect(read).toHaveBeenCalledTimes(3);
+    expect(shown.at(-1)).toEqual(signedInAs('a'));
   });
 
   it('does not let a first check that is still retrying replace what a recheck found', async () => {

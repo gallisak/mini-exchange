@@ -63,7 +63,7 @@ export function SessionProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     showingSession(rememberedSession());
     void tracker.refresh();
-    const signedOut = (event: Event) => tracker.refused((event as CustomEvent<UnauthorizedDetail>).detail?.startedAt);
+    const signedOut = (event: Event) => void tracker.refused((event as CustomEvent<UnauthorizedDetail>).detail?.startedAt);
     const focused = () => {
       if (document.visibilityState === 'visible') void tracker.focused();
     };

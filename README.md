@@ -149,7 +149,10 @@ tab stops asking about it, unless a newer announcement came in meanwhile.
 A page keeps nothing of the account before it, and `/login` sends someone signed in onward. A session that turns out to be over is cleared only under the names the
 request was sent with, so a late answer for an old session cannot clear a sign-in that replaced it,
 while a dead session is still forgotten at once; the page also ignores refusals of requests sent
-before the latest change of session. A service that refuses an access token just rotated means the
+before the latest change of session. A refusal of the session the page shows sends it to the sign-in
+card at once, and the page then checks whether the browser holds another sign-in, so a tab refused
+in the middle of a sign-in elsewhere moves to it, even when the refusal overtook a check already on
+its way. A service that refuses an access token just rotated means the
 session is over: its cookies are cleared and the new pair is ended, not stored. The attempt id of a rotation is
 an HMAC of the cookies and the browser, so a retry always repeats it, whatever happened in between,
 without keeping anything in memory that other sessions could push out. An order
